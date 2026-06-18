@@ -1,13 +1,73 @@
 ---
-title: Hello World
-description: Your first document
+title: Introduction
+description: RAGSpine is a framework-free backend RAG engine — deterministic dual-channel retrieval and agent orchestration, with anti-fabrication and source provenance as code-enforced invariants.
 ---
 
-Welcome to the docs! You can start writing documents in `/content/docs`.
+**RAGSpine** is a backend RAG engine you _assemble in plain Python_ — not a framework you
+submit to. No Dify, no LangGraph, no graph DSL, no bundled UI. Just a coherent,
+batteries-included library of composable parts — retrieval, agent orchestration, document
+extraction, evaluation, and an HTTP service layer — wired together by ordinary functions and
+typed `Protocol`s. The core imports zero SDKs and runs fully offline with a deterministic
+`MockProvider`.
 
-## What is Next?
+It was built for a demanding use case (executive insight Q&A over financial and operational
+reports) and ships that rigor as **first-class, code-enforced invariants**:
+
+- **Never fabricate.** When the data isn't there, the orchestrator deterministically refuses
+  ("not found") regardless of what the LLM says — anti-fabrication lives in the control flow,
+  not in a prompt you hope the model obeys.
+- **Always cite.** Every answer carries source lineage (document + locator).
+- **Two channels, one router.** A deterministic **structured / numeric** channel answers
+  _"what's the number,"_ a **narrative RAG** channel answers _"why / what happened,"_ and an
+  agent routes each question — or splits a composite one and runs both.
+- **Everything is pluggable.** LLM, embeddings, reranker, OCR, retriever, task queue — all
+  typed `Protocol`s injected at the edges.
+
+## Start here
 
 <Cards>
-  <Card title="Learn more about Next.js" href="https://nextjs.org/docs" />
-  <Card title="Learn more about Fumadocs" href="https://fumadocs.dev" />
+  <Card
+    title="Installation"
+    href="/docs/getting-started/installation"
+    description="pip install rag-spine, the optional extras, and a from-source setup."
+  />
+  <Card
+    title="Quickstart"
+    href="/docs/getting-started/quickstart"
+    description="Run the offline demo, ask a question, and call the Python API in minutes."
+  />
+  <Card
+    title="Dual channel"
+    href="/docs/concepts/dual-channel"
+    description="How the structured numeric and narrative RAG channels split the work."
+  />
+  <Card
+    title="Anti-fabrication"
+    href="/docs/concepts/anti-fabrication"
+    description="The invariant that rewrites an unsupported answer to an honest refusal."
+  />
+  <Card
+    title="Architecture"
+    href="/docs/architecture/overview"
+    description="The request flow, the channels, and the deep domain-grouped layout."
+  />
+  <Card
+    title="Configuration"
+    href="/docs/reference/configuration"
+    description="Environment variables and the CompanyProfile that drives identity."
+  />
+</Cards>
+
+## Explore the domains
+
+The engine is organized by domain — find the file by folder before you read its name. Each
+has a focused guide:
+
+<Cards>
+  <Card title="Extraction" href="/docs/guides/extraction" description="Documents → a frozen StyledGrid IR." />
+  <Card title="Ingestion" href="/docs/guides/ingestion" description="IR / text → stores, idempotently." />
+  <Card title="Storage" href="/docs/guides/storage" description="Fact store + chunk store, full lineage." />
+  <Card title="Retrieval" href="/docs/guides/retrieval" description="Hybrid BM25 + vector + RRF + rerank." />
+  <Card title="Agent" href="/docs/guides/agent" description="Intent, clarification, routing, the guard." />
+  <Card title="Service" href="/docs/guides/service" description="FastAPI app + RQ async ingestion." />
 </Cards>

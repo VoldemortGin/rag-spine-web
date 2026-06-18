@@ -1,0 +1,94 @@
+---
+title: Anti-fabrication
+description: When the structured channel returns no found fact, the orchestrator deterministically rewrites the answer to "not found" — in control flow, not a prompt.
+---
+
+Anti-fabrication is RAGSpine's defining invariant: **the system never invents a number.**
+When the structured channel returns no `found` fact, the orchestrator rewrites the answer
+to an honest "not found" — regardless of what the model produced.
+
+<Callout type="warn">
+  **Guarantee.** On the structured path, the numeric answer is synthesized deterministically from
+  the fact value. If no fact is `found`, the answer is an explicit refusal. The model's prose is
+  never the source of a number.
+</Callout>
+
+## It lives in control flow, not a prompt
+
+The system prompt does tell the model to call `query_metric` and to say "not found" when
+the tool returns `not_found`. But a prompt is a request, not a guarantee — a model can
+ignore it. So RAGSpine does not rely on it. The enforcement is in **code**, in
+`agent/agent.py`:
+
+- `_structured_answer` partitions the tool results. If any are `found`, the answer is
+  built **from the fact values themselves** — `实体 期间 指标（渠道）：值 单位（来源…）` —
+  and the model's free-text answer is discarded entirely on the found path.
+- If nothing is `found` but something is `not_found`, the answer is rewritten by
+  `_not_found_answer`.
+- If a parameter was `unrecognized_param`, it is rewritten by `_unrecognized_answer`.
+
+```python
+# agent/agent.py — _structured_answer (paraphrased shape)
+found = [r for r in tool_results if r.get("status") == "found"]
+if found:
+    # deterministic synthesis from fact values — model prose is NOT used
+    return _render_from_facts(found)
+not_found = [r for r in tool_results if r.get("status") == "not_found"]
+if not_found:
+    return _not_found_answer(not_found[0]), []     # forced refusal
+unrecognized = [r for r in tool_results if r.get("status") == "unrecognized_param"]
+if unrecognized:
+    return _unrecognized_answer(unrecognized[0]), []
+```
+
+<Callout type="info">
+  Discarding model prose on the **found** path is itself an anti-fabrication measure: a live LLM
+  could otherwise smuggle an extra fabricated figure into its prose alongside the real one. The
+  found answer is rendered from the fact value only. (Regression test:
+  `test_found_path_discards_fabricated_extra_number`.)
+</Callout>
+
+## Honest-refusal example
+
+Ask for a value the data doesn't have, and you get a refusal — never a guess:
+
+```bash
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db \
+  "中国内地FY2025的REVENUE是多少"
+```
+
+```text
+查不到：REVENUE / ACME_CN / 2025（渠道 TOTAL）未在事实表中找到。
+为避免误导，不提供任何推测数字；可尝试调整期间或实体后重问。
+```
+
+Compare with a value that **is** present — the answer carries the deterministic number
+and its lineage:
+
+```text
+ACME_CN FY2024 REVENUE：1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```
+
+## Per-path semantics (not a single switch)
+
+The guard is applied differently on each path, on purpose:
+
+| Path                                         | Mechanism                                                              | Trusts model prose?       |
+| -------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
+| **structured** (`_structured_answer`)        | found → render from fact value; no-found → forced refusal              | No                        |
+| **multi-sub-task** (`_multi_subtask_answer`) | each sub-task executed deterministically; never calls the LLM          | N/A                       |
+| **narrative** (`_run_narrative`)             | trusts synthesis but **forces source citation**; no found-fact rewrite | Yes, with forced citation |
+
+## How a request signals that the guard fired
+
+The privacy-aware trace (see [Provenance](/docs/concepts/provenance) and
+`common/observability`) records a boolean `fabrication_guard_triggered` — true when there
+were tool results but **none** were `found` (i.e. the request fell through to the
+`not_found` / `unrecognized` refusal). It records the flag, never the answer text or the
+fact value.
+
+<Callout type="warn">
+  Provider failure degrades honestly too. If the LLM call raises a `ProviderError` (network / API /
+  timeout), the agent returns a fixed degrade message that contains **no number and no guess** — it
+  never fabricates to fill the gap.
+</Callout>

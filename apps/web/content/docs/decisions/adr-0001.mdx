@@ -1,0 +1,32 @@
+---
+title: 'ADR 0001: Deterministic dual-channel over a single LLM path'
+description: Use two deterministic channels (structured numeric + narrative RAG) with the LLM confined to synthesis, never to inventing facts.
+---
+
+> Status: **accepted** · Date: 2026-06-17
+
+ADRs are immutable historical records — exempt from drift tracking (no `covers`).
+To reverse this decision, add a new ADR that supersedes it rather than editing
+this file.
+
+<Callout type="warn" title="Source record is a skeleton">
+  In the repository this ADR exists as a section outline whose prose still lives in `TODO`
+  placeholders. The intended content of each section, transcribed faithfully from those
+  placeholders, is shown below.
+</Callout>
+
+## Context
+
+> _To document:_ why a framework-free, deterministic design instead of
+> Dify/LangGraph; the requirement that anti-fabrication and provenance be
+> code-enforced.
+
+## Decision
+
+> _To document:_ a structured numeric channel + a narrative RAG channel, each
+> deterministic; the LLM confined to synthesis, never to inventing facts.
+
+## Consequences
+
+> _To document:_ the trade-offs — more code/invariants to own vs. auditable,
+> offline-capable, fabrication-resistant behavior.

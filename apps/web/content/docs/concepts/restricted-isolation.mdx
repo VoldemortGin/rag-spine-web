@@ -1,0 +1,97 @@
+---
+title: RESTRICTED Isolation
+description: Sensitivity tiers, and how RESTRICTED content is filtered at two independent exits before it can ever reach an LLM prompt.
+---
+
+Some content must never leave the domain — board-rating notes, executive committee
+minutes. RAGSpine models this with a **sensitivity tier** on every chunk, and enforces
+that `RESTRICTED` content is stripped at **two** independent exits before it can reach a
+prompt.
+
+<Callout type="warn">
+  **Guarantee.** Sensitivity-`RESTRICTED` content is filtered at two exits — `retrieval/link` and
+  `retrieval/rerank` — so it can never enter an LLM prompt. Both filters must stay; either alone is
+  insufficient.
+</Callout>
+
+## Sensitivity tiers
+
+Sensitivity is a string column on each chunk (`retrieval/chunking/chunk_store.py`,
+defaulting to `INTERNAL`). Classification is **deterministic** and config-driven
+(`common/sensitivity.py`, `classify_sensitivity` + `SensitivityPolicy`):
+
+<Steps>
+  <Step>If the filename / path matches any `restricted_filename_patterns` → `RESTRICTED`.</Step>
+  <Step>Else if the body text matches any `restricted_keyword` → `RESTRICTED`.</Step>
+  <Step>Else if the strict `escalate_unknown_to_restricted` switch is on → `RESTRICTED`.</Step>
+  <Step>Else the policy's `default_level` (`INTERNAL` by default).</Step>
+</Steps>
+
+<Callout type="info">
+  This is **fail-safe by signal**: an unlabeled but signal-bearing document escalates to
+  `RESTRICTED`. A blanket "everything unknown → RESTRICTED" would hide ordinary reports and break
+  retrieval, so it is an opt-in strict switch, off by default. The policy is loaded from the
+  `[sensitivity]` config section — no company-specific words are hardcoded.
+</Callout>
+
+## Two exits, not one
+
+The narrative channel touches `RESTRICTED` content in two places that lead toward an LLM,
+and each one filters independently.
+
+<Tabs items={["Exit 1 — retrieval/link", "Exit 2 — retrieval/rerank"]}>
+  <Tab value="Exit 1 — retrieval/link">
+    The adapter that wires retrieval into the agent (`retrieval/link/narrative_link.py`).
+    The agent feeds retrieved snippet **text** into the LLM synthesis prompt, so the
+    adapter drops any `RESTRICTED` chunk at the exit, before snippets are handed back:
+
+    ```python
+    return [
+        _to_snippet(r)
+        for r in results
+        if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+    ]
+    ```
+
+    The match is case-insensitive. Without this filter, a `RESTRICTED` snippet's text
+    would land directly in the synthesis prompt.
+
+  </Tab>
+  <Tab value="Exit 2 — retrieval/rerank">
+    The listwise reranker (`retrieval/rerank/listwise_rerank.py`). Reranking sends
+    candidate **text** to an LLM judge, so `RESTRICTED` candidates are **never put into
+    the judge prompt**:
+
+    - Only the non-RESTRICTED subset is sent to the judge.
+    - `RESTRICTED` chunks are held in place at their original RRF position.
+    - If *every* candidate is `RESTRICTED`, the judge is not called at all and the result
+      degrades to pure RRF order.
+
+    This is "strategy B": it keeps rerank quality for the non-sensitive subset while
+    guaranteeing zero `RESTRICTED` text reaches the judge (a frozen test pins this).
+
+  </Tab>
+</Tabs>
+
+## Why both are required
+
+The two exits guard two _different_ LLM-facing surfaces: the rerank judge prompt and the
+synthesis prompt. A chunk could survive one path and still be heading for the other.
+
+<Callout type="warn">
+  Defense in depth: the rerank filter protects the judge; the link filter protects synthesis. Both
+  invariants are listed in `retrieval/CLAUDE.md` as "both must stay", and the upstream classifier's
+  fail-safe escalation is the first line — if a `RESTRICTED` document were mislabeled `INTERNAL` at
+  ingestion, both exit filters would wave it through. Mislabeling is leakage; the deterministic
+  classifier prevents it.
+</Callout>
+
+## The agent's earliest guard: out-of-scope entities
+
+Separately, the deterministic security gate refuses **out-of-scope / competitor entity**
+questions _before any channel, tool, retriever, or LLM call runs_ (`agent/agent.py`:
+`CLARIFY_OUT_OF_SCOPE_ENTITY` returns first). The gate is intentionally
+**never-pluggable**: it re-derives competitor/external scope from the raw question and
+masks matched aliases with equal-length spaces, so swapping in a different (even
+LLM-based) intent parser cannot defeat it. The system never emits a home-company number
+in answer to a question about an external entity.

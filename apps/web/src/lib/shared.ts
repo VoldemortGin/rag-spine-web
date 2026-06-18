@@ -1,11 +1,11 @@
-export const appName = 'My App';
+export const appName = 'RAGSpine';
 export const docsRoute = '/docs';
 export const docsImageRoute = '/og/docs';
 export const docsContentRoute = '/llms.mdx/docs';
 
-// fill this with your actual GitHub info, for example:
+// Source repository for the RAGSpine engine (the library this site documents).
 export const gitConfig = {
-  user: 'fuma-nama',
-  repo: 'fumadocs',
+  user: 'VoldemortGin',
+  repo: 'ragspine',
   branch: 'main',
 };

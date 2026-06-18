@@ -1,0 +1,306 @@
+---
+title: Extraction
+description: Documents → a frozen StyledGrid IR. Style- and color-aware xlsx/pptx/pdf extractors, per-page PDF routing, a versioned color-semantics registry, and dual-channel cross-checking into a review queue.
+---
+
+The **extraction** domain turns office documents into a frozen, style-aware intermediate
+representation (the **StyledGrid IR**) — not "just text splitting." Every extractor is
+deterministic-first, color- and style-aware, and either produces facts directly or emits a
+`StyledGrid` for downstream ingestion. Heavy parsers (Docling, PaddleOCR) sit behind
+`Protocol` seams and are lazy-imported, so the core runs offline.
+
+<Callout type="info">
+  The package lives at `src/ragspine/extraction/`. Its per-domain contract is
+  `src/ragspine/extraction/CLAUDE.md`. The IR (`ir.py`) is described in code as *the most stable
+  interface in the whole project* — extractors converge on it, and everything downstream (color
+  semantics, ingestion, review, eval) consumes it.
+</Callout>
+
+## Layout
+
+<Files>
+  <Folder name="extraction" defaultOpen>
+    <File name="ir.py — StyledGrid IR (StyledCell / StyledGrid)" />
+    <Folder name="extractors">
+      <File name="xlsx_extractor.py — deterministic Facts" />
+      <File name="xlsx_styled_extractor.py — StyledGrid (theme/tint RGB)" />
+      <File name="pptx_extractor.py — deterministic Facts (MVP)" />
+      <File name="pptx_styled_extractor.py — StyledGrid + NoteFragment" />
+      <File name="pdf_digital_extractor.py — GridExtractor seam (Docling)" />
+      <File name="pdf_scanned_extractor.py — OcrBackend seam (OCR/VLM)" />
+    </Folder>
+    <Folder name="color">
+      <File name="color_semantics.py — clustering, legend, MappingRegistry" />
+    </Folder>
+    <Folder name="routing">
+      <File name="pdf_router.py — per-page triage → RoutingDecision" />
+    </Folder>
+    <Folder name="verification">
+      <File name="dual_channel_verifier.py — cross-check → review queue" />
+    </Folder>
+  </Folder>
+</Files>
+
+## The StyledGrid IR
+
+`ir.py` defines two dataclasses. A `StyledGrid` is one worksheet or one table page; its
+`cells` are a sparse map from `cell_ref` to `StyledCell`.
+
+### `StyledCell`
+
+A single style-aware cell.
+
+<TypeTable
+  type={{
+    value: { type: 'object', description: 'The cell value.' },
+    cell_ref: { type: 'str', description: "Excel-style 'C4' or grid 'R{row}C{col}'." },
+    resolved_rgb: {
+      type: 'str | None',
+      default: 'None',
+      description: "Fill color as 'RRGGBB', or None.",
+    },
+    number_format: { type: 'str', default: '"General"', description: 'OOXML number format.' },
+    bold: { type: 'bool', default: 'False' },
+    is_merged_origin: { type: 'bool', default: 'False' },
+    merge_span: { type: 'tuple[int, int] | None', default: 'None' },
+    cf_affected: {
+      type: 'bool',
+      default: 'False',
+      description: 'Inside a conditional-formatting region — color is unreliable.',
+    },
+    confidence: {
+      type: 'float | None',
+      default: 'None',
+      description: 'OCR-channel only; None for deterministic extraction.',
+    },
+  }}
+/>
+
+`StyledCell.rgb_tag_key()` returns the color-clustering key: `None` when `cf_affected`,
+otherwise `resolved_rgb`. Cells inside conditional-formatting regions are deliberately
+excluded from color semantics because their fill cannot be trusted.
+
+### `StyledGrid`
+
+<TypeTable
+  type={{
+    sheet: {
+      type: 'str',
+      description: "Worksheet title, or 'page{N}_table{M}' / 'slide{N}_table{M}'.",
+    },
+    source_doc_id: { type: 'str' },
+    source_file_hash: {
+      type: 'str | None',
+      default: 'None',
+      description: 'sha256 of the source file — version lineage.',
+    },
+    cells: {
+      type: 'dict[str, StyledCell]',
+      default: '{}',
+      description: 'Sparse map cell_ref → StyledCell.',
+    },
+    warnings: { type: 'list[str]', default: '[]' },
+    n_rows: { type: 'int', default: '0' },
+    n_cols: { type: 'int', default: '0' },
+  }}
+/>
+
+Key methods: `get(cell_ref)`, `iter_cells()`, `add_warning(message)`, and
+`cells_by_rgb()` — which groups reliably-colored cells by `resolved_rgb`, skipping
+`None` and `cf_affected` cells. See the [StyledGrid IR concept](/docs/concepts/styled-grid).
+
+## Extractors
+
+Two extraction targets exist by design:
+
+- **Fact extractors** (`xlsx_extractor`, `pptx_extractor`) produce
+  [`Fact`](/docs/guides/storage#the-fact-dataclass) objects directly for known schemas
+  (e.g. a 5-year summary table) — zero hallucination, zero LLM.
+- **Styled extractors** (`*_styled_extractor`, `pdf_*`) produce `StyledGrid` IR for the
+  general ingestion path, preserving color and style.
+
+<Tabs items={["xlsx", "pptx", "pdf (digital)", "pdf (scanned)"]}>
+<Tab value="xlsx">
+
+`xlsx_styled_extractor.extract_grids(path)` returns one `StyledGrid` per worksheet. It
+resolves OOXML **theme + tint** to a real `RRGGBB` value (`resolve_theme_color`), expands
+merged cells, preserves number formats, and detects conditional-formatting regions —
+marking those cells `cf_affected=True` and adding a grid warning so the color layer skips
+them. `compute_file_hash(path)` returns the sha256 used for version lineage (and is reused
+by the PDF router).
+
+The simpler `xlsx_extractor.extract_facts(path) -> tuple[list[Fact], list[str]]` maps a
+known summary schema straight to `Fact` objects (metric names down column A, period headers
+across row 1), defaulting `channel="TOTAL"` and `unit="USD_M"`.
+
+```python
+from ragspine.extraction.extractors.xlsx_styled_extractor import extract_grids
+
+grids = extract_grids("report.xlsx")        # list[StyledGrid], one per sheet
+for cell in grids[0].iter_cells():
+    print(cell.cell_ref, cell.value, cell.resolved_rgb)
+```
+
+</Tab>
+<Tab value="pptx">
+
+Two coexisting modules. `pptx_extractor.extract_facts(path)` reads native tables and
+**native chart data** (from chart XML, never images) into `Fact` objects — zero OCR, zero
+LLM. The newer `pptx_styled_extractor` adds two paths:
+
+- `extract_grids(path)` — native tables → `StyledGrid` (sheet `'slide{N}_table{M}'`,
+  cell_ref `'R{row}C{col}'`), resolving fill color via the slide theme color scheme.
+- `extract_note_fragments(path) -> list[NoteFragment]` — textbox + speaker-notes fragments
+  that **contain a digit**, sorted by slide, for the narrative layer.
+
+A `NoteFragment` carries `slide_no`, `source_kind` (`"textbox"` / `"notes"`), `locator`
+(e.g. `'slide2/notes'`), `text`, and `glossary_hits`. Its stamp constant is
+`EXTRACTOR_VERSION = "pptx_styled_v0"`.
+
+</Tab>
+<Tab value="pdf (digital)">
+
+`pdf_digital_extractor.extract_grids(path)` extracts every table of a _digital_ PDF (one
+`StyledGrid` per table) by wrapping **Docling** — which is lazy-imported inside the function
+body, never at module top. `resolved_rgb` is always `None` for this channel. Scanned,
+unreadable, or table-less PDFs return `[]` with no exception and no OCR. Docling is
+configured with `do_ocr=False`, `do_table_structure=True`.
+
+This module also defines the `GridExtractor` seam — see [below](#protocol-seams).
+
+</Tab>
+<Tab value="pdf (scanned)">
+
+`pdf_scanned_extractor.extract_grids(path, backend, *, min_confidence=0.85, queue=None)`
+renders pages to PNG (`pypdfium2`, `RENDER_DPI = 200`), calls the injected
+`OcrBackend.recognize`, and builds one `StyledGrid` per recognized table. Low-confidence
+cells (`confidence < min_confidence`) still enter the grid but add a grid warning, and —
+if a `queue` is supplied — are enqueued for review with reason `"low_confidence_ocr"` and
+`priority=30`.
+
+The neutral result types are `OcrCell` (`row`, `col`, `text`, `confidence`), `OcrTable`,
+and `OcrPageResult`. The real backend `PaddleOcrVlBackend` (PaddleOCR `PPStructureV3`,
+GPU) sits behind a `gpu` pytest marker; the module-agnostic logic is tested offline with a
+fake backend. Stamp: `EXTRACTOR_VERSION = "pdf_scanned_paddleocrvl_v0"`.
+
+</Tab>
+</Tabs>
+
+## PDF routing — per-page triage
+
+Before extraction, a PDF is triaged page by page. `routing/pdf_router.route(path)` returns
+a `RoutingDecision` carrying the file `verdict`, a `PageInfo` per page, and — for _mixed_
+files — a `channel_plan` mapping each page number to a pipeline name.
+
+`classify_page(page, page_no)` derives a per-page `kind` from two signals — extractable
+text char count and image coverage — against `TEXT_MIN_CHARS = 50` and
+`IMG_COVER_SCAN = 0.55`:
+
+| chars  | image cover | kind       |
+| ------ | ----------- | ---------- |
+| `≥ 50` | `< 0.55`    | `digital`  |
+| `≥ 50` | `≥ 0.55`    | `ocr_scan` |
+| `< 50` | `≥ 0.55`    | `img_scan` |
+| `< 50` | `< 0.55`    | `low_text` |
+
+`route()` aggregates pages into a file verdict (`digital` / `scanned` / `ocr_scan` /
+`mixed` / `unreadable`) at a 90% threshold, reads the producer/creator metadata into
+`origin_meta`, and sets `ask_for_pptx=True` when the producer looks like a PowerPoint /
+Keynote / Impress export (so a caller can request the native source instead). Encrypted or
+corrupt files return `verdict="unreadable"` with `error` set — never an exception.
+
+<Callout type="warn">
+  A page routed `digital` goes to the `digital_extractor` pipeline; every other kind (scan / ocr /
+  low-text) goes to the `scanned_extractor`. The router only *decides* — the matching extractor
+  still does the work.
+</Callout>
+
+## Color semantics — clustering, legend, versioned registry
+
+`color/color_semantics.py` is the **L2 controlled-inference** layer: it maps cell fill
+colors to business meaning, but only after a human confirms the mapping. The pipeline:
+
+<Steps>
+<Step>
+**Cluster** — `cluster_colors(grid) -> list[ColorCluster]` groups reliably-colored cells
+by RGB, sorted by `(-count, rgb)`.
+</Step>
+<Step>
+**Detect legend** — `detect_legend(grid) -> list[LegendEntry]` finds a color-block cell
+adjacent to a text label and produces color→meaning *drafts*.
+</Step>
+<Step>
+**Confirm** — drafts enter the `MappingRegistry` and stay `status="draft"` until an SME
+confirms them. Confirming a new version supersedes (never deletes) the prior active one.
+</Step>
+<Step>
+**Apply** — `apply_mapping(grid, mapping) -> dict[str, dict[str, str]]` returns
+`{cell_ref: {tag_key: tag_value}}`. If the mapping is **not** `active`, it returns `{}` and
+adds a grid warning — unconfirmed mappings can never silently tag a fact.
+</Step>
+</Steps>
+
+`MappingRegistry` is an independent sqlite store (`color_mapping` table, PK
+`(scope, version)`). Its API: `register_draft(mapping)` (auto-increments version per scope),
+`confirm(scope, version, actor, note=None)`, `reject(...)`, and `get_active(scope)`.
+Facts reference a confirmed mapping by its `mapping_version`, so the lineage survives
+revisions. See [color semantics](/docs/concepts/color-semantics).
+
+## Dual-channel verification
+
+`verification/dual_channel_verifier.verify(facts_a, facts_b, queue=None, tolerance=0.0)`
+cross-checks two independent extractions of the same table (the docstring example: Docling
+table parsing vs. text-layer reconstruction). Each side is a list of `ChannelFact`, aligned
+by `dim_key` = `(metric_code, entity, period_type, period, channel)`:
+
+- **Agree** (same key, values within `tolerance`) → auto-passed.
+- **Conflict** (same key, values differ) → enqueued with reason `"dual_channel_conflict"`,
+  `priority=10`.
+- **Single-channel only** (key on one side) → enqueued with reason
+  `"single_channel_only"`, `priority=50`.
+
+It returns a `VerificationResult` (`agreed`, `conflicts`, `only_in_a`, `only_in_b`,
+`n_auto_passed`, `n_enqueued`). With `queue=None` it classifies only and enqueues nothing.
+Conflicts review sooner than single-only because the priority number is lower. This pure
+logic has no Docling dependency.
+
+## Protocol seams
+
+Heavy dependencies are injected through `@runtime_checkable` `Protocol`s so a parser can be
+swapped without touching the ingest call site, and the path is testable offline with a fake.
+
+<Cards>
+  <Card title="GridExtractor" href="/docs/concepts/provenance">
+    `pdf_digital_extractor`. Has `version: str` + `extract_grids(path)`. Default impl
+    `DoclingGridExtractor` with `version = "pdf_digital@1"` — the value stamped into each
+    fact's `extractor_version`. Bump it when the digital parser's output changes.
+  </Card>
+  <Card title="OcrBackend">
+    `pdf_scanned_extractor`. `recognize(image_bytes, page_no) -> OcrPageResult`. Default
+    real impl `PaddleOcrVlBackend`; tests inject a fake — no PaddleOCR needed offline.
+  </Card>
+</Cards>
+
+<Callout type="info">
+  **`GridExtractor.version` is part of the contract.** It becomes the `extractor_version` written to
+  fact lineage, keeping a swapped parser (Docling → pdfplumber / camelot / …) distinguishable in
+  provenance.
+</Callout>
+
+## Invariants this domain upholds
+
+- **Deterministic-first, zero hallucination** — native tables and chart data are read
+  structurally; OCR/LLM is a fallback behind a seam, never the default.
+- **Color trust** — `cf_affected` cells and unconfirmed mappings never produce silent tags.
+- **Version lineage** — `source_file_hash` + `extractor_version` (+ `mapping_version`)
+  travel with every extracted value.
+- **Pluggability** — heavy parsers are lazy-imported `Protocol` seams; the core runs offline.
+
+## Related
+
+<Cards>
+  <Card title="Ingestion guide" href="/docs/guides/ingestion" />
+  <Card title="Storage guide — the Fact dataclass" href="/docs/guides/storage" />
+  <Card title="Concept: StyledGrid IR" href="/docs/concepts/styled-grid" />
+  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+</Cards>

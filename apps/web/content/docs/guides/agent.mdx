@@ -1,0 +1,278 @@
+---
+title: Agent
+description: The orchestration layer — four-slot intent parsing, the clarification gateway, a deterministic security gate, three-path routing, the tool-use loop, the LLM provider seam, and the per-path anti-fabrication guard.
+---
+
+The `agent` domain (`src/ragspine/agent/`) is RAGSpine's orchestrator. Its module docstring
+sums up the flow it owns:
+
+> 意图解析 → 澄清网关 → 安全门 → 三路分流 → tool-use 循环 → 合成回答
+>
+> _(intent parse → clarification gateway → security gate → three-path routing → tool-use loop → synthesized answer)_
+
+It has exactly one public entry point — `answer_question` — and it is where the
+**anti-fabrication** guard lives. See [Anti-fabrication](/docs/concepts/anti-fabrication)
+for the concept and [Dual-channel](/docs/concepts/dual-channel) for the routing model.
+
+## Layout
+
+<Files>
+  <Folder name="agent" defaultOpen>
+    <File name="agent.py" />
+    <File name="intent.py" />
+    <File name="llm_provider.py" />
+    <File name="query_tools.py" />
+    <File name="security_gate.py" />
+  </Folder>
+</Files>
+
+## intent — four-slot parsing
+
+`intent.py` parses a raw question into a `ParsedIntent` dataclass behind the `IntentParser`
+Protocol. The default `RuleIntentParser` is zero-LLM, config-driven, and delegates to the
+module-level `parse_intent(question, reference_date=None)`.
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: 'Normalized metric code (e.g. REVENUE); None if absent.',
+    },
+    entity: {
+      type: 'string | null',
+      description: 'Normalized entity code (e.g. ACME_CN); None if absent.',
+    },
+    period: { type: '(period_type, value) | null', description: 'e.g. ("FY", "2024").' },
+    channel: { type: 'string', description: 'Defaults to "TOTAL" (e.g. AGENCY / BANCA / TOTAL).' },
+  }}
+/>
+
+`ParsedIntent` also carries `route`, `raw_question`, the multi-value slots `metrics` /
+`entities` / `periods` (for explicitly listed composites), and `external_entity`. Routing
+constants: `ROUTE_STRUCTURED = "structured"`, `ROUTE_NARRATIVE = "narrative"`,
+`ROUTE_COMPOSITE = "composite"`. A recognized metric plus a narrative cue routes to
+`composite`; a numeric cue routes to `structured`; otherwise `narrative`.
+
+<Callout type="info">
+  The `IntentParser` Protocol requires implementations to fill `raw_question`. That is what lets the
+  security gate re-screen the *raw* question independently of any parser-produced fields — so
+  swapping in an LLM parser can't defeat the scope check.
+</Callout>
+
+## intent — the clarification gateway
+
+`clarify_scope(intent, reference_date=None) -> ClarificationResult` runs before any channel.
+Its four modes:
+
+| Mode constant                     | Value                       | When                                                            |
+| --------------------------------- | --------------------------- | --------------------------------------------------------------- |
+| `CLARIFY_OUT_OF_SCOPE_ENTITY`     | `"out_of_scope_entity"`     | Security gate hit on the raw question — refuse first.           |
+| `CLARIFY_ASK_FIRST`               | `"ask_first"`               | Missing **metric** — guessing it would be a substantive error.  |
+| `CLARIFY_ANSWER_WITH_ASSUMPTIONS` | `"answer_with_assumptions"` | Missing **entity / period** — backfill, surface the assumption. |
+| `CLARIFY_NONE`                    | `"none"`                    | Complete, or a narrative route.                                 |
+
+The asymmetry is deliberate: a missing metric **asks first** (with `narrowing_options` =
+the supported metrics), while a missing entity or period is **answered with surfaced
+assumptions** — defaulting to the home entity (`profile.home_entity_code`) and the latest
+complete fiscal year (`("FY", str(ref.year - 1))`), exposing both in an `assumption_note`,
+and offering one-click narrowing. Out-of-scope refusal is checked **first**, before the
+narrative early-return and the metric check, by calling the security gate on
+`intent.raw_question` — it deliberately does not trust `intent.external_entity`.
+
+`ClarificationResult` fields: `mode`, `assumed_slots`, `assumption_note`,
+`narrowing_options`, `question`.
+
+## security_gate — deterministic, never pluggable
+
+`security_gate.py` houses `SecurityGate(external_entities, home_company_name)`. It is
+deterministic, calls no LLM, and hardcodes no company — the competitor list and home name
+come from the `DomainProfile`.
+
+- `detect(text) -> SecurityScreen` — longest-match external/competitor alias detection. It
+  matches on a whitespace-stripped view (so `"竞 安"` can't bypass it) and **masks** a hit
+  with equal-length spaces so no leaking substring remains (handling the documented
+  `中国 → ACME_CN` collision).
+- `screen(*, raw_question, metric) -> SecurityVerdict` — re-derives scope from the **raw
+  question only**. On a competitor hit it returns `SECURITY_REFUSE_OUT_OF_SCOPE`
+  (`= "out_of_scope_entity"`, deliberately equal to `CLARIFY_OUT_OF_SCOPE_ENTITY`) with a
+  refusal message and an "ask about `home_company_name` instead" narrowing option; otherwise
+  `SECURITY_ALLOW`.
+
+## query_tools — the `query_metric` tri-state
+
+`query_tools.py` defines the structured channel's only fact-producing primitive, the
+`query_metric` function-calling tool. `execute_query_metric(store, metric, entity, period, channel="TOTAL")` normalizes every parameter through the glossary, queries the
+`fact_metric` store, and returns one of exactly **three** statuses — never a guess:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    The exact value exists. Returns `value`, `unit`, the controlled dimension codes, and
+    full lineage under `source` (`{"doc", "locator"}`).
+  </Tab>
+  <Tab value="not_found">
+    Every parameter normalized, but no matching row. Returns
+    `{"status": "not_found", "normalized": {...}}` — no interpolation, no inference.
+  </Tab>
+  <Tab value="unrecognized_param">
+    A parameter could not be normalized to a controlled code (the glossary returned `None`).
+    Returns `{"status": "unrecognized_param", "param": ..., "raw": ...}`.
+  </Tab>
+</Tabs>
+
+Tool schemas are profile-derived (`build_query_metric_tool_anthropic` /
+`build_query_metric_tool_openai`, plus pre-built constants), so entity examples come from
+the active profile — never a hardcoded company.
+
+## llm_provider — the pluggable seam
+
+`llm_provider.py` defines the `LLMProvider` Protocol — a single method:
+
+```python
+class LLMProvider(Protocol):
+    def create_message(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> ProviderResponse: ...
+```
+
+<Cards>
+  <Card
+    title="MockProvider"
+    description="Offline, deterministic, no key or network. First turn emits a query_metric ToolCall; second turn renders found / not_found / unrecognized text deterministically. The core runs entirely on this."
+  ></Card>
+  <Card
+    title="AnthropicProvider"
+    description="Real Claude Messages API. The SDK is lazy-imported inside __init__ (ImportError points you at the [llm] extra). SDK errors are wrapped as ProviderError; timeout/retries are delegated to the SDK."
+  ></Card>
+</Cards>
+
+`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`. There is no `OpenAIProvider` yet — only a
+documented seam (the OpenAI tool schema is already pre-built in `query_tools.py`).
+`ProviderResponse` carries `text`, `tool_calls`, `stop_reason`, `raw_content`, and `usage`;
+`ProviderError` wraps only network/API/timeout errors (program errors propagate).
+
+## agent — the orchestrator and the tool-use loop
+
+`answer_question` is the sole public entry:
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+) -> AgentResult: ...
+```
+
+Its flow: assign a request id → build a privacy-aware trace context → parse the intent
+(default `RuleIntentParser`) → `clarify_scope`. It then early-returns in strict order:
+
+<Steps>
+  <Step>
+    **Out-of-scope** (`CLARIFY_OUT_OF_SCOPE_ENTITY`) → refuse **before any tool, retrieval, or LLM
+    call**.
+  </Step>
+  <Step>**Ask-first** (`CLARIFY_ASK_FIRST`) → return the clarifying question reflexively.</Step>
+  <Step>**Answer-with-assumptions** → backfill the effective question, then route.</Step>
+  <Step>
+    **Route**: narrative → `_run_narrative`; structured/composite → expand sub-tasks and run
+    `_run_tool_loop` (or the no-LLM `_multi_subtask_answer` for explicit multi-value composites);
+    composite additionally appends a narrative section.
+  </Step>
+</Steps>
+
+The tool loop (`_run_tool_loop`) is capped at `MAX_TOOL_ITERATIONS = 5`: it calls
+`provider.create_message`, executes any `query_metric` tool calls, feeds results back as a
+user message, and stops when the model returns no tool calls. On `ProviderError` it
+degrades to fixed, **number-free** text rather than fabricating.
+
+`answer_question` returns an `AgentResult`:
+
+<TypeTable
+  type={{
+    answer: {
+      type: 'str',
+      description: 'The final answer text (or honest refusal / clarifying question).',
+    },
+    route: {
+      type: 'str',
+      description: 'structured | narrative | composite (or a clarification route).',
+    },
+    clarification: {
+      type: 'ClarificationResult | None',
+      description: 'Present when the gateway asked or refused.',
+    },
+    tool_results: {
+      type: 'list[dict]',
+      description: 'Raw query_metric results (found / not_found / unrecognized_param).',
+    },
+    sources: { type: 'list[dict]', description: 'Source lineage for every cited fact / snippet.' },
+  }}
+/>
+
+## The anti-fabrication guard
+
+The "rewrite to not-found regardless of model output" guard lives in `_structured_answer`.
+It partitions the tool results by status and is deliberately **per-path**:
+
+- **Found** → the answer is synthesized **deterministically from the fact value**; the
+  model's prose is discarded (the regression test
+  `test_found_path_discards_fabricated_extra_number` pins this).
+- **No found, some not_found** → an honest refusal ("查不到 … 不提供任何推测数字").
+- **Only unrecognized_param** → names the offending parameter.
+- **Zero tool results** (the model answered without calling the tool) → the model text is
+  returned verbatim.
+
+The multi-sub-task path (`_multi_subtask_answer`) never calls the LLM at all; the narrative
+path (`_run_narrative`) trusts model prose but **force-appends** any cited source document
+the model failed to name. The trace flag `fabrication_guard_triggered` is true when tool
+results exist but none are `found` — i.e. the guard rewrote to a refusal.
+
+<Callout type="warn">
+  Anti-fabrication is enforced in control flow, not in a prompt. The three paths are intentionally
+  **not** unified — see [Anti-fabrication](/docs/concepts/anti-fabrication).
+</Callout>
+
+## Example
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # deterministic value, or an honest "not found"
+print(result.sources)  # [{'doc': ..., 'locator': ...}]
+```
+
+## See also
+
+<Cards>
+  <Card
+    title="Anti-fabrication"
+    href="/docs/concepts/anti-fabrication"
+    description="The control-flow guard and why it is per-path."
+  />
+  <Card
+    title="Dual-channel"
+    href="/docs/concepts/dual-channel"
+    description="How routing splits and merges structured + narrative."
+  />
+  <Card
+    title="Retrieval"
+    href="/docs/guides/retrieval"
+    description="The NarrativeRetriever this orchestrator consumes."
+  />
+  <Card
+    title="Extension points"
+    href="/docs/reference/extension-points"
+    description="LLMProvider, IntentParser, NarrativeRetriever, and the other seams."
+  />
+</Cards>

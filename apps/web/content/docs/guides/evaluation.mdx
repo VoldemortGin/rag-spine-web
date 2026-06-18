@@ -1,0 +1,221 @@
+---
+title: Evaluation
+description: The QA and extraction evaluation harnesses — four-gate QA metrics, per-channel extraction accuracy, and a baseline regression gate that ratchets up and never silently down.
+---
+
+The `eval` domain (`src/ragspine/eval/`) is RAGSpine's evaluation closed loop: two harnesses
+(QA and extraction) that score the engine against version-controlled golden sets, plus a
+**baseline gate** that fails CI on regression. Its guiding invariant:
+
+> The baseline gate **ratchets up, never down** — a regression must fail the gate, never
+> silently lower it. Never weaken a golden or baseline to make a case pass.
+
+## Layout
+
+<Files>
+  <Folder name="eval" defaultOpen>
+    <File name="qa_eval.py" />
+    <File name="extraction_eval.py" />
+  </Folder>
+</Files>
+
+Golden and baseline data live under `data/golden/` (force version-controlled), and the
+extraction ground-truth fixtures under `data/fixtures/`.
+
+## QA evaluation — the four gates
+
+`qa_eval.py` is the Q&A closed-loop harness. The entry point:
+
+```python
+def run_qa_eval(
+    golden_path: str | Path,
+    mode: str = "tool",
+    kb_dir: str | Path | None = None,
+) -> QAEvalReport: ...
+```
+
+It loads and validates the golden set, builds a deterministic synthetic knowledge base
+(`build_eval_kb`, from the module's `_EVAL_FACT_ROWS` + `_EVAL_NARRATIVE_DOCS`), runs every
+case in one of two modes (`EVAL_MODES = ("tool", "agent")`), and returns a four-gate report.
+
+<Cards>
+  <Card
+    title="tool mode"
+    description="Zero-LLM, tool-direct: parse_intent → clarify_scope → execute_query_metric / narrative retrieve. Deterministic."
+  ></Card>
+  <Card
+    title="agent mode"
+    description="Full orchestrator: answer_question with a deterministic MockProvider(reference_date=...)."
+  ></Card>
+</Cards>
+
+Each case (`GoldenCase`: `id`, `question`, `case_type`, `expected`, `tags`,
+`reference_date`) is run into a normalized `CaseOutcome` (route, clarification mode, found
+value/unit/source, refused flag, sources, tool statuses), then scored against the **four
+gates** — kept as four separate pass rates, never merged into one number:
+
+<TypeTable
+  type={{
+    NUMERIC_ACCURACY: {
+      type: '"numeric_accuracy"',
+      description:
+        'Exact match: found_value == expected.value AND found_unit == expected.unit (structured path).',
+    },
+    CITATION_VALIDITY: {
+      type: '"citation_validity"',
+      description:
+        'Right answer + wrong source = fail. The expected source must match and the doc must appear in the answer text.',
+    },
+    REFUSAL_APPROPRIATENESS: {
+      type: '"refusal_appropriateness"',
+      description:
+        'Bidirectional: if expected.refuse, then refused AND found_value is None; otherwise not refused.',
+    },
+    CLARIFICATION_APPROPRIATENESS: {
+      type: '"clarification_appropriateness"',
+      description:
+        'Bidirectional: clarification_mode == expected.clarification (a complete question must not trigger a clarifying question).',
+    },
+  }}
+/>
+
+`GATE_METRICS` is the tuple of all four. A fifth, separate metric tracks fabrication on
+refusal cases:
+
+<Callout type="warn">
+  `FABRICATION = "fabrication"` is computed only on refusal cases via
+  `detect_fabricated_numbers(answer)`: it strips period tokens (whitelisted from the active
+  profile's temporal dimension) and treats any remaining digit as fabrication. The target is **0**.
+  It is deliberately *not* merged into the four gates.
+</Callout>
+
+The report types:
+
+- `GateMetric` — `name`, `total`, `passed`, `pass_rate` (`1.0` if `total == 0`, else
+  `passed / total`), `failures`, `by_tag`.
+- `QAEvalReport` — `mode`, `n_cases`, `metrics: dict[str, GateMetric]`, and a separate
+  `fabrication: GateMetric` (with a `fabrication_count` property). `evaluate(cases, outcomes, mode)` applies all four gate rules per case.
+
+## QA baseline regression gating
+
+`qa_eval.py` also owns the baseline comparison:
+
+- `make_baseline_entry(report) -> dict` → `{"metrics": {name: pass_rate}, "fabrication_count": int, "n_cases": int}`.
+- `compare_to_baseline(report, baseline) -> BaselineComparison` — **fails the gate when any
+  gate's `pass_rate` is below its baseline threshold, or `fabrication_count` rises above the
+  baseline.** Only metrics listed in the baseline are checked; exactly equal passes. Each
+  regression records `metric`, `baseline`, `current`, `delta`.
+
+There are **no hardcoded thresholds** — the thresholds are the previously stored per-mode
+pass rates in `data/golden/qa_baseline.json`. The baseline ratchets up through observed
+runs.
+
+## QA harness — the CLI
+
+`scripts/run_qa_eval.py` drives the harness from the project root:
+
+<Tabs items={['run', 'save a report', 'update baseline']}>
+  <Tab value="run">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool
+    ```
+  </Tab>
+  <Tab value="save a report">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode agent --report out/qa_report.json
+    ```
+  </Tab>
+  <Tab value="update baseline">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool --update-baseline
+    ```
+  </Tab>
+</Tabs>
+
+Flags: `--mode {tool,agent}` (default `tool`), `--golden` (default
+`data/golden/qa_golden_set.jsonl`), `--report`, `--baseline` (default
+`data/golden/qa_baseline.json`), `--update-baseline`. The gate is keyed per mode: a mode
+with no baseline auto-generates one on first run and passes (exit 0); with a baseline, any
+gate regression or fabrication increase exits 1.
+
+## Golden data format
+
+`data/golden/qa_golden_set.jsonl` is one JSON object per line. Each case carries `id`,
+`question`, `case_type` (one of `numeric` / `clarification` / `refusal` / `narrative` /
+`composite`), `expected` (always `clarification` ∈ `{none, ask_first, answer_with_assumptions}`
+and `refuse: bool`; numeric/composite add `value` + `unit` +
+`source`; narrative/composite add `narrative_doc`), `tags`, and a `reference_date`.
+
+```json
+{
+  "id": "num-001",
+  "question": "香港FY2025的REVENUE是多少",
+  "case_type": "numeric",
+  "expected": {
+    "clarification": "none",
+    "refuse": false,
+    "value": 1702.0,
+    "unit": "USD_M",
+    "source": { "doc": "ACME_FY2025_Results.pptx", "locator": "slide=5,table=1,row=2,col=3" }
+  },
+  "tags": { "topic": "FIN", "scope": "ACME_HK", "qtype": "must_not_clarify" },
+  "reference_date": "2026-06-12"
+}
+```
+
+<Callout type="info">
+  The golden set uses the fictional ACME company and synthetic figures. `data/golden/` is
+  force-tracked so the baseline can't drift out of version control.
+</Callout>
+
+## Extraction evaluation
+
+`extraction_eval.py` scores office-document extraction per channel:
+
+```python
+def run_eval(
+    facts: list[dict[str, object]],
+    ground_truth: dict[str, object] | list[dict[str, object]],
+) -> EvalReport: ...
+```
+
+It aligns extracted `facts` against ground truth by `sheet!cell_ref`, evaluating only cells
+present on both sides, and computes accuracy on **three channels**:
+
+| Channel            | Constant                                    | Compared fact field |
+| ------------------ | ------------------------------------------- | ------------------- |
+| Cell value         | `CELL_VALUE = "cell_value"`                 | `value`             |
+| Color mapping      | `COLOR_MAPPING = "color_mapping"`           | `tags`              |
+| Header attribution | `HEADER_ATTRIBUTION = "header_attribution"` | `merge_span`        |
+
+Types: `ChannelMetric` (`name`, `total`, `correct`, `accuracy`, `mismatches`), `EvalReport`
+(`channels: dict[str, ChannelMetric]`, `n_facts`). The regression gate is
+`compare_to_baseline(metrics, baseline) -> BaselineComparison`: any channel whose `accuracy`
+falls below its threshold fails (`passed=False`); only channels listed in the baseline are
+checked; exactly equal passes. Ground-truth fixtures live under `data/fixtures/` (e.g.
+`fixtures_ground_truth.json`, `pdf/pdf_ground_truth.json`, `pptx/pptx_ground_truth.json`).
+
+## See also
+
+<Cards>
+  <Card
+    title="Anti-fabrication"
+    href="/docs/concepts/anti-fabrication"
+    description="The behavior the refusal and fabrication metrics protect."
+  />
+  <Card
+    title="Provenance"
+    href="/docs/concepts/provenance"
+    description="The lineage the citation-validity gate checks."
+  />
+  <Card
+    title="Agent"
+    href="/docs/guides/agent"
+    description="The orchestrator exercised in agent-mode evaluation."
+  />
+  <Card
+    title="CLI & scripts"
+    href="/docs/getting-started/cli-and-scripts"
+    description="run_qa_eval.py and the other repo-root scripts."
+  />
+</Cards>

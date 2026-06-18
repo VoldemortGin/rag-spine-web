@@ -1,0 +1,175 @@
+---
+title: Dual Channel
+description: A deterministic structured/numeric channel and a narrative RAG channel, unified by one agent router that splits composite questions and runs both.
+---
+
+RAGSpine answers two fundamentally different kinds of question with two fundamentally
+different mechanisms — and a single agent decides which one (or both) a question needs.
+
+- **"What's the number?"** → the **structured channel**: a fact table plus
+  function-calling. Deterministic, no synthesis of the value.
+- **"Why / what happened?"** → the **narrative channel**: hybrid retrieval over document
+  chunks, optional listwise rerank, then LLM synthesis with citations.
+
+The router lives in `agent/agent.py` (`answer_question`); intent parsing and the
+clarification gate live in `agent/intent.py`.
+
+<Callout type="info">
+  The two channels never blur into one "ask the model" path. The structured channel is the only
+  thing allowed to produce a numeric fact, and it does so without trusting model prose — see
+  [Anti-fabrication](/docs/concepts/anti-fabrication).
+</Callout>
+
+## How the agent routes
+
+Every question is first parsed into **four intent slots** by a zero-LLM, config-driven
+rule parser (`RuleIntentParser`, swappable behind the `IntentParser` Protocol):
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: 'Normalized metric code (e.g. REVENUE) via the glossary; None if absent.',
+    },
+    entity: {
+      type: 'string | null',
+      description: 'Normalized entity code (e.g. ACME_CN); None if absent.',
+    },
+    period: {
+      type: '(period_type, value) | null',
+      description: 'e.g. ("FY", "2024"), ("HY", "2024H1"), ("QUARTER", "2025Q1").',
+    },
+    channel: { type: 'string', description: 'Defaults to TOTAL (e.g. AGENCY / BANCA / TOTAL).' },
+  }}
+/>
+
+Routing is decided from the parsed slots and lexical cues (`parse_intent`):
+
+<Cards>
+  <Card title="structured">
+    A numeric intent — a `metric` was recognized, or a numeric cue like “多少” / “what is”. Answer
+    is the number, from the fact store.
+  </Card>
+  <Card title="narrative">
+    An attribution / regulation / trend / “why” intent. Answer is synthesized from retrieved
+    snippets, each cited.
+  </Card>
+  <Card title="composite">
+    Both at once — a recognized metric **and** a narrative cue (e.g. “why did revenue fall?”). The
+    agent runs the structured path, then appends an attribution section.
+  </Card>
+</Cards>
+
+Before routing, a **clarification gateway** (`clarify_scope`) applies a deliberate
+asymmetry:
+
+- Missing **metric** → _ask first_ (guessing the metric would be a substantive error).
+- Missing **entity / period** → _answer with surfaced assumptions_ (default to the home
+  group / latest complete fiscal year, expose the assumption, offer one-click narrowing).
+- **Out-of-scope / competitor entity** → refuse before any channel runs (see
+  [RESTRICTED isolation](/docs/concepts/restricted-isolation) and the deterministic
+  security gate).
+
+## The structured channel: a `found` / `not_found` / `unrecognized` tri-state
+
+The structured channel's only fact-producing primitive is the `query_metric` tool
+(`agent/query_tools.py`). Its execution function normalizes each parameter through the
+glossary, then queries the `fact_metric` store. It returns one of **three** statuses —
+never a guess:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    The exact value exists. Returns the value, unit, all controlled dimension codes,
+    and full lineage:
+
+    ```json
+    {
+      "status": "found",
+      "value": 1320,
+      "unit": "USD_M",
+      "metric_code": "REVENUE",
+      "entity": "ACME_CN",
+      "period_type": "FY",
+      "period": "2024",
+      "channel": "TOTAL",
+      "source": { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="not_found">
+    Every parameter normalized, but no matching row in the fact table. **No
+    interpolation, no inference** — the agent rewrites this to an honest refusal.
+
+    ```json
+    {
+      "status": "not_found",
+      "normalized": { "metric_code": "REVENUE", "entity": "ACME_CN", "period": "2025", "channel": "TOTAL" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="unrecognized_param">
+    A parameter could not be normalized to a controlled code (the glossary returns
+    `None` rather than guessing). The offending parameter and its raw value are named.
+
+    ```json
+    { "status": "unrecognized_param", "param": "entity", "raw": "some unknown company" }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  The glossary normalizers (`normalize_metric` / `normalize_entity` / `normalize_period`) return
+  `None` on anything they don't recognize. That `None` becomes `unrecognized_param` — it is never
+  coerced into a best-guess code.
+</Callout>
+
+## The narrative channel
+
+When the route is `narrative`, the agent calls an injected `NarrativeRetriever`
+(`_run_narrative`). The default chain (`retrieval/`) is:
+
+<Steps>
+  <Step>
+    **Hybrid retrieve** — CJK-aware Okapi BM25 + an injectable vector channel (default: none = pure
+    BM25), fused with Reciprocal Rank Fusion (`rrf_fuse`, `k=60`), plus glossary-driven multi-query
+    rewriting.
+  </Step>
+  <Step>
+    **Listwise rerank** — an optional LLM listwise judge (`listwise_rerank`) reorders the top
+    candidates; it falls back to the RRF order on any failure.
+  </Step>
+  <Step>
+    **Synthesize with citations** — the LLM answers only from the supplied snippets, and the agent
+    force-appends any source document name the model failed to cite.
+  </Step>
+</Steps>
+
+If no retriever is wired, or retrieval returns nothing, the narrative channel degrades
+honestly ("not retrieved / not yet wired") rather than inventing an answer.
+
+## The composite path: run both, compare, merge
+
+For a composite question, the agent runs the structured path first, then runs the
+narrative path and merges:
+
+```text
+<structured answer, with the number(s) + lineage>
+
+归因分析：
+<narrative answer, synthesized from cited snippets>
+```
+
+Sources from both channels are concatenated. When the structured side expands into
+multiple sub-tasks (multiple metrics / entities / periods the user explicitly listed),
+the agent executes each `query_metric` sub-task **deterministically without the LLM**
+(`_multi_subtask_answer`) and, for exactly two comparable periods, computes the
+difference itself.
+
+<Callout type="info">
+  Anti-fabrication is applied **per path**, not unified: the structured path deterministically
+  synthesizes the answer from fact values, the multi-sub-task path never calls the LLM at all, and
+  the narrative path trusts model prose but forces citation. That asymmetry is deliberate.
+</Callout>

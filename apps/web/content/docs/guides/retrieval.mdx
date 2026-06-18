@@ -1,0 +1,291 @@
+---
+title: Retrieval
+description: The narrative RAG channel — paragraph-granular chunking, CJK-aware Okapi BM25, an injectable vector channel, RRF fusion, LLM listwise rerank, and the adapter that strips RESTRICTED content before it can reach a prompt.
+---
+
+The `retrieval` domain (`src/ragspine/retrieval/`) is RAGSpine's **narrative RAG channel** —
+the half that answers _"why / what happened"_ questions by retrieving document chunks,
+fusing lexical and (optional) vector signals, reranking, and handing cited snippets to the
+agent. It is the counterpart to the deterministic structured channel; see
+[Dual-channel](/docs/concepts/dual-channel) for how the agent routes between the two.
+
+Two properties are non-negotiable here and enforced in code:
+
+- **Pure-BM25 by default.** The vector channel is _injectable_. With no embedding backend
+  wired, retrieval is pure Okapi BM25 + RRF — fully offline, deterministic, zero SDKs.
+- **RESTRICTED isolation at two exits.** Sensitivity-`RESTRICTED` content is stripped at
+  **both** the `rerank/` and `link/` exits before it can reach a prompt. See
+  [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+
+## Layout
+
+<Files>
+  <Folder name="retrieval" defaultOpen>
+    <Folder name="chunking">
+      <File name="chunking.py" />
+      <File name="chunk_store.py" />
+    </Folder>
+    <Folder name="lexical">
+      <File name="retrieval.py" />
+    </Folder>
+    <Folder name="vector">
+      <File name="embedding_backends.py" />
+      <File name="store.py" />
+    </Folder>
+    <Folder name="rerank">
+      <File name="listwise_rerank.py" />
+    </Folder>
+    <Folder name="link">
+      <File name="narrative_link.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+The pipeline reads left to right: `chunking` produces and versions chunks → `lexical`
+(with optional `vector`) scores and fuses them → `rerank` reorders the top candidates →
+`link` adapts the result into the agent and drops RESTRICTED.
+
+## chunking — paragraph-granular chunker + versioned store
+
+`chunking/chunking.py` turns a document's plain text into retrieval chunks. The token
+budget is approximated by **character count** (no third-party tokenizer), keeping it
+offline and deterministic.
+
+<TypeTable
+  type={{
+    chunk_document: {
+      type: '(text, meta, *, max_chars=480, overlap_chars=80) -> list[Chunk]',
+      description:
+        'Greedy paragraph aggregation up to max_chars, with adjacent overlap. Empty text → [].',
+    },
+    DocumentMeta: {
+      type: 'dataclass',
+      description:
+        "Document-level metadata inherited per chunk: doc_id, title, topic, entity, geography, period, language, sensitivity (default 'INTERNAL'), source_locator_prefix.",
+    },
+    Chunk: {
+      type: 'dataclass',
+      description:
+        'One chunk: chunk_id (`{doc_id}#c{seq}`), doc_id, seq, text, source_locator (`{prefix}#para{start}` or `…#para{start}-{end}`, 1-based inclusive), para_start, para_end, plus inherited metadata.',
+    },
+  }}
+/>
+
+Constants: `DEFAULT_CHUNK_CHARS = 480`, `DEFAULT_OVERLAP_CHARS = 80`. Oversized single
+paragraphs are split by sentence enders (`。！？；.!?;`), then hard-cut, with **no overlap**
+between the sub-chunks — so a chunk's `text` always stays a contiguous substring of the
+source, which keeps citations honest (see [Provenance](/docs/concepts/provenance)).
+`chunk_document` raises `ValueError` if `max_chars <= 0`, `overlap_chars < 0`, or
+`overlap_chars >= max_chars`.
+
+`chunking/chunk_store.py` is the **versioned chunk store** (SQLite, mirroring the fact
+store: explicit schema, parameterized SQL, a read-only `execute_read` entry point).
+
+- `StoredChunk` — every `Chunk` field plus ingestion metadata: `valid_as_of`, `ingested_at`,
+  `version` (default `1`), `active` (default `True`).
+- `ChunkStore(db_path)` — `init_schema()` creates the `narrative_chunk` table and is
+  idempotent. `replace_doc_chunks(doc_id, chunks, valid_as_of="") -> int` does a **versioned
+  replacement**: it bumps `version = max(version) + 1`, marks old rows `active=0`, inserts
+  the new chunks `active=1`, and returns the number of rows written. Re-ingesting is
+  idempotent; passing an empty list withdraws the document from the active set.
+- `iter_chunks(*, doc_id=None, topic=None, entity=None, geography=None, period=None, language=None, include_inactive=False) -> list[StoredChunk]` — an AND-combined metadata
+  pre-filter (active-only by default), used to narrow candidates **before** any scoring.
+
+## lexical — Okapi BM25 (CJK uni+bigram) + RRF fusion
+
+`lexical/retrieval.py` is the scoring core. Everything is pure Python — no `rank-bm25`, no
+SDKs.
+
+- `tokenize(text) -> list[str]` — lowercases; ASCII alphanumeric runs become words; **CJK
+  runs are emitted as both unigrams and adjacent bigrams**. That dual granularity is what
+  makes BM25 work for Chinese without a segmenter.
+- `bm25_scores(query_tokens, docs_tokens, k1=1.5, b=0.75) -> list[float]` — standard Okapi
+  BM25 (`DEFAULT_BM25_K1 = 1.5`, `DEFAULT_BM25_B = 0.75`).
+- `rrf_fuse(rankings, k=60) -> dict[str, float]` — Reciprocal Rank Fusion, `score += 1.0 / (k + rank)` with rank starting at 1. The constant is `DEFAULT_RRF_K = 60` (the standard RRF
+  value).
+- `GlossaryQueryRewriter(max_queries=5)` — a deterministic, rule-based multi-query rewriter
+  that expands a query using the glossary's entity/metric synonyms (zero LLM). The original
+  query is always first.
+
+These compose into the retriever classes:
+
+<TypeTable
+  type={{
+    RetrievalResult: {
+      type: 'dataclass',
+      description: 'chunk: StoredChunk | Chunk, bm25_score, vector_score, fused_score.',
+    },
+    HybridRetriever: {
+      type: 'class',
+      description:
+        'Metadata pre-filter → (BM25 + optional vector) × multi-query → RRF → top_k. embedding_backend=None ⇒ pure BM25.',
+    },
+    NarrativeIndex: {
+      type: 'class',
+      description:
+        'End-to-end entry: ingest (chunk + idempotent store) → hybrid search → optional listwise rerank.',
+    },
+  }}
+/>
+
+`HybridRetriever.search(...)` applies the metadata pre-filter **before** any scoring or
+embedding, computes chunk vectors lazily (cached by `chunk_id`) only for surviving
+candidates, and breaks ties deterministically by `(-fused_score, chunk_id)`.
+
+<Callout type="info">
+  `HybridRetriever` also exposes `.topology() -> PipelineGraph`, a thin delegate into the
+  [pipeline](/docs/guides/pipeline) topology exporter — so you can render the actual wiring
+  of a configured retriever as Mermaid / DOT / JSON.
+</Callout>
+
+## vector — injectable embedding backends (default: none)
+
+The vector channel is an _extension point_, not a default. The `EmbeddingBackend` Protocol
+(defined in `lexical/retrieval.py`) has a single method:
+
+```python
+class EmbeddingBackend(Protocol):
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+```
+
+You inject an implementation via the `embedding_backend=` keyword on `HybridRetriever`,
+`NarrativeIndex`, and `build_narrative_retriever`. The default everywhere is `None`, which
+means **the vector channel is off and retrieval is pure BM25 + RRF**.
+
+`vector/embedding_backends.py` ships three concrete backends plus a factory:
+
+<Cards>
+  <Card
+    title="DeterministicEmbeddingBackend"
+    description="Offline lexical-hash backend (blake2b token bucketing + L2 normalize). Zero network/SDK. Its docstring flags it as non-semantic — highly correlated with BM25, no true semantic recall gain."
+  ></Card>
+  <Card
+    title="SentenceTransformerEmbeddingBackend"
+    description="Default model Qwen/Qwen3-Embedding-0.6B; device auto-detected (cuda → mps → cpu, overridable via RAGSPINE_EMBEDDING_DEVICE). Model is lazily loaded on first embed."
+  ></Card>
+  <Card
+    title="OpenAIEmbeddingBackend"
+    description="Default model text-embedding-3-large; lazy `import openai`; wraps SDK errors as ProviderError."
+  ></Card>
+</Cards>
+
+```python
+from ragspine.retrieval.vector.embedding_backends import make_embedding_backend
+
+# spec (case-insensitive; defaults to env RAGSPINE_EMBEDDING_BACKEND):
+#   None / "none"            → None  (pure BM25 + RRF, the default)
+#   "deterministic"          → DeterministicEmbeddingBackend
+#   "openai"                 → OpenAIEmbeddingBackend
+#   "qwen3" / "st" / "sentence-transformers" → SentenceTransformerEmbeddingBackend
+backend = make_embedding_backend("deterministic")
+```
+
+`vector/store.py` additionally provides a pluggable `VectorStore` Protocol
+(`upsert` / `query` / `delete` / `count`) with a zero-dependency `InProcessVectorStore`
+(brute-force cosine, id-ascending tie-break). Note its `query` honors a `where` filter but
+does **not** auto-drop RESTRICTED — that removal stays at the two authoritative exits below.
+
+## rerank — LLM listwise reranker (RRF fallback)
+
+`rerank/listwise_rerank.py` reorders the top candidates with an LLM judge, behind the
+`ListwiseJudge` Protocol:
+
+```python
+class ListwiseJudge(Protocol):
+    def judge(self, query: str, candidates: list[str]) -> list[int]: ...
+```
+
+The entry point is `listwise_rerank(query, results, judge, *, top_n=10)` (`DEFAULT_TOP_N = 10`). Two behaviors matter:
+
+1. **RESTRICTED exit #1.** Candidates whose `chunk.sensitivity` (case-insensitively)
+   equals `"RESTRICTED"` are excluded from the set sent to the judge and held at their
+   original RRF positions — RESTRICTED text **never** reaches the judge prompt. If every
+   candidate is RESTRICTED, the judge is never called.
+2. **RRF fallback.** On any judge exception or malformed output, the open subset degrades to
+   identity (RRF) order. `listwise_rerank` never raises.
+
+Supporting pure functions — `build_listwise_prompt(query, candidates)` and
+`parse_listwise_response(text, n_candidates)` (robust parse to a length-`n` permutation,
+falling back to identity) — make the rerank deterministic and testable without a real model.
+
+## link — adapter into the agent (strips RESTRICTED at exit)
+
+`link/narrative_link.py` is the seam between this domain (the retrieval "B-line") and the
+[agent](/docs/guides/agent) (the "A-line"). It adapts a `NarrativeIndex` to the agent's
+`NarrativeRetriever` contract (which is defined on the agent side, in `agent/agent.py`).
+
+- `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — its
+  `retrieve(query, *, filters=None, top_k=50) -> list[dict]` maps `filters` to metadata
+  kwargs, calls the underlying index, retries once without filters if the filtered result is
+  empty, and returns snippet dicts.
+
+  **RESTRICTED exit #2.** The return is built as a comprehension that drops every chunk
+  whose sensitivity equals `"RESTRICTED"` _before_ any snippet dict is produced:
+
+  ```python
+  return [
+      _to_snippet(r)
+      for r in results
+      if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+  ]
+  ```
+
+  So RESTRICTED text never reaches the LLM synthesis prompt — the same constant
+  (`RESTRICTED_SENSITIVITY = "RESTRICTED"`) guards both exits.
+
+- `ProviderListwiseJudge(provider)` — a concrete `ListwiseJudge` backed by the agent's
+  `LLMProvider`. It builds the prompt, makes one `create_message` call, and parses the
+  response; provider errors propagate and are caught by `listwise_rerank`'s degradation.
+- `build_narrative_retriever(chunk_db, provider=None, *, embedding_backend=None) -> tuple[NarrativeIndexRetriever, ChunkStore]` — the CLI/service wiring entry. It opens the
+  chunk store, calls `init_schema`, and assembles the default chain: **pure BM25 + RRF**
+  (no vector backend by default) + `GlossaryQueryRewriter` multi-query + (when `provider` is
+  given) a `ProviderListwiseJudge` rerank. The caller owns closing the store.
+
+A snippet dict carries full provenance: `text`, `doc_id`, `title`, `source_locator`,
+`chunk_id`, the metadata fields, `sensitivity`, and a nested `scores` dict
+(`{"bm25", "vector", "fused"}`).
+
+## Wiring it up
+
+```python
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Default: pure BM25 + RRF + glossary multi-query + (with a provider) listwise rerank.
+retriever, store = build_narrative_retriever("data/chunks.db")
+try:
+    snippets = retriever.retrieve("为什么营收下滑", filters={"entity": "ACME_CN"}, top_k=10)
+    # snippets is RESTRICTED-free and carries full lineage per item
+finally:
+    store.close()
+```
+
+<Callout type="warn">
+  Both RESTRICTED exits (`rerank/` and `link/`) must stay. They are the code-enforced half of the
+  [RESTRICTED isolation](/docs/concepts/restricted-isolation) invariant; removing either one would
+  let restricted content reach a prompt.
+</Callout>
+
+## See also
+
+<Cards>
+  <Card
+    title="Dual-channel"
+    href="/docs/concepts/dual-channel"
+    description="How the agent routes between the structured and narrative channels."
+  />
+  <Card
+    title="RESTRICTED isolation"
+    href="/docs/concepts/restricted-isolation"
+    description="The two-exit filtering invariant this domain enforces."
+  />
+  <Card
+    title="Agent"
+    href="/docs/guides/agent"
+    description="The orchestrator that consumes a NarrativeRetriever and synthesizes cited answers."
+  />
+  <Card
+    title="Extension points"
+    href="/docs/reference/extension-points"
+    description="EmbeddingBackend, ListwiseJudge, NarrativeRetriever, and the other Protocols."
+  />
+</Cards>

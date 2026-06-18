@@ -1,0 +1,192 @@
+---
+title: Extension points
+description: Every external dependency is a typed Protocol seam — LLM provider, embeddings, listwise judge, OCR, narrative retriever, task queue. Implement the Protocol and inject it; the core imports zero SDKs and runs offline with MockProvider.
+---
+
+RAGSpine's pluggability is not a plugin registry — it is plain structural typing. Each
+external dependency is a Python `Protocol`; the core depends on the abstraction, never on a
+vendor SDK. Adding a provider, vector store, reranker, or OCR engine touches **one new
+file**, and every heavy SDK is **lazy-imported** so the core imports cleanly and runs fully
+offline with the deterministic `MockProvider`.
+
+<Callout type="info">
+  All seams below are `@runtime_checkable` Protocols — your implementation does not need to subclass
+  anything, it only needs the right method signatures. `mypy --strict` covers the core, and the
+  `anthropic` / `openai` / `sentence-transformers` / `paddleocr` SDKs are only imported inside the
+  concrete implementations, never in the seam.
+</Callout>
+
+## The seams
+
+<Cards>
+  <Card
+    title="LLMProvider"
+    description="agent/llm_provider.py — send system + messages + tools, get a unified response."
+  ></Card>
+  <Card
+    title="EmbeddingBackend"
+    description="retrieval/lexical/retrieval.py — batch texts to vectors for the injectable vector channel."
+  ></Card>
+  <Card
+    title="ListwiseJudge"
+    description="retrieval/rerank/listwise_rerank.py — listwise rerank: return candidate indices best-first."
+  ></Card>
+  <Card
+    title="OcrBackend"
+    description="extraction/extractors/pdf_scanned_extractor.py — recognize a single scanned page image."
+  ></Card>
+  <Card
+    title="NarrativeRetriever"
+    description="agent/agent.py — the narrative retrieval seam injected into the orchestrator."
+  ></Card>
+  <Card
+    title="TaskQueue"
+    description="service/tasks/task_queue.py — async job queue (FakeQueue in tests, RQQueue in prod)."
+  ></Card>
+</Cards>
+
+### `LLMProvider`
+
+`src/ragspine/agent/llm_provider.py` — the single method the agent's tool-use loop drives.
+`AnthropicProvider` lazy-imports the `anthropic` SDK; `MockProvider` needs neither key nor
+network.
+
+<TypeTable
+  type={{
+    create_message: {
+      type: '(*, system: str, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ProviderResponse',
+      description:
+        'Send the system prompt, message history, and tool schemas; return text + tool_calls + stop_reason + raw_content + usage.',
+    },
+  }}
+/>
+
+### `EmbeddingBackend`
+
+`src/ragspine/retrieval/lexical/retrieval.py` — the dependency-injection point for the
+vector channel. The default is `none` (pure BM25); inject this to add a vector channel.
+
+<TypeTable
+  type={{
+    embed_texts: {
+      type: '(texts: list[str]) -> list[list[float]]',
+      description: 'Batch texts to vectors, order-aligned with the input.',
+    },
+  }}
+/>
+
+### `ListwiseJudge`
+
+`src/ragspine/retrieval/rerank/listwise_rerank.py` — the optional LLM listwise reranker
+seam. The real implementation is Claude (via `build_listwise_prompt` /
+`parse_listwise_response`); tests use a deterministic fake. Falls back to RRF order if absent.
+
+<TypeTable
+  type={{
+    judge: {
+      type: '(query: str, candidates: list[str]) -> list[int]',
+      description:
+        'Return candidate indices (0-based) sorted by relevance, most relevant first. Callers guarantee RESTRICTED text is already stripped.',
+    },
+  }}
+/>
+
+### `OcrBackend`
+
+`src/ragspine/extraction/extractors/pdf_scanned_extractor.py` — the scanned-PDF OCR/VLM
+seam. The real backend (PaddleOCR) runs on Ubuntu + GPU; logic tests use a fake so the
+render → map → threshold → review flow is fully testable on a GPU-less machine.
+
+<TypeTable
+  type={{
+    recognize: {
+      type: '(image_bytes: bytes, page_no: int) -> OcrPageResult',
+      description: 'Recognize a single page image (PNG bytes) and return an OcrPageResult.',
+    },
+  }}
+/>
+
+### `NarrativeRetriever`
+
+`src/ragspine/agent/agent.py` — the narrative retrieval implementation injected into
+`answer_question`. Duck-typed; when omitted, the narrative path degrades honestly.
+
+<TypeTable
+  type={{
+    retrieve: {
+      type: '(query: str, *, filters: dict[str, str] | None = None, top_k: int = 50) -> list[dict[str, object]]',
+      description: 'Retrieve narrative chunks for a query, with optional metadata filters.',
+    },
+  }}
+/>
+
+### `TaskQueue`
+
+`src/ragspine/service/tasks/task_queue.py` — the async job queue. `RQQueue` (RQ + Redis)
+for production, `FakeQueue` (synchronous inline) for tests. `rq` / `redis` are lazy-imported
+inside `RQQueue` only.
+
+<TypeTable
+  type={{
+    enqueue: {
+      type: '(func_path: str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
+      description:
+        'Enqueue a job by dotted func_path with a serializable payload; return the job id.',
+    },
+    get: {
+      type: '(job_id: str) -> JobStatus | None',
+      description: "Look up a job's status (None if unknown).",
+    },
+  }}
+/>
+
+## Implement a Protocol and inject it
+
+Because the seams are structural, you implement the method(s) and pass the instance in — no
+registration, no base class. Here is an OpenAI-backed `LLMProvider`, grounded in the real
+`create_message` signature and `ProviderResponse` shape:
+
+```python title="my_openai_provider.py"
+from openai import OpenAI  # lazy: only your file imports the SDK
+from ragspine.agent.llm_provider import ProviderResponse, ToolCall
+
+
+class OpenAIProvider:
+    """A custom LLMProvider — no subclassing, just the create_message method."""
+
+    def __init__(self, model: str = "gpt-4o") -> None:
+        self._client = OpenAI()
+        self._model = model
+
+    def create_message(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> ProviderResponse:
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "system", "content": system}, *messages],  # adapt as needed
+        )
+        text = resp.choices[0].message.content or ""
+        return ProviderResponse(text=text, tool_calls=[], stop_reason="end_turn")
+```
+
+Inject it exactly where `MockProvider` would go:
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.storage.fact_store import FactStore
+from my_openai_provider import OpenAIProvider
+
+store = FactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("...", store, OpenAIProvider())
+```
+
+<Callout type="warn">
+  The structured channel's anti-fabrication guard does not trust provider prose for the number — a
+  found fact is deterministically rendered from the fact value, and a no-fact result is rewritten to
+  "not found" regardless of model output. Swapping the provider cannot defeat the guard.
+</Callout>

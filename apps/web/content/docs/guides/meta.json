@@ -1,0 +1,15 @@
+{
+  "title": "Guides",
+  "icon": "Boxes",
+  "pages": [
+    "extraction",
+    "ingestion",
+    "storage",
+    "retrieval",
+    "agent",
+    "evaluation",
+    "service",
+    "pipeline",
+    "common"
+  ]
+}

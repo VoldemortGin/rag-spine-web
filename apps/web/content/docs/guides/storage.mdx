@@ -1,0 +1,201 @@
+---
+title: Storage
+description: The sqlite persistence layer — a numeric fact store and a narrative chunk store, both with full source lineage. The Fact dataclass, the dim_key upsert key, and deterministic found/not-found reads.
+---
+
+The **storage** domain is the sqlite persistence layer behind RAGSpine's two channels: a
+**fact store** (numeric metrics) and a **chunk store** (narrative). Both keep full source
+lineage — every row knows the document and locator it came from — and both use the same
+disciplined style: an explicit schema, parameterized SQL, and a read-only `execute_read`
+entry point so observability code never touches the raw connection.
+
+<Callout type="info">
+  The fact store lives at `src/ragspine/storage/fact_store.py` (contract:
+  `src/ragspine/storage/CLAUDE.md`). The narrative **chunk store** lives in the retrieval subtree at
+  `src/ragspine/retrieval/chunking/chunk_store.py` — it is the narrative half of the same conceptual
+  storage layer, and its schema deliberately mirrors `fact_store`. Both back onto the same sqlite
+  file, `data/fact_metric.db`, in separate tables.
+</Callout>
+
+## Layout
+
+<Files>
+  <Folder name="storage" defaultOpen>
+    <File name="fact_store.py — Fact dataclass + FactStore (table fact_metric)" />
+  </Folder>
+  <Folder name="retrieval/chunking">
+    <File name="chunk_store.py — StoredChunk + ChunkStore (table narrative_chunk)" />
+  </Folder>
+</Files>
+
+## The Fact dataclass
+
+A `Fact` is one metric data point: dimensions + value + lineage (+ v2 style-semantic and
+version-lineage fields). It is a `@dataclass` (not frozen). The field **order is part of
+the contract**: the first ten are positional-frozen, and new fields are appended only.
+
+<TypeTable
+  type={{
+    metric_code: { type: 'str', description: "1 — e.g. 'REVENUE'." },
+    entity: { type: 'str', description: '2 — controlled entity code.' },
+    geography: { type: 'str', description: '3 — non-identity, overwritable.' },
+    channel: { type: 'str', description: "4 — e.g. 'TOTAL', 'AGENCY'." },
+    period_type: { type: 'str', description: "5 — 'FY' / 'HY' / 'QUARTER'." },
+    period: { type: 'str', description: "6 — e.g. '2024'." },
+    value: { type: 'float', description: '7 — the number.' },
+    unit: { type: 'str', description: "8 — e.g. 'USD_M', 'PCT'." },
+    source_doc_id: { type: 'str', description: '9 — lineage.' },
+    source_locator: { type: 'str', description: "10 — lineage (e.g. 'sheet=5yr!C4')." },
+    tags: { type: 'dict[str, object]', default: '{}' },
+    source_file_hash: { type: 'str | None', default: 'None' },
+    extractor_version: { type: 'str | None', default: 'None' },
+    mapping_version: { type: 'int | None', default: 'None' },
+    confidence: { type: 'float | None', default: 'None' },
+    review_status: { type: 'str', default: 'REVIEW_AUTO_APPROVED' },
+    valid_as_of: { type: 'str | None', default: 'None' },
+    ingested_at: { type: 'str | None', default: 'None' },
+    dimensions: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'In-memory bag, NOT a DB column.',
+    },
+  }}
+/>
+
+<Callout type="warn">
+  **The first ten fields are positional-frozen** — `metric_code, entity, geography, channel,
+  period_type, period, value, unit, source_doc_id, source_locator`. The evaluation harness binds a
+  10-tuple via `Fact(*row)`; reordering or removing any of them breaks it. New fields are **additive
+  only**, appended at the end — `dimensions` is the last field.
+</Callout>
+
+`dimensions` is an in-memory arbitrary-dimension bag, **excluded from DB columns**. Its
+`__post_init__` guard raises `ValueError` if any key collides with a structural / lineage /
+`dim_key` reserved name, and an empty bag derives an identity mirror
+(`{metric, entity, channel, period}`). It is never written to a column and never
+reconstructed into a `Fact(**data)`.
+
+### Review status
+
+`review_status` gates visibility. Default-visible reads return only
+`VISIBLE_REVIEW_STATUSES = (REVIEW_AUTO_APPROVED, REVIEW_APPROVED)`; the full set is
+`auto_approved`, `pending`, `approved`, `rejected`, `blocked`.
+
+## FactStore
+
+```python
+from ragspine.storage.fact_store import Fact, FactStore
+
+store = FactStore("data/fact_metric.db")
+store.init_schema()
+
+store.upsert_facts([
+    Fact("REVENUE", "ACME_GROUP", "ASIA", "TOTAL", "FY", "2024",
+         1234.5, "USD_M", "doc-42", "sheet=5yr!C4"),
+])
+
+hits = store.query("REVENUE", "ACME_GROUP", "FY", "2024")   # [] = not found, [Fact] = found
+store.close()
+```
+
+| method                                                                                                                    | purpose                                                                               |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `init_schema()`                                                                                                           | create `fact_metric`, run the v2 column migration, create both unique indexes         |
+| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | batch insert; on `dim_key` conflict, overwrite value + lineage; returns count written |
+| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | exact parameterized lookup, returns 0 or 1 row                                        |
+| `count() -> int`                                                                                                          | total facts                                                                           |
+| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | read-only SELECT entry point for ledger/metrics reuse                                 |
+| `delete_by_source_doc(source_doc_id) -> int`                                                                              | physically delete a doc's facts (any review status); idempotent                       |
+| `close()`                                                                                                                 | idempotent connection close (also auto-closed on GC via `weakref.finalize`)           |
+
+The table is `fact_metric`. `query()` issues an exact-match `SELECT` on
+`(metric_code, entity, period_type, period, channel)`; because that combination is unique,
+the result is always **0 rows (not found) or 1 row (found)**. That determinism is what the
+[anti-fabrication invariant](/docs/concepts/anti-fabrication) relies on — no `found` fact
+means the orchestrator rewrites the answer to "not found."
+
+### `dim_key` — the upsert key
+
+`dim_key` is the conflict key for upsert: a canonical, sorted-JSON natural key over the
+**identity dimensions only** — `metric`, `entity`, `channel`, and `period`
+(`period_type + period`, so `('FY','2024')` and `('HY','2024')` differ). `geography` is
+`identity=False`, an overwritable non-key column, and is **not** in the key.
+
+<Callout type="info">
+  `dim_key` is computed from the typed columns by `_compute_dim_key` (it never reads the
+  `dimensions` bag), is recomputed on every write and on legacy backfill, and is **storage-only** —
+  never a `Fact` field, never reconstructed into a `Fact`. Keeping each identity combination to
+  0-or-1 row is what preserves the deterministic found/not-found read path.
+</Callout>
+
+Two unique indexes coexist and encode identical finance uniqueness:
+
+- `ux_fact_dim_key` — `UNIQUE (dim_key)`, the upsert conflict target.
+- `ux_fact_metric` — `UNIQUE (metric_code, entity, period_type, period, channel)`, the
+  legacy composite index, kept alongside.
+
+On conflict, `upsert_facts` overwrites the overwritable columns —
+`geography, value, unit, source_doc_id, source_locator` plus all v2/provenance fields
+(`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
+valid_as_of, ingested_at`) — and stamps `ingested_at` itself. Re-ingesting the same data
+therefore never grows the store; this is the backbone of
+[idempotent ingestion](/docs/guides/ingestion#the-batch-manifest-ledger).
+
+### Auto-migrating schema
+
+`init_schema()` ALTER-adds any missing v2 columns and the `dim_key` column to a pre-existing
+table, then backfills `dim_key` for rows where it is `NULL` (recomputed in Python from each
+row's identity columns). All v2 fields default, so old `Fact(...)` calls are unchanged.
+
+## The chunk store
+
+`ChunkStore` (in `retrieval/chunking/chunk_store.py`) is the narrative counterpart, modeled
+on `fact_store` — explicit `narrative_chunk` schema, parameterized SQL, `execute_read`. A
+`StoredChunk` is one chunk's content plus metadata: `chunk_id`, `doc_id`, `seq`, `text`,
+`source_locator`, `para_start`, `para_end`, `title`, `topic`, `entity`, `geography`,
+`period`, `language`, `sensitivity` (default `"INTERNAL"`), `valid_as_of`, `ingested_at`,
+`version`, and `active`.
+
+`replace_doc_chunks(doc_id, chunks, valid_as_of="")` is the **versioned, idempotent**
+write: re-ingesting a document flips the old version's rows to `active=0` and inserts the
+new chunks at `version = max+1, active=1`. The active set always equals the most recent
+ingest; old versions stay for lineage. An empty list withdraws the doc from the active set.
+
+<Callout type="info">
+  Retrieval pre-filters on chunk metadata (`active`, sensitivity, period, …) *before* scoring. The
+  `sensitivity` column is what powers [RESTRICTED isolation](/docs/concepts/restricted-isolation)
+  downstream.
+</Callout>
+
+## Resource handling
+
+Both stores open one `sqlite3` connection with `row_factory = sqlite3.Row` and register a
+`weakref.finalize` so the connection closes deterministically on GC — even if a caller
+forgets `close()` — which keeps a bare sqlite connection from raising a `ResourceWarning`
+under the zero-warning gate. `close()` is idempotent.
+
+## Default database paths
+
+Defaults come from [`common/core.py`](/docs/guides/common#core-global-constants):
+`DEFAULT_FACT_DB = data/fact_metric.db` (holds both `fact_metric` and `narrative_chunk`),
+`DEFAULT_MAPPING_DB = data/color_mapping.db`, and
+`DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`.
+
+## Invariants this domain upholds
+
+- **Provenance** — every fact and chunk carries `source_doc_id` + a locator; lineage is
+  never dropped.
+- **Deterministic found/not-found** — the unique `dim_key` keeps each metric identity to one
+  row, so a missing fact is unambiguous.
+- **Field-order contract** — `Fact`'s first ten fields are positional-frozen; additions are
+  append-only; `dimensions` is never a column.
+- **Idempotent writes** — facts upsert on `dim_key`; chunks replace by version.
+
+## Related
+
+<Cards>
+  <Card title="Ingestion guide" href="/docs/guides/ingestion" />
+  <Card title="Extraction guide — the Fact source" href="/docs/guides/extraction" />
+  <Card title="Concept: Anti-fabrication" href="/docs/concepts/anti-fabrication" />
+  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+</Cards>

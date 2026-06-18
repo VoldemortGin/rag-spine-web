@@ -1,0 +1,198 @@
+---
+title: Request Flow
+description: The detailed control flow — question to intent parse, the clarification gate, the FAQ short-circuit, routing, and the anti-fabrication guard — grounded step by step in the code.
+---
+
+This page is the authoritative expansion of the one-liner flow on the
+[overview](/docs/architecture/overview). Every step below is traceable to the orchestrator
+`answer_question(...)` in `agent/agent.py`, the rule parser and gateway in `agent/intent.py`,
+and the service-edge cache in `service/faq/faq_cache.py`.
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+) -> AgentResult: ...
+```
+
+`AgentResult` carries `answer`, `route`, `clarification`, `tool_results`, and `sources`. The
+flow below is strictly ordered — the early returns must not be reordered, because the
+clarification and refusal decisions deliberately fire _before_ any tool, retrieval, or LLM
+call.
+
+<Steps>
+
+<Step>
+### Intent parse — four slots
+
+`RuleIntentParser` (swappable behind the `IntentParser` Protocol, default delegates to
+`parse_intent`) turns the raw question into a `ParsedIntent` with **four slots**, plus a
+chosen route. The parse is rule-based and uses **no LLM** — it is deterministic and offline.
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'str | None',
+      description: 'Normalized metric code (e.g. REVENUE) via the glossary; None if absent.',
+    },
+    entity: {
+      type: 'str | None',
+      description:
+        'Normalized entity code (e.g. ACME_CN), matched on security-masked text; None if absent.',
+    },
+    period: {
+      type: '(str, str) | None',
+      description:
+        '(period_type, value), e.g. ("FY", "2024"), ("HY", "2024H1"), ("QUARTER", "2025Q1").',
+    },
+    channel: { type: 'str', description: 'Distribution channel; defaults to "TOTAL", never None.' },
+  }}
+/>
+
+Before matching, `parse_intent` runs the security gate's `detect(...)` to mask any competitor
+mention, so a masked external entity can never leak into a home-entity match. The route is
+chosen from the slots and lexical cues into one of three constants: `ROUTE_STRUCTURED`,
+`ROUTE_NARRATIVE`, or `ROUTE_COMPOSITE` (a recognized metric **and** a narrative cue).
+
+</Step>
+
+<Step>
+### Clarification gate — ask, refuse, or assume
+
+`clarify_scope(intent, ...)` returns a `ClarificationResult` whose `mode` is one of four
+constants. The branches are checked in this exact order:
+
+<Tabs items={['out_of_scope_entity', 'ask_first', 'answer_with_assumptions', 'none']}>
+  <Tab value="out_of_scope_entity">
+    **Refuse — checked first, before everything.** The gate calls a deterministic
+    `SecurityGate.screen(...)` on the **raw question** (not the parsed `external_entity` field), so
+    swapping in an LLM parser cannot defeat the refusal. If the verdict is out-of-scope/competitor,
+    `answer_question` returns the refusal message immediately — no tool, no retrieval, no LLM call.
+    This is the `CLARIFY_OUT_OF_SCOPE_ENTITY` early return.
+  </Tab>
+  <Tab value="ask_first">
+    **Ambiguous → ask.** If `intent.metric is None` (and the route is not narrative), the gate
+    returns `CLARIFY_ASK_FIRST` with a question listing the supported metrics. Guessing the metric
+    would be a substantive error, so the agent asks instead of assuming — and returns the clarifying
+    question with no LLM call.
+  </Tab>
+  <Tab value="answer_with_assumptions">
+    **Missing entity / period → assume and surface it.** A missing `entity` defaults to the home
+    entity from the `CompanyProfile`; a missing `period` defaults to the latest complete fiscal year
+    (`("FY", str(year - 1))`). The assumption is exposed as an `【假设】…（如需收窄：…）` banner
+    with one-click narrowing options. The answer still proceeds.
+  </Tab>
+  <Tab value="none">
+    **Fully specified.** All required slots present (or the route is narrative, which needs no slot
+    clarification) — proceed straight to routing.
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  The asymmetry is deliberate: a missing **metric** stops the flow to ask, while a missing
+  **entity or period** proceeds with a surfaced assumption. Guessing *which number* is a
+  hard error; guessing *whose* / *when* is recoverable and reversible by the user.
+</Callout>
+</Step>
+
+<Step>
+### FAQ short-circuit — the service edge
+
+This step exists only when the HTTP service fronts the engine (`POST /v1/ask`). Before the
+route handler opens the fact store or retriever, it calls `faq_cache.lookup(question, ...)`.
+A vetted hit returns an `AskResponse(route="faq", ...)` with the cached answer and provenance
+— it **never reaches the provider, fact store, or retriever**.
+
+Crucially the FAQ layer reuses the same `parse_intent` / `clarify_scope` decisions to apply
+**conservative exclusions** — any of these makes it a deliberate miss, so the question falls
+through to the full agent:
+
+- structured-numeric (route is `structured`, or any metric/entity/period slot is filled),
+- competitor / out-of-scope entity,
+- real-time / time-sensitive cues (今天, 现在, 最新, latest, current, 股价 …),
+- expired (outside the item's `valid_from`/`valid_until` window),
+- disabled (`enabled` is false),
+- `RESTRICTED` sensitivity.
+
+<Callout type="info">
+  The FAQ cache sits **in front of** the anti-fabrication guard. Its exclusions exist
+  precisely so it can never short-circuit a question that needs the guard — see
+  [FAQ short-circuit](/docs/concepts/faq-short-circuit).
+</Callout>
+</Step>
+
+<Step>
+### Route — structured / narrative / composite
+
+On a FAQ miss (or in the pure-Python path), the agent dispatches on `intent.route`:
+
+- **`narrative`** → `_run_narrative(...)` against the injected `NarrativeRetriever`.
+- **`structured`** → expand into sub-tasks. A single sub-task runs the `query_metric`
+  tool-use loop (`_run_tool_loop`, capped at `MAX_TOOL_ITERATIONS = 5`); multiple sub-tasks
+  (the user explicitly listed several metrics/entities/periods) run **deterministically
+  without the LLM** (`_run_subtasks` → `_multi_subtask_answer`).
+- **`composite`** → run the structured path, then also `_run_narrative(...)`, appending the
+  attribution under a `归因分析：` heading and concatenating sources.
+
+See [Channels](/docs/architecture/channels) for what each route runs internally.
+
+</Step>
+
+<Step>
+### Anti-fabrication guard — rewrite to "not found"
+
+For the structured path, the model never gets the last word on a number. `_structured_answer`
+inspects the tool results, not the model prose:
+
+- **Any `found`** → the model text is **discarded entirely** and each answer line is rebuilt
+  deterministically from the fact value plus its lineage (`实体 期间 指标（渠道）：值 单位（来源…）`).
+  A live LLM could smuggle an extra fabricated number into its prose, so the prose is dropped.
+- **`not_found`** → rewritten to an honest refusal (`查不到 … 为避免误导，不提供任何推测数字`).
+- **`unrecognized_param`** → names the parameter it could not normalize.
+
+The narrative path is the deliberate exception: it trusts the model's prose but **forces
+source citation**, appending any source document the answer failed to name. When the provider
+fails, both paths degrade honestly (an "AI service temporarily unavailable" message), never a
+number. See [Anti-fabrication](/docs/concepts/anti-fabrication) for the full invariant.
+
+</Step>
+
+<Step>
+### Answer + sources
+
+The orchestrator returns an `AgentResult` with the (possibly rewritten) `answer`, the chosen
+`route`, the `tool_results`, and `sources` — every fact and citation carrying
+`source_doc_id` + locator. A privacy-aware trace records codes, counts, and timings only —
+never the answer, fact value, or chunk text.
+
+</Step>
+
+</Steps>
+
+## The full path at a glance
+
+```text
+answer_question(question, store, provider, …)
+  1. parse → ParsedIntent { metric, entity, period, channel, route }   # no LLM
+  2. clarify_scope(intent):
+       out_of_scope_entity      → return refusal            (no tool / retrieval / LLM)
+       ask_first (no metric)    → return clarifying question (no LLM)
+       answer_with_assumptions  → set defaults + banner, continue
+  3. (HTTP edge only) faq_cache.lookup → vetted hit returns; else fall through
+  4. route on intent.route:
+       narrative  → _run_narrative
+       structured → single: _run_tool_loop (query_metric, ≤5 iters)
+                     multi : _run_subtasks (deterministic, no LLM)
+       composite  → structured, then append _run_narrative under 归因分析
+  5. anti-fabrication guard (_structured_answer):
+       found              → discard model text, rebuild from fact value + lineage
+       not_found          → rewrite to honest refusal
+       unrecognized_param → name the bad parameter
+       (narrative path: trust prose, force citations)
+  6. return AgentResult { answer, route, tool_results, sources }
+```

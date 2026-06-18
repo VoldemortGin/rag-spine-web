@@ -1,0 +1,153 @@
+---
+title: Quickstart
+description: Run the offline demo, ask a question with the deterministic MockProvider, use the Python API, and start the HTTP service plus async worker.
+---
+
+RAGSpine ships four entry points — an end-to-end demo, a one-shot CLI, a Python API, and an
+HTTP service. They all work offline against the bundled synthetic data, no API key required.
+
+<Callout type="info">
+  Always run scripts and tests **from the repo root**. The scripts anchor on a `.project-root`
+  marker; running from a subfolder breaks path resolution.
+</Callout>
+
+<Steps>
+
+<Step>
+
+## Run the end-to-end demo
+
+This generates synthetic data, extracts it, ingests it into the fact store, runs parameterized
+queries, and asserts every result against ground truth — fully offline.
+
+```bash title="run the demo"
+.venv/bin/python scripts/run_demo.py
+```
+
+It prints per-check output and, on success, ends with:
+
+```text
+ALL CHECKS PASSED (… facts ingested)
+```
+
+Any mismatch exits non-zero. This proves the structured/numeric channel: figures are
+extracted deterministically from PPTX/Excel structure into `fact_metric`, queries return a
+definite value plus lineage, and a missing fact is reported as `not_found` — never invented.
+
+</Step>
+
+<Step>
+
+## Ask a question offline
+
+The `ask.py` script runs the full path — intent parse → clarification gate → tool-use loop →
+definite value + lineage — against the deterministic `MockProvider`. No API key needed.
+
+```bash title="a question the data can answer"
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db "中国内地FY2024的REVENUE是多少"
+# → ACME_CN FY2024 REVENUE 为 1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```
+
+Ask for something the data doesn't have and you get an honest refusal, never a guess — this
+is the anti-fabrication invariant in action:
+
+```bash title="honest refusal on missing data"
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db "中国内地FY2025的REVENUE是多少"
+# → 查不到：REVENUE / ACME_CN / 2025 …未在事实表中找到。为避免误导，不提供任何推测数字。
+```
+
+</Step>
+
+<Step>
+
+## Use the Python API
+
+The same flow is one function call. `answer_question` takes the question, a `FactStore`, and a
+provider, and returns a result with a deterministic `answer` plus `sources` lineage:
+
+```python title="python API"
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)     # deterministic value, or an honest "not found"
+print(result.sources)    # [{'doc': ..., 'locator': ...}]
+```
+
+</Step>
+
+<Step>
+
+## Start the HTTP service
+
+The FastAPI app and the RQ worker run as separate processes. The API answers questions and
+enqueues ingestion jobs; the worker consumes those jobs out-of-process (and needs Redis).
+Both require the `[service]` extra.
+
+<Tabs items={['API server', 'Worker', 'Endpoints']}>
+
+<Tab value="API server">
+
+```bash title="run the server"
+RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+```
+
+```bash title="ask over HTTP"
+curl -s localhost:8000/v1/ask -H 'content-type: application/json' \
+     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
+```
+
+`scripts/run_server.py` accepts `--host` (default `127.0.0.1`) and `--port` (default `8000`).
+Configuration is injected entirely via `RAGSPINE_*` environment variables.
+
+</Tab>
+
+<Tab value="Worker">
+
+Ingestion jobs run out-of-process via an RQ queue backed by Redis:
+
+```bash title="run the worker"
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
+```
+
+The worker opens and closes its own stores per job (it does not share a sqlite connection
+with the API process). The queue name defaults to `ragspine-ingest` and can be overridden
+with `--queue`.
+
+</Tab>
+
+<Tab value="Endpoints">
+
+| Method | Path                         | Purpose                            |
+| ------ | ---------------------------- | ---------------------------------- |
+| `GET`  | `/healthz`                   | liveness check                     |
+| `GET`  | `/readyz`                    | readiness check                    |
+| `POST` | `/v1/ask`                    | ask a question                     |
+| `POST` | `/v1/ingest/structured/jobs` | enqueue a structured ingestion job |
+| `POST` | `/v1/ingest/narrative/jobs`  | enqueue a narrative ingestion job  |
+| `GET`  | `/v1/jobs/{id}`              | poll a job's status                |
+
+</Tab>
+
+</Tabs>
+
+</Step>
+
+</Steps>
+
+## Next steps
+
+<Cards>
+  <Card
+    title="CLI & scripts"
+    href="/docs/getting-started/cli-and-scripts"
+    description="Full reference of make targets and the ask.py / server / worker flags."
+  />
+  <Card
+    title="Configuration"
+    href="/docs/reference/configuration"
+    description="Every RAGSPINE_* environment variable and what it controls."
+  />
+</Cards>

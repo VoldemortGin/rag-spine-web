@@ -1,0 +1,89 @@
+---
+title: Provenance
+description: Every fact and every answer carries a source document id plus a locator — lineage that travels end-to-end and is never dropped.
+---
+
+Anti-fabrication's twin invariant: **always cite.** Every stored fact and every answer
+carries source lineage — which document it came from, and where inside it. There is no
+path that produces a number without also producing its origin.
+
+<Callout type="warn">
+  **Guarantee.** Every fact/answer carries `source_doc_id` (or `doc_id` for chunks) + a
+  `source_locator`. Lineage is carried end-to-end and is never dropped en route to the answer.
+</Callout>
+
+## Lineage starts at storage
+
+Lineage is not bolted on at answer time — it is a NOT-NULL column at the bottom of the
+stack.
+
+### Structured facts (`storage/fact_store.py`)
+
+The `Fact` dataclass's first ten fields are positional-frozen; two of them are lineage:
+
+```python
+@dataclass
+class Fact:
+    metric_code: str
+    entity: str
+    geography: str
+    channel: str
+    period_type: str
+    period: str
+    value: float
+    unit: str
+    source_doc_id: str    # which document
+    source_locator: str   # where inside it (e.g. slide=2,table=1,row=REVENUE,col=FY2024)
+    ...
+```
+
+The `fact_metric` table declares both as `TEXT NOT NULL`. A fact cannot exist without
+knowing where it came from. (v2 adds optional version lineage too — `source_file_hash`,
+`extractor_version`, `mapping_version` — but those are additive.)
+
+### Narrative chunks (`retrieval/chunking/chunk_store.py`)
+
+Each chunk carries `doc_id` + `source_locator` (`TEXT NOT NULL`), alongside metadata like
+`title`, `entity`, `period`, and `sensitivity`.
+
+## Lineage travels to the answer
+
+<Steps>
+  <Step>**Structured query** — `execute_query_metric` returns a `found` result whose `source` sub-dict is `{"doc": fact.source_doc_id, "locator": fact.source_locator}`.</Step>
+  <Step>**Answer synthesis** — `_structured_answer` renders each found fact as `… 值 单位（来源：{doc} · {locator}）` and returns the `source` dicts as `AgentResult.sources`.</Step>
+  <Step>**Narrative synthesis** — `_run_narrative` builds the snippet block with `（来源：{doc} {locator}）`, and as a backstop, any source document name the model omitted is force-appended to the answer.</Step>
+  <Step>**HTTP response** — the `/v1/ask` route maps `result.sources` into the `sources` field of `AskResponse` (`service/api/routes.py`).</Step>
+</Steps>
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # number + （来源：… · …）
+print(result.sources)  # [{'doc': 'ACME_FY2024_Review.pptx', 'locator': 'slide=2,table=1,...'}]
+```
+
+## Where lineage must not be dropped
+
+<Callout type="info">
+  These are the seams where it would be easy — and forbidden — to lose lineage:
+</Callout>
+
+- **Storage** — never write a fact/chunk without its lineage columns; they are NOT NULL
+  by design. (`storage/CLAUDE.md`: "never drop lineage".)
+- **Found-fact rendering** — `_structured_answer` / `_multi_subtask_answer` must keep the
+  `source` dict attached to each rendered line.
+- **Narrative synthesis** — the citation backstop in `_run_narrative` exists precisely so
+  a model that "forgets" to cite cannot strip provenance off the answer.
+- **The service edge** — the `/v1/ask` mapping must carry `sources` through unchanged; a
+  FAQ short-circuit hit carries its own `source` too (see
+  [FAQ short-circuit](/docs/concepts/faq-short-circuit)).
+
+<Callout type="warn">
+  The privacy-aware trace records lineage **identifiers** (chunk_ids, controlled codes) but never
+  the fact value or chunk text — provenance is about *where*, not about re-exposing the sensitive
+  *what*. See [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+</Callout>

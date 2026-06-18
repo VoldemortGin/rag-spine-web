@@ -1,0 +1,154 @@
+---
+title: Glossary
+description: RAGSpine terminology — one tight definition per term, grounded in the codebase.
+---
+
+Project terminology, alphabetical. Each term is defined as it is actually used in the
+codebase; see the linked concept pages for depth.
+
+### Anti-fabrication guard
+
+The orchestrator step that rewrites an answer to "not found" when the structured channel
+returns no `found` fact. Enforced in control flow (`agent/agent.py`), not in a prompt.
+See [Anti-fabrication](/docs/concepts/anti-fabrication).
+
+### Chunk store
+
+The sqlite-backed store for narrative document chunks
+(`retrieval/chunking/chunk_store.py`). Each chunk carries `doc_id` + `source_locator`
+(NOT NULL) plus metadata (`title`, `entity`, `period`, `sensitivity`, …).
+
+### Clarification gateway
+
+The step (`clarify_scope`, `agent/intent.py`) that decides — by a deliberate asymmetry —
+whether to _ask first_ (missing metric), _answer with surfaced assumptions_ (missing
+entity/period), or _refuse_ (out-of-scope entity).
+
+### Composite (route)
+
+A question that is both numeric and narrative (a recognized metric + a narrative cue).
+The agent runs the structured path, then appends a narrative attribution section.
+
+### Dual channel
+
+The structured numeric path + the narrative RAG path, run deterministically and — for
+composite questions — compared and merged. See [Dual channel](/docs/concepts/dual-channel).
+
+### `dim_key`
+
+The canonical sorted-JSON natural key over a fact's _identity_ dimensions (`metric`,
+`entity`, `channel`, `period`). The `UNIQUE` upsert conflict key in the fact store;
+storage-only, recomputed on write — never a `Fact` field.
+
+### `fact_metric`
+
+The sqlite table holding every structured numeric fact, one row per
+metric × entity × period × channel, with full lineage (`source_doc_id`,
+`source_locator`). Backed by `storage/fact_store.py`.
+
+### FAQ short-circuit
+
+An SME-vetted question→answer cache (`service/faq/`) that bypasses the LLM, sitting in
+front of the anti-fabrication guard, behind conservative exclusions. See
+[FAQ short-circuit](/docs/concepts/faq-short-circuit).
+
+### `found` / `not_found` / `unrecognized_param`
+
+The tri-state returned by the `query_metric` tool: a value exists (`found`), no matching
+row (`not_found`), or a parameter could not be normalized to a controlled code
+(`unrecognized_param`). The structured channel never returns a guess.
+
+### Glossary (synonym normalization)
+
+The mapping layer (`common/glossary.py`) that normalizes ZH/EN/abbreviation synonyms to
+controlled metric / entity / period codes. Returns `None` on anything unrecognized rather
+than guessing — the entry point to the structured channel.
+
+### Home company / `CompanyProfile`
+
+The deployment's own company identity, metrics, entities, and competitor list, loaded
+from config (`config/company.example.toml`). No company is hardcoded anywhere; "ACME" is
+only the fictional demo profile.
+
+### Intent slots
+
+The four parsed slots — `metric`, `entity`, `period`, `channel` — extracted from a
+question by the intent parser and used for routing and querying (`agent/intent.py`).
+
+### IR / StyledGrid
+
+The frozen intermediate representation that documents are extracted into (style- and
+color-aware) before ingestion into the fact and chunk stores.
+
+### `IntentParser` (Protocol)
+
+The pluggable seam for intent extraction (ADR 0010). Default is the zero-LLM,
+config-driven `RuleIntentParser`. **Security is not pluggable** — the security gate
+re-derives scope from the raw question independently of the parser.
+
+### Listwise rerank
+
+An optional second-pass reranker (`retrieval/rerank/listwise_rerank.py`) that sends the
+top candidates to an LLM judge for relevance ordering, falling back to RRF order on any
+failure. `RESTRICTED` candidates never enter the judge prompt.
+
+### MockProvider
+
+The deterministic, offline `LLMProvider` implementation (`agent/llm_provider.py`). Lets
+the core run fully offline with no API key — the default for demos and tests.
+
+### Narrative channel
+
+The RAG path for "why / what happened" questions: hybrid retrieve → optional rerank →
+synthesis with citations. Default chain is pure BM25 + RRF (no vector backend wired).
+
+### Provenance
+
+The `source_doc_id` (or `doc_id`) + `source_locator` carried by every fact, chunk, and
+answer. Carried end-to-end, never dropped. See [Provenance](/docs/concepts/provenance).
+
+### `Protocol` seam
+
+A typed `Protocol` boundary at which an external dependency is injected (LLM provider,
+embedding backend, listwise judge, OCR backend, narrative retriever, task queue). The
+core imports zero SDKs and depends only on these abstractions.
+
+### `query_metric`
+
+The function-calling tool of the structured channel (`agent/query_tools.py`). Normalizes
+its parameters via the glossary, queries `fact_metric`, and returns the tri-state result
+with lineage — never a fabricated number.
+
+### Reciprocal Rank Fusion (RRF)
+
+The rank-fusion method combining BM25 and vector rankings in hybrid retrieval
+(`rrf_fuse`, `k=60`); each ranking contributes `1 / (k + rank)` to an item's fused score.
+
+### RESTRICTED isolation
+
+The invariant that `RESTRICTED`-tier content is stripped at two exits (`retrieval/link`
+and `retrieval/rerank`) before it can reach a prompt. See
+[RESTRICTED isolation](/docs/concepts/restricted-isolation).
+
+### Review queue
+
+The human (SME) review-queue state machine for low-confidence or conflicting ingested
+items (`ingestion/review/`). Distinct from the async job queue; a fact's `review_status`
+(e.g. `pending`, `approved`, `rejected`, `blocked`) gates query visibility.
+
+### Security gate
+
+The deterministic, never-pluggable front door (`agent/security_gate.py`, ADR 0010) that
+detects external/competitor entities by longest-match, masks them with equal-length
+spaces, and refuses out-of-scope questions before any tool / retriever / LLM call.
+
+### Sensitivity tier
+
+The per-chunk classification (`common/sensitivity.py`): `INTERNAL` by default, escalated
+to `RESTRICTED` by deterministic, config-driven, fail-safe signals.
+
+### Structured channel
+
+The deterministic numeric path: glossary normalization → `query_metric` over the
+`fact_metric` store → answer rendered from the fact value, with lineage. Never invents a
+number.

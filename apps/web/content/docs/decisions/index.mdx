@@ -1,0 +1,47 @@
+---
+title: Decisions (ADR)
+description: The architecture decision records behind RAGSpine — immutable, append-only, and superseded rather than edited.
+---
+
+An **Architecture Decision Record (ADR)** captures one significant decision: the
+context that forced it, the decision itself, the alternatives that were rejected, and
+the consequences that follow. RAGSpine keeps its ADRs as immutable historical records.
+
+## How ADRs work here
+
+- **One decision per file.** Each record is a single, self-contained choice
+  (`docs/adr/NNNN-kebab-title.md` in the repo).
+- **Append-only and immutable.** An ADR is never edited after it is accepted. To
+  reverse a decision, you add a _new_ ADR that supersedes the old one — the history
+  stays intact and auditable.
+- **Supersede, don't edit.** This is why a record can describe an older path (for
+  example, pre-`src/` layout file locations) without being "wrong": it documents the
+  decision as it stood at the time.
+- **Exempt from drift tracking.** Because they are historical, ADRs carry no `covers`
+  frontmatter and are not checked by `scripts/check_doc_drift.py`.
+
+<Callout title="The through-line">
+  The recurring principle across these decisions is to **separate guarantees from flexibility**:
+  invariants (anti-fabrication, provenance, source isolation, dependency licensing, the security
+  gate) are hard, deterministic, and non-pluggable, while everything else (domain, language, LLM,
+  embedding, reranker, parsing strategy) is soft — config- or `Protocol`-driven.
+</Callout>
+
+## The records
+
+[ADR 0002](/docs/decisions/adr-0002) is the umbrella product-direction record; it
+indexes the eight per-decision ADRs (0003–0010) settled in the same design interview.
+
+| #                                | Title                                                                               | Summary                                                                                                                                                       | Status   |
+| -------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| [0001](/docs/decisions/adr-0001) | Deterministic dual-channel over a single LLM path                                   | Two deterministic channels (structured numeric + narrative RAG); the LLM is confined to synthesis, never to inventing facts.                                  | accepted |
+| [0002](/docs/decisions/adr-0002) | Product direction: a general-purpose, license-clean, framework-unlocked RAG library | The umbrella north star; separates hard invariants from soft, config-/`Protocol`-driven flexibility and indexes ADRs 0003–0010.                               | accepted |
+| [0003](/docs/decisions/adr-0003) | Audience: a general-purpose OSS library for others to build on                      | The primary audience is developers building their own RAG on top of RAGSpine; finance becomes one example domain, not the identity.                           | accepted |
+| [0004](/docs/decisions/adr-0004) | Full generality: `DomainProfile` and arbitrary-dimension facts                      | Generalize fully — `CompanyProfile` becomes `DomainProfile`; the structured channel becomes a typed-fact store with arbitrary user-defined dimensions.        | accepted |
+| [0005](/docs/decisions/adr-0005) | Lean core; quarantine dormant capability as experimental/extras                     | Ship only what runs in the default offline path; move OCR, real vector, and the verifier into clearly-labeled experimental modules/extras.                    | accepted |
+| [0006](/docs/decisions/adr-0006) | Quality bar: invariants as property tests, plus one real retrieval benchmark        | Define quality as guarantees (invariants proven by property tests), plus one real labeled retrieval benchmark; punt domain accuracy to the user's data.       | accepted |
+| [0007](/docs/decisions/adr-0007) | Multilingual: architect for five, ship two; the rest as locale packs                | Thread a `locale` seam through every layer; ship and test Chinese + English in core; Japanese / Italian / German ship as community locale packs.              | accepted |
+| [0008](/docs/decisions/adr-0008) | Prompts: a packaged `PromptRegistry` under `ragspine/prompts/<locale>/`             | Externalize prompts into packaged, locale-keyed template files behind a `PromptRegistry` `Protocol`, filled from `DomainProfile` at runtime.                  | accepted |
+| [0009](/docs/decisions/adr-0009) | "Framework-free" redefined: no framework lock-in + permissive-license-only          | Redefine framework-free as no orchestration lock-in plus permissive-license-only (≤ Apache-2.0); real backends are opt-in extras for weight, not purity.      | accepted |
+| [0010](/docs/decisions/adr-0010) | Intent parsing: deterministic security gate + pluggable `IntentParser`              | Decouple the always-on, never-pluggable deterministic security gate from a pluggable `IntentParser` `Protocol`.                                               | accepted |
+| [0011](/docs/decisions/adr-0011) | Adopt the python-project-standard; migrate to `src/` layout, keep the rest          | Adopt the house standard as governing philosophy; align the one bounded structural invariant (`src/ragspine/` layout) and accept four documented divergences. | accepted |

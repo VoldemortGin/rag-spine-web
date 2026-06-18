@@ -1,0 +1,95 @@
+---
+title: FAQ Short-circuit
+description: An SME-vetted question to answer cache that bypasses the LLM — behind conservative exclusions, because it sits in front of the anti-fabrication guard.
+---
+
+The FAQ cache returns an SME-vetted answer for a known question, bypassing the LLM, the
+fact store, and the retriever entirely. It is a latency and cost optimization — and a
+**high-risk layer**, because it sits _in front of_ the anti-fabrication guard. A wrong
+short-circuit would skip every downstream safety check.
+
+<Callout type="warn">
+  Because the FAQ layer sits in front of [anti-fabrication](/docs/concepts/anti-fabrication), its
+  exclusions are deliberately conservative: structured-numeric, competitor, real-time, expired,
+  disabled, and `RESTRICTED` items **never** short-circuit.
+</Callout>
+
+## Where it sits
+
+In the `/v1/ask` route (`service/api/routes.py`), the FAQ lookup runs first:
+
+```python
+# 1) FAQ short-circuit — on hit, never touches provider / fact store / retriever
+hit = faq_cache.lookup(req.question, reference_date=ref)
+if hit is not None:
+    return AskResponse(..., route="faq", answer=hit.answer, sources=[...])
+
+# 2) miss -> normal workflow (anti-fabrication guard, dual channel, ...)
+result = answer_question(req.question, store, provider, ...)
+```
+
+`lookup` is a pure function (`service/faq/faq_cache.py`): it consults `parse_intent` /
+`clarify_scope` for boundary decisions but never reaches the LLM, fact store, or
+retriever. Matching is normalized exact / alias match only (NFKC + casefold + whitespace
+fold + trailing-punctuation strip) — no fuzzy or embedding matching.
+
+## The conservative exclusions
+
+`lookup` returns a **miss** (`None`) if _any_ of these hold — the exclusions are checked
+_before_ the cache index is consulted:
+
+<Accordions>
+  <Accordion title="Out-of-scope / competitor entity">
+    If `clarify_scope` returns `CLARIFY_OUT_OF_SCOPE_ENTITY`, or the parsed `external_entity` is
+    set, the question is about an external/competitor entity — never short-circuit, so the security
+    refusal path is preserved.
+  </Accordion>
+  <Accordion title="Structured-numeric questions">
+    If the route is `ROUTE_STRUCTURED`, or any structured slot was filled (`metric` / `entity` /
+    `period`, or their multi-value forms), the question wants a live number — it must go through the
+    structured channel and its provenance, not a cached string.
+  </Accordion>
+  <Accordion title="Real-time / time-sensitive cues">
+    If the (normalized) question contains a real-time cue — “今天”, “现在”, “最新”, “current”,
+    “latest”, “股价”, etc. — a fixed cached answer would go stale, so it is excluded. The cue scan
+    uses the same NFKC/casefold normalization as the index, so full-width variants can't sneak past.
+  </Accordion>
+  <Accordion title="Expired (outside validity window)">
+    Each item may carry `valid_from` / `valid_until`. If the reference date is outside the closed
+    interval — or a date fails to parse — it is treated as out of window and excluded.
+  </Accordion>
+  <Accordion title="Disabled">
+    Items with `enabled = false` are filtered out at index-build time and re-checked defensively at
+    lookup.
+  </Accordion>
+  <Accordion title="RESTRICTED sensitivity">
+    Any item whose `sensitivity` is `RESTRICTED` (case-insensitive, whitespace-trimmed) is never
+    short-circuited — consistent with [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+  </Accordion>
+</Accordions>
+
+## An FAQ item
+
+Items are SME-vetted and version-tracked; the hit carries its own provenance
+(`FAQHit.source`):
+
+```json
+{
+  "id": "what-is-ragspine",
+  "question": "RAGSpine 是什么？",
+  "aliases": ["What is RAGSpine?"],
+  "answer": "RAGSpine 是一个无框架的后端 RAG 引擎……",
+  "source": "internal/faq-handbook.md",
+  "version": 3,
+  "enabled": true,
+  "valid_from": "2026-01-01",
+  "valid_until": null,
+  "sensitivity": "INTERNAL"
+}
+```
+
+<Callout type="info">
+  A hit returns `route: "faq"` with a `cache` block (`hit`, `type`, `faq_id`, `version`, `source`).
+  The trace records `cache_hit`, `faq_id`, and `faq_version` only — never the answer text. Load the
+  FAQ JSON via the `RAGSPINE_FAQ_SOURCE` env var.
+</Callout>

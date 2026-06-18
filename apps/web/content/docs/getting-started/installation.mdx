@@ -1,0 +1,101 @@
+---
+title: Installation
+description: Install RAGSpine from PyPI or from source, pick the optional extras you need, and understand the offline-first core.
+---
+
+RAGSpine requires **Python 3.10+**. The core imports zero third-party SDKs and runs fully
+offline with a deterministic `MockProvider` — you only pull in heavier dependencies via the
+optional extras below.
+
+## Install from PyPI
+
+```bash title="install"
+pip install rag-spine
+```
+
+<Callout type="info">
+The **distribution name is hyphenated** (`rag-spine`), but the **import name is not**:
+
+```python
+import ragspine
+```
+
+So you `pip install rag-spine` but `from ragspine.agent.agent import answer_question`.
+
+</Callout>
+
+## Optional extras
+
+The base install gives you the offline core. Add extras for the capabilities you need:
+
+| Extra       | Pulls in                                                    | For                                              |
+| ----------- | ----------------------------------------------------------- | ------------------------------------------------ |
+| `[service]` | fastapi, uvicorn, httpx, rq, redis                          | the HTTP + async-queue layer                     |
+| `[pdf]`     | docling                                                     | digital-PDF table extraction                     |
+| `[ocr]`     | paddleocr                                                   | scanned-PDF OCR (Linux + NVIDIA GPU)             |
+| `[llm]`     | anthropic, openai                                           | real LLM providers (lazy-imported)               |
+| `[embed]`   | sentence-transformers                                       | real embedding models for the vector channel     |
+| `[dev]`     | pytest, reportlab, markdown, pdoc, ruff, mypy, build, twine | tests, fixture generation, docs, lint, packaging |
+
+Combine extras with commas:
+
+```bash title="install with extras"
+pip install "rag-spine[service,llm]"
+```
+
+<Callout type="warn">
+  The `[ocr]` extra targets Linux + NVIDIA GPU. `paddlepaddle-gpu` is CUDA-version-specific and is
+  **not** declared by the extra — install it separately per PaddlePaddle's official guidance on your
+  target box. The real-OCR integration tests are GPU-gated and skipped elsewhere.
+</Callout>
+
+## Install from source
+
+Clone the repo and create an isolated environment with [uv](https://docs.astral.sh/uv/):
+
+```bash title="from source"
+git clone https://github.com/VoldemortGin/ragspine.git && cd ragspine
+uv venv .venv
+VIRTUAL_ENV="$(pwd)/.venv" uv pip install -e ".[dev,service]"
+```
+
+<Callout type="info">
+  The `VIRTUAL_ENV="$(pwd)/.venv"` prefix is **required**: it tells `uv` to install into the `.venv`
+  you just created rather than a system Python it might otherwise discover. This is the canonical
+  dev setup — editable (`-e`) with the `[dev,service]` extras.
+</Callout>
+
+If you have `make`, the same setup is wrapped as targets (run from the repo root):
+
+```bash title="via make"
+make venv        # uv venv .venv
+make install     # editable install with [dev,service]
+make install-all # editable install with [dev,service,llm,embed]
+```
+
+## Offline-first by design
+
+The core depends only on the abstraction, never the SDK. Every external dependency — LLM
+provider, embedding backend, reranker, OCR engine, retriever, task queue — is a typed
+`Protocol`, lazy-imported and injected at the edges. That means:
+
+- A plain `pip install rag-spine` (no extras) is enough to run the structured channel, the
+  agent orchestration, and the end-to-end demo **with no API key and no network**.
+- The bundled `MockProvider` is deterministic, so offline runs are reproducible.
+- You add real backends (Claude, OpenAI, sentence-transformers, PaddleOCR) only when you
+  install the matching extra and inject the provider.
+
+## Next steps
+
+<Cards>
+  <Card
+    title="Quickstart"
+    href="/docs/getting-started/quickstart"
+    description="Run the demo, ask a question offline, and start the HTTP service."
+  />
+  <Card
+    title="CLI & scripts"
+    href="/docs/getting-started/cli-and-scripts"
+    description="The make targets and developer entry-point scripts."
+  />
+</Cards>

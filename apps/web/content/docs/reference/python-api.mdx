@@ -1,0 +1,157 @@
+---
+title: Python API
+description: The key public surface — answer_question, MockProvider, and FactStore — with accurate signatures and a runnable offline example. The full auto-generated reference ships via make docs.
+---
+
+RAGSpine is a library you assemble in plain Python. The entry points below are the
+load-bearing public surface; everything else is composed from them. The full, exhaustive API
+reference is generated from docstrings and type hints by `make docs` (see [below](#full-api-reference)).
+
+## `answer_question`
+
+`src/ragspine/agent/agent.py` — the single end-to-end orchestration entry point. It parses
+intent, runs the clarification gateway, routes (structured / narrative / composite), drives
+the tool-use loop, and applies the anti-fabrication and provenance guards.
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+) -> AgentResult: ...
+```
+
+<TypeTable
+  type={{
+    question: { type: 'str', description: 'The natural-language question.' },
+    store: { type: 'FactStore', description: 'The structured (numeric) fact store.' },
+    provider: {
+      type: 'LLMProvider',
+      description:
+        'Any object with create_message — e.g. MockProvider (offline) or AnthropicProvider.',
+    },
+    reference_date: {
+      type: 'date | None',
+      default: 'None → today',
+      description: 'Anchor for resolving relative periods (last year, H1, …).',
+    },
+    narrative_retriever: {
+      type: 'NarrativeRetriever | None',
+      default: 'None',
+      description: 'Narrative retrieval seam; when omitted the narrative path degrades honestly.',
+    },
+    intent_parser: {
+      type: 'IntentParser | None',
+      default: 'None → RuleIntentParser',
+      description: 'Pluggable intent parser; the deterministic SecurityGate runs regardless.',
+    },
+  }}
+/>
+
+It returns an `AgentResult` dataclass:
+
+```python
+@dataclass
+class AgentResult:
+    answer: str
+    route: str
+    clarification: ClarificationResult | None = None
+    tool_results: list[dict[str, object]] = ...
+    sources: list[dict[str, object]] = ...
+```
+
+## `MockProvider`
+
+`src/ragspine/agent/llm_provider.py` — the deterministic, offline `LLMProvider`. No API key,
+no network: it scripts the tool-use loop from rule-based intent parsing and renders found /
+not-found / unrecognized answers — never fabricating a number.
+
+```python
+MockProvider(reference_date: date | None = None)
+```
+
+The real-provider counterpart is `AnthropicProvider(model=..., base_url=...)`, which
+lazy-imports the `anthropic` SDK (install with `pip install 'rag-spine[llm]'`).
+
+## `FactStore`
+
+`src/ragspine/storage/fact_store.py` — the SQLite-backed structured store. Every fact carries
+full lineage (`source_doc_id` + `source_locator`); upserts are keyed on the identity
+dimensions so a metric × entity × period × channel row is 0-or-1, preserving the
+deterministic found / not-found read path.
+
+```python
+class FactStore:
+    def __init__(self, db_path: str | Path): ...
+    def init_schema(self) -> None: ...
+    def upsert_facts(self, facts: list[Fact], ingested_at: str | None = None) -> int: ...
+    def query(
+        self,
+        metric_code: str,
+        entity: str,
+        period_type: str,
+        period: str,
+        channel: str = "TOTAL",
+        review_statuses: tuple[str, ...] | None = VISIBLE_REVIEW_STATUSES,
+    ) -> list[Fact]: ...
+    def count(self) -> int: ...
+    def close(self) -> None: ...
+```
+
+A `Fact`'s first ten fields are positional-frozen:
+
+```python
+@dataclass
+class Fact:
+    metric_code: str
+    entity: str
+    geography: str
+    channel: str
+    period_type: str
+    period: str
+    value: float
+    unit: str
+    source_doc_id: str
+    source_locator: str
+    # ... additive v2 / lineage fields follow
+```
+
+## Runnable example
+
+The README quickstart, offline and deterministic — no API key required:
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)     # deterministic value, or an honest "not found"
+print(result.sources)    # [{'doc': ..., 'locator': ...}]
+```
+
+<Callout type="info">
+  `import ragspine` exposes lazy submodule access (PEP 562), so
+  `ragspine.agent.agent.answer_question` resolves without eagerly importing every subpackage. The
+  distribution name is hyphenated (`pip install rag-spine`); the import name is `ragspine`.
+</Callout>
+
+## Full API reference
+
+The complete, auto-generated reference is produced from docstrings and type hints by
+[pdoc](https://pdoc.dev/):
+
+```bash
+make docs        # → docs/site/  (static HTML, nginx-ready)
+```
+
+<Callout type="warn">
+  There is no embedded API browser on this docs site. For the full symbol-level reference, run `make
+  docs` locally, or read the source on GitHub:
+  [github.com/VoldemortGin/ragspine](https://github.com/VoldemortGin/ragspine).
+</Callout>

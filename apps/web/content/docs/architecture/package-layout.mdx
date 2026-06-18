@@ -1,0 +1,248 @@
+---
+title: Package Layout
+description: The deep, domain-grouped src/ragspine map — what lives in each of the nine domains, the dependency direction between them, and how the core stays SDK-free.
+---
+
+RAGSpine uses a **deep, domain-grouped** layout: organize by domain/feature, never by
+technical layer, so the folder path locates a file before you read its name. A package splits
+the moment it holds a second responsibility. There are nine top-level domains under
+`src/ragspine/`, each with a thin `__init__.py` (a docstring + a `Submodules:` index) that
+lazy-loads its children.
+
+## The tree
+
+<Files>
+  <Folder name="src/ragspine" defaultOpen>
+    <Folder name="common">
+      <File name="company_profile.py" />
+      <File name="glossary.py" />
+      <File name="sensitivity.py" />
+      <File name="observability.py" />
+      <File name="core.py" />
+    </Folder>
+    <Folder name="extraction">
+      <Folder name="extractors" />
+      <Folder name="routing" />
+      <Folder name="color" />
+      <Folder name="verification" />
+      <File name="ir.py" />
+    </Folder>
+    <Folder name="ingestion">
+      <Folder name="structured" />
+      <Folder name="narrative" />
+      <Folder name="review" />
+    </Folder>
+    <Folder name="storage">
+      <File name="fact_store.py" />
+    </Folder>
+    <Folder name="retrieval">
+      <Folder name="chunking" />
+      <Folder name="lexical" />
+      <Folder name="vector" />
+      <Folder name="rerank" />
+      <Folder name="link" />
+    </Folder>
+    <Folder name="agent">
+      <File name="agent.py" />
+      <File name="intent.py" />
+      <File name="query_tools.py" />
+      <File name="llm_provider.py" />
+      <File name="security_gate.py" />
+    </Folder>
+    <Folder name="eval">
+      <File name="qa_eval.py" />
+      <File name="extraction_eval.py" />
+    </Folder>
+    <Folder name="service">
+      <Folder name="api" />
+      <Folder name="faq" />
+      <Folder name="tasks" />
+      <File name="config.py" />
+    </Folder>
+    <Folder name="pipeline">
+      <File name="graph.py" />
+      <File name="topology.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+The same map, annotated (from the project's `README.md`):
+
+```text
+src/ragspine/
+├── common/         cross-cutting: company profile, sensitivity, glossary, observability
+├── extraction/     documents → a frozen StyledGrid intermediate representation (IR)
+│   ├── extractors/   xlsx / pptx / pdf (digital + scanned/OCR), style- & color-aware
+│   ├── routing/      per-page PDF triage (digital vs scanned vs export)
+│   ├── color/        controlled color-semantics registry
+│   └── verification/ dual-channel cross-check → review queue
+├── ingestion/      IR/text → stores
+│   ├── structured/   fact ingestion + batch manifest ledger (idempotent)
+│   ├── narrative/    document chunk ingestion + extraction
+│   └── review/       human review-queue state machine (SME)
+├── storage/        fact store (numeric) + chunk store (narrative), sqlite, full lineage
+├── retrieval/      narrative RAG
+│   ├── chunking/     paragraph-granular chunker + versioned chunk store
+│   ├── lexical/      Okapi BM25 (CJK uni+bigram) + RRF fusion
+│   ├── vector/       injectable embedding backends (default: none = pure BM25)
+│   ├── rerank/       LLM listwise reranker (RRF-fallback)
+│   └── link/         adapter wiring retrieval into the agent (strips RESTRICTED at exit)
+├── agent/          intent parsing, clarification gateway, tool-use loop, llm provider
+├── eval/           QA + extraction evaluation harnesses with baseline gates
+├── service/        FastAPI app, RQ task queue, ingestion jobs, FAQ short-circuit cache
+└── pipeline/       static topology export (.topology() → Mermaid / DOT / JSON)
+```
+
+## What lives where
+
+<Accordions>
+  <Accordion title="common — the leaf foundation">
+    Cross-domain primitives that everything builds on and which depend on nothing first-party.
+    `company_profile.py` (config-driven identity / metrics / competitors — never hardcoded),
+    `glossary.py` (ZH/EN/abbrev synonym → controlled code normalization), `sensitivity.py`
+    (the sensitivity tiers), `observability.py` (request_id + privacy-aware structured traces:
+    codes / counts / timings only), and `core.py` (global path constants).
+
+    [Guide → /docs/guides/common](/docs/guides/common)
+
+  </Accordion>
+  <Accordion title="extraction — documents to a frozen IR">
+    Office documents become a frozen `StyledGrid` IR (style- and color-aware, not just text
+    splitting). `extractors/` handles xlsx / pptx / pdf (digital + scanned/OCR), `routing/`
+    triages each PDF page (digital vs scanned vs export), `color/` is the controlled
+    color-semantics registry, and `verification/` runs a dual-channel cross-check that routes
+    failures to a review queue. `ir.py` defines the IR — the most stable interface in the repo.
+
+    [Guide → /docs/guides/extraction](/docs/guides/extraction)
+
+  </Accordion>
+  <Accordion title="ingestion — IR / text into the stores">
+    The coordinator that takes extraction output and writes it to storage. `structured/` does
+    hash-idempotent fact ingestion guarded by a batch manifest ledger, `narrative/` does
+    document chunk ingestion, and `review/` is the SME human review-queue state machine
+    (distinct from the async job queue).
+
+    [Guide → /docs/guides/ingestion](/docs/guides/ingestion)
+
+  </Accordion>
+  <Accordion title="storage — sqlite with full lineage">
+    The sqlite storage layer. `fact_store.py` owns the numeric `fact_metric` table; every fact
+    preserves its `source_doc_id` + locator. The narrative side is a versioned chunk store
+    (under `retrieval/chunking`) modeled on the same explicit-schema, parameterized-SQL style.
+
+    [Guide → /docs/guides/storage](/docs/guides/storage)
+
+  </Accordion>
+  <Accordion title="retrieval — narrative RAG">
+    The whole narrative pipeline: `chunking/` (paragraph-granular chunker + versioned store),
+    `lexical/` (Okapi BM25 with CJK uni+bigram tokenization, RRF fusion at `k=60`, and the
+    glossary multi-query rewriter), `vector/` (injectable embedding backends, default none),
+    `rerank/` (LLM listwise reranker with RRF fallback), and `link/` (the adapter wiring
+    retrieval into the agent — and the second `RESTRICTED` strip exit).
+
+    [Guide → /docs/guides/retrieval](/docs/guides/retrieval)
+
+  </Accordion>
+  <Accordion title="agent — orchestration">
+    The control flow: `agent.py` (the orchestrator and sole public entry `answer_question()`),
+    `intent.py` (rule-based intent/scope parse + clarification gateway), `query_tools.py` (the
+    `query_metric` tool with the found / not_found / unrecognized tri-state), `llm_provider.py`
+    (the `LLMProvider` Protocol + `AnthropicProvider` + offline `MockProvider`), and
+    `security_gate.py` (the deterministic, non-pluggable security gate).
+
+    [Guide → /docs/guides/agent](/docs/guides/agent)
+
+  </Accordion>
+  <Accordion title="eval — evaluation harnesses">
+    `qa_eval.py` (Q&A loop with four-gate metrics — numeric accuracy / citation validity /
+    refusal / clarification — and a baseline regression gate) and `extraction_eval.py`
+    (per-channel extraction metrics + regression gate). Golden sets live under `data/golden/`.
+
+    [Guide → /docs/guides/eval](/docs/guides/eval)
+
+  </Accordion>
+  <Accordion title="service — the HTTP / async edge">
+    The composition root. `api/` is the FastAPI app factory + dependency injection + routes +
+    boundary schemas, `faq/` is the FAQ short-circuit cache, `tasks/` is the async task-queue
+    abstraction (`FakeQueue` for tests, `RQQueue` for prod) plus worker-side ingestion jobs,
+    and `config.py` is the env-driven `ServiceConfig` (`RAGSPINE_*`) + resource assembly.
+
+    [Guide → /docs/guides/service](/docs/guides/service)
+
+  </Accordion>
+  <Accordion title="pipeline — static topology export">
+    The code-first answer to "a visual canvas". It derives a static `PipelineGraph` from the
+    *real wiring* (duck-typed introspection, never execution) and exports Mermaid / DOT / JSON.
+    `graph.py` is the zero-dependency value layer (`Node` / `Edge` / `PipelineGraph` +
+    exporters); `topology.py` builds the graphs (`agent_topology`, `retriever_topology`,
+    `service_topology`). The CLI is `scripts/topology.py`.
+
+    [Guide → /docs/guides/pipeline](/docs/guides/pipeline)
+
+  </Accordion>
+</Accordions>
+
+## Dependency direction
+
+The layering is strict and acyclic — `common` (and `storage`) sit at the bottom depending on
+nothing first-party; `agent`, `extraction`, and `retrieval` build on them; `ingestion`,
+`eval`, and `service` are coordinators; `pipeline` is an isolated leaf everyone may delegate
+_into_ but which imports no one.
+
+```text
+       service           (composition root — imports almost everything)
+      /   |   \
+ingestion eval  …
+   |    \   \
+extraction agent  retrieval ──► pipeline   (retrieval delegates .topology() into pipeline)
+   \      |   \      /
+    \    storage    /
+     \     |       /
+        common              (leaf — depends on nothing first-party)
+```
+
+<TypeTable
+  type={{
+    common: { type: 'leaf', description: 'Depends on nothing first-party. Foundation for all.' },
+    storage: { type: 'leaf', description: 'Zero cross-domain imports; stdlib sqlite3 only.' },
+    agent: {
+      type: '→ common, storage',
+      description:
+        'Reaches retrieval only via the NarrativeRetriever Protocol — never imports a retrieval impl.',
+    },
+    extraction: {
+      type: '→ common, storage',
+      description: 'Turns documents into the IR and facts.',
+    },
+    retrieval: {
+      type: '→ common, agent, pipeline',
+      description:
+        'Imports only the LLMProvider Protocol from agent; delegates topology() into pipeline.',
+    },
+    ingestion: {
+      type: '→ common, extraction, retrieval, storage',
+      description: 'Coordinator: IR/chunks in, stores out.',
+    },
+    eval: {
+      type: '→ common, agent, retrieval, storage',
+      description: 'Drives the orchestrator against golden sets.',
+    },
+    service: {
+      type: '→ common, agent, extraction, ingestion, retrieval, storage',
+      description: 'Top-level composition root.',
+    },
+    pipeline: {
+      type: 'leaf',
+      description: 'Imports no other domain; introspects via duck-typed getattr.',
+    },
+  }}
+/>
+
+<Callout type="info">
+  **The core imports zero SDKs.** Every external dependency enters through a `Protocol`, and the
+  only files touching heavy SDKs (`anthropic` / `openai` / `fastapi` / `redis` / `docling`) are the
+  edge adapters. The `anthropic` import is lazy — inside `AnthropicProvider.__init__`, not at module
+  top — and submodules load lazily (PEP 562). A top-level `import ragspine` eagerly loads no domain
+  and pulls no third-party SDK, so the engine runs fully offline with the deterministic
+  `MockProvider`.
+</Callout>

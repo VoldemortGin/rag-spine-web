@@ -1,0 +1,199 @@
+---
+title: Common
+description: Cross-cutting primitives shared by every domain — the configurable company/domain profile, deterministic sensitivity classification, the dimension glossary, privacy-aware observability, and global path constants.
+---
+
+The **common** domain holds the cross-cutting primitives every other domain depends on:
+the configurable **company/domain profile** (so no company is ever hardcoded), the
+deterministic **sensitivity** model, the dimension **glossary**, privacy-aware
+**observability**, and the single source of truth for global paths. These have no
+dependencies on the rest of the system — they are the base of the import graph.
+
+<Callout type="info">
+  Package: `src/ragspine/common/`. Contract: `src/ragspine/common/CLAUDE.md`.
+</Callout>
+
+## Layout
+
+<Files>
+  <Folder name="common" defaultOpen>
+    <File name="company_profile.py — DomainProfile / CompanyProfile + loader" />
+    <File name="core.py — global path constants (single source of truth)" />
+    <File name="glossary.py — dimension synonyms + normalization" />
+    <File name="observability.py — request_id + structured trace" />
+    <File name="sensitivity.py — deterministic sensitivity classifier" />
+  </Folder>
+</Files>
+
+## Company / domain profile
+
+`company_profile.py` makes RAGSpine a generic management copilot rather than a hardcoded
+finance app. Identity, synonyms, dimensions, and the competitor list all come from a TOML
+file (`config/company.toml`); a missing file silently falls back to built-in ACME defaults.
+
+The profile is an immutable frozen dataclass. `CompanyProfile` is a module-level **alias**
+for the same `DomainProfile` class — both names work in `isinstance` checks and constructors.
+
+<TypeTable
+  type={{
+    home_company_name: { type: 'str' },
+    home_entity_code: { type: 'str' },
+    home_entity_synonyms: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'alias → entity code.',
+    },
+    entity_geography: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'entity code → geography.',
+    },
+    external_entities: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'competitor alias → display name.',
+    },
+    home_entity_labels: { type: 'dict[str, str]', default: '{}' },
+    sensitivity: { type: 'SensitivityPolicy', default: 'SensitivityPolicy()' },
+    dimensions: { type: 'tuple[DimensionSpec, ...]', default: '()' },
+  }}
+/>
+
+Each declared dimension is an immutable `DimensionSpec` (ADR 0004): `name`, `label`, `kind`
+(`categorical` / `temporal` / `measure`), `synonyms`, `units`, `labels`, `default`,
+`required`, `clarify` (`ask_first` / `assume` / `none`), `identity`, `expand`,
+`derived_from` / `derivation`, and the fabrication-whitelist flags. The default profile
+declares five dimensions — `metric`, `entity`, `period` (temporal), `channel`
+(default `TOTAL`, non-expanding), and `geography` (`identity=False`, derived from `entity`).
+
+```python
+from ragspine.common.company_profile import load_company_profile
+
+profile = load_company_profile()          # explicit path > $RAGSPINE_COMPANY_CONFIG > config/company.toml
+print(profile.home_entity_code)           # 'ACME_GROUP' by default
+```
+
+`load_company_profile(path=None)` resolves the config path (explicit arg →
+`RAGSPINE_COMPANY_CONFIG` env var → `config/company.toml`), parses it with `tomllib`/`tomli`,
+and falls back to the built-in default on any missing or unparseable file — never raising,
+never printing.
+
+<Callout type="warn">
+  **Config-driven, no hardcoded company.** Identity, metrics, and competitors come from the profile.
+  The `external_entities` map (competitor alias → display name) is how the agent recognizes an
+  out-of-scope competitor question. Don't hardcode a company anywhere.
+</Callout>
+
+## Sensitivity
+
+`sensitivity.py` is the deterministic data-classification layer that the
+[narrative ingestion](/docs/guides/ingestion#narrative-ingestion) path applies and that
+[RESTRICTED isolation](/docs/concepts/restricted-isolation) downstream depends on. Levels are
+plain strings — there is no enum. The only named constant is `RESTRICTED = "RESTRICTED"`;
+the unmarked default is `"INTERNAL"`.
+
+Rules live in an immutable `SensitivityPolicy` (read from the `[sensitivity]` config
+section, no hardcoded company words):
+
+<TypeTable
+  type={{
+    default_level: { type: 'str', default: '"INTERNAL"' },
+    escalate_unknown_to_restricted: {
+      type: 'bool',
+      default: 'False',
+      description: 'Strict switch: treat everything unknown as RESTRICTED.',
+    },
+    restricted_filename_patterns: { type: 'list[str]', default: '[]' },
+    restricted_keywords: { type: 'list[str]', default: '[]' },
+  }}
+/>
+
+`classify_sensitivity(filename, text, policy) -> str` is a pure function (zero external
+calls) that returns the first matching level, in priority order:
+
+<Steps>
+  <Step>filename / path matches a `restricted_filename_patterns` entry → `RESTRICTED`</Step>
+  <Step>else text matches a `restricted_keywords` entry → `RESTRICTED`</Step>
+  <Step>else `escalate_unknown_to_restricted` is `True` → `RESTRICTED`</Step>
+  <Step>else return `policy.default_level` (default `"INTERNAL"`)</Step>
+</Steps>
+
+The security stance: unmarked docs default to `INTERNAL`; a signal hit escalates to
+`RESTRICTED`; the blanket "everything unknown → RESTRICTED" behavior is an opt-in strict
+switch, off by default.
+
+## Glossary
+
+`glossary.py` normalizes free-form dimension synonyms to controlled codes. There is no
+class — it is module-level functions plus dictionaries derived from the loaded profile.
+Unrecognized input returns `None`; it never guesses.
+
+| function                                                                       | maps                                                          |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `normalize_metric(raw) -> str \| None`                                         | metric synonym → `metric_code`                                |
+| `normalize_entity(raw) -> str \| None`                                         | entity synonym → `entity_code`                                |
+| `resolve_external_entity(text) -> str \| None`                                 | competitor mention → display name (longest match)             |
+| `geography_for_entity(entity_code) -> str \| None`                             | default geography for an entity                               |
+| `unit_for_metric(metric_code) -> str \| None`                                  | default unit for a metric                                     |
+| `normalize_period(raw) -> tuple[str, str] \| None`                             | absolute period → `(period_type, period)`                     |
+| `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | relative period (今年/去年/上季度…) → `(period_type, period)` |
+
+Period normalization produces the same `period_type` values used by the
+[fact store](/docs/guides/storage#dim_key-the-upsert-key): `FY` (`FY2024` / `2024`),
+`HY` (`2024H1`), and `QUARTER` (`2025Q1`).
+
+```python
+from ragspine.common.glossary import normalize_metric, normalize_period
+
+normalize_metric("营收")        # 'REVENUE'
+normalize_period("FY 2024")    # ('FY', '2024')
+normalize_metric("not a metric")  # None — never guesses
+```
+
+## Observability
+
+`observability.py` is two small primitives:
+
+- `new_request_id() -> str` — a 12-char `uuid4` hex short code.
+- `emit_trace(logger=None, **fields) -> None` — logs one INFO record with the fixed message
+  `"trace"`, attaching `**fields` to the log record via `extra=`. It uses stdlib `logging`
+  only (no `basicConfig`); the host or test attaches the handler. The logger name is
+  `TRACE_LOGGER_NAME = "ragspine.trace"`.
+
+<Callout type="warn">
+  **Privacy-aware traces.** Logs are treated as Restricted. `emit_trace` is meant to carry only
+  non-sensitive metadata — request_id, route, controlled codes (metric / entity / period / channel),
+  status counts, scores, boolean flags, durations, token usage — and **never** the raw answer text,
+  a fact value, or chunk text.
+</Callout>
+
+## Core — global constants
+
+`core.py` is the single source of truth for paths, derived from `__file__` (no cwd or
+`rootutils` dependency, zero import-time side effects):
+
+| constant                  | value                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `REPO_ROOT`               | repo root, from `Path(__file__).parents[3]`                                    |
+| `DATA_DIR`                | `REPO_ROOT / "data"`                                                           |
+| `DEFAULT_FACT_DB`         | `data/fact_metric.db` — fact table **and** narrative-chunk table (same sqlite) |
+| `DEFAULT_MAPPING_DB`      | `data/color_mapping.db` — color-mapping registry                               |
+| `DEFAULT_REVIEW_QUEUE_DB` | `data/review_queue.db` — SME review queue                                      |
+
+## Invariants this domain upholds
+
+- **Config-driven** — identity / metrics / competitors come from `CompanyProfile`; never
+  hardcode a company.
+- **Privacy-aware traces** — `observability` records codes / counts / timings only, never
+  the answer, a fact value, or chunk text.
+- **Deterministic, never-guess normalization** — the glossary and sensitivity classifier are
+  pure functions; unrecognized input returns `None` / the default level.
+
+## Related
+
+<Cards>
+  <Card title="Storage guide" href="/docs/guides/storage" />
+  <Card title="Ingestion guide — sensitivity on ingest" href="/docs/guides/ingestion" />
+  <Card title="Concept: RESTRICTED isolation" href="/docs/concepts/restricted-isolation" />
+  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+</Cards>

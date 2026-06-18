@@ -1,0 +1,216 @@
+---
+title: Configuration
+description: Environment variables (RAGSPINE_*) read by ServiceConfig, and the CompanyProfile TOML that drives identity, metrics, and competitor scope — no hardcoded company anywhere.
+---
+
+RAGSpine reads its runtime configuration from two places, both verifiable in code:
+
+- **Environment variables** (`RAGSPINE_*`) — assembled into a frozen `ServiceConfig`
+  (`src/ragspine/service/config.py`). Shared by the CLI, the FastAPI app, and the worker.
+- **The CompanyProfile TOML** — the company identity, entity synonyms, default geography,
+  and external/competitor list. The core hardcodes **no** company; it all comes from here.
+
+## Environment variables
+
+Every value below is read in `ServiceConfig.from_env` (`src/ragspine/service/config.py`).
+All are optional — the defaults run the offline, deterministic path with no API key.
+
+<TypeTable
+  type={{
+    RAGSPINE_DB_PATH: {
+      type: 'string',
+      default: 'data/fact_metric.db',
+      description:
+        'Path to the fact (numeric) store — the SQLite database backing the structured channel.',
+    },
+    RAGSPINE_CHUNK_DB_PATH: {
+      type: 'string',
+      default: '(unset)',
+      description:
+        'Path to the narrative chunk store. When unset, the narrative channel degrades honestly (no narrative retrieval) instead of failing.',
+    },
+    RAGSPINE_PROVIDER: {
+      type: '"mock" | "anthropic"',
+      default: 'mock',
+      description:
+        'LLM provider. mock is the offline deterministic provider (no key, no network); anthropic uses the real Claude Messages API.',
+    },
+    RAGSPINE_MODEL: {
+      type: 'string',
+      default: 'claude-opus-4-8',
+      description:
+        'Model id for the anthropic provider (DEFAULT_ANTHROPIC_MODEL). Ignored by the mock provider.',
+    },
+    RAGSPINE_BASE_URL: {
+      type: 'string',
+      default: '(unset)',
+      description:
+        'Override the Anthropic API base URL — for an enterprise gateway forwarding the Anthropic API.',
+    },
+    RAGSPINE_EMBEDDING: {
+      type: '"none" | "deterministic" | "openai"',
+      default: 'none',
+      description:
+        'Embedding backend for the vector channel. none = pure BM25 (default, offline). Selects the backend built by make_embedding_backend.',
+    },
+    RAGSPINE_REFERENCE_DATE: {
+      type: 'string (YYYY-MM-DD)',
+      default: '(unset → today)',
+      description:
+        'ISO date used as the anchor for resolving relative periods (last year, H1, …). When unset the agent uses the current date.',
+    },
+    RAGSPINE_REDIS_URL: {
+      type: 'string',
+      default: 'redis://localhost:6379/0',
+      description: 'Redis connection URL for the RQ job queue (used by the worker and RQQueue).',
+    },
+    RAGSPINE_FAQ_SOURCE: {
+      type: 'string',
+      default: '(unset → empty cache)',
+      description:
+        'Path to the FAQ JSON file. When unset, the FAQ short-circuit cache is empty (every question runs the full workflow).',
+    },
+    RAGSPINE_ALLOWED_UPLOAD_ROOT: {
+      type: 'string',
+      default: '(unset)',
+      description:
+        'Ingestion path allowlist. When set, ingest job file paths must resolve inside this root — path traversal is rejected.',
+    },
+    RAGSPINE_COMPANY_PROFILE: {
+      type: 'string',
+      default: '(unset → built-in default profile)',
+      description:
+        'Path to the CompanyProfile TOML. When unset, the built-in default profile is used.',
+    },
+    RAGSPINE_MAPPING_DB_PATH: {
+      type: 'string',
+      default: '(unset)',
+      description: 'Path to the metric/entity mapping store used during structured ingestion jobs.',
+    },
+    RAGSPINE_QUEUE_DB_PATH: {
+      type: 'string',
+      default: '(unset)',
+      description:
+        'Path to the SME ReviewQueue store (human review-queue state). Distinct from the RQ job queue.',
+    },
+    RAGSPINE_MANIFEST_DB_PATH: {
+      type: 'string',
+      default: '(unset)',
+      description:
+        'Path to the structured-ingestion batch manifest ledger (idempotent batch tracking).',
+    },
+  }}
+/>
+
+<Callout type="info">
+  `RAGSPINE_DB_PATH`, `RAGSPINE_CHUNK_DB_PATH`, `RAGSPINE_PROVIDER`, `RAGSPINE_MODEL` /
+  `RAGSPINE_BASE_URL`, `RAGSPINE_REDIS_URL`, `RAGSPINE_FAQ_SOURCE`, and
+  `RAGSPINE_ALLOWED_UPLOAD_ROOT` are the variables surfaced in the README. The remaining ones
+  (`RAGSPINE_EMBEDDING`, `RAGSPINE_REFERENCE_DATE`, `RAGSPINE_COMPANY_PROFILE`,
+  `RAGSPINE_MAPPING_DB_PATH`, `RAGSPINE_QUEUE_DB_PATH`, `RAGSPINE_MANIFEST_DB_PATH`) are also read
+  by `ServiceConfig.from_env` and are listed here for completeness.
+</Callout>
+
+### Example
+
+```bash
+# Structured channel only, offline mock provider
+RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+
+# Add the narrative channel and a real provider through an enterprise gateway
+RAGSPINE_DB_PATH=data/fact_metric.db \
+RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
+RAGSPINE_PROVIDER=anthropic \
+RAGSPINE_BASE_URL=https://gateway.internal/anthropic \
+.venv/bin/python scripts/run_server.py --port 8000
+
+# Worker for async ingestion (needs Redis)
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
+```
+
+## CompanyProfile
+
+The CompanyProfile is RAGSpine's "no hardcoded company" seam. The core depends on a
+`DomainProfile` loaded from TOML — identity, entity synonyms, geography, display labels,
+the external/competitor list, and sensitivity rules all live in config, never in code.
+
+<Steps>
+<Step>
+Copy the template:
+
+```bash
+cp config/company.example.toml config/company.toml
+```
+
+</Step>
+<Step>
+Edit it for your deployment, then point at it with `RAGSPINE_COMPANY_PROFILE=config/company.toml`
+(or pass the path to `load_company_profile()` directly).
+</Step>
+</Steps>
+
+The template (`config/company.example.toml`) is a fully fictional placeholder:
+
+```toml title="config/company.toml"
+[home]
+company_name = "YourCo"
+entity_code = "YOURCO_GROUP"
+
+# Entity synonyms: alias (lowercase / abbrev / local language) -> controlled entity_code
+[home.synonyms]
+"yourco group" = "YOURCO_GROUP"
+"yourco" = "YOURCO_GROUP"
+"group" = "YOURCO_GROUP"
+"yourco north" = "YOURCO_NORTH"
+"north" = "YOURCO_NORTH"
+
+# Entity default geography: entity_code -> geography
+[home.geography]
+YOURCO_GROUP = "GLOBAL"
+YOURCO_NORTH = "NORTH"
+
+# Display names: entity_code -> user-visible name (drives clarification / prompt text)
+[home.labels]
+YOURCO_GROUP = "YourCo Group"
+YOURCO_NORTH = "YourCo North"
+
+# External / competitor entities: alias -> display name.
+# A hit refuses and proposes re-asking the home-entity equivalent.
+[external_entities]
+"globex" = "Globex"
+"initech" = "Initech"
+
+# Deterministic sensitivity classification for narrative ingestion.
+[sensitivity]
+default_level = "INTERNAL"
+escalate_unknown_to_restricted = false
+restricted_filename_patterns = ["board_minutes", "exec_comp", "performance_review"]
+restricted_keywords = ["board_minutes", "exec_comp", "绩效"]
+```
+
+### What the profile drives
+
+<Cards>
+  <Card
+    title="Identity"
+    description="home company_name + entity_code — the default entity when the user names none, and the display name used in clarification and refusal text."
+  ></Card>
+  <Card
+    title="Metrics & entities"
+    description="Entity synonyms normalize ZH/EN/abbrev aliases to controlled entity_codes; geography sets each entity's default geographic scope."
+  ></Card>
+  <Card
+    title="Competitor scope"
+    description="external_entities is the competitor/out-of-scope list. The deterministic SecurityGate refuses on a match before any tool, retrieval, or LLM call."
+  ></Card>
+  <Card
+    title="Sensitivity"
+    description="Deterministic RESTRICTED classification rules for narrative ingestion — restricted content is filtered at two retrieval exits before reaching a prompt."
+  ></Card>
+</Cards>
+
+<Callout type="warn">
+  No company name is hardcoded anywhere in the engine. Home identity, entities, the tool schema, and
+  refusal text all derive from `load_company_profile()` — see
+  `src/ragspine/common/company_profile.py`. Never backfill a real company into code.
+</Callout>

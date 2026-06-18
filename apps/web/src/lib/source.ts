@@ -1,5 +1,7 @@
 import { docs } from 'collections/server';
 import { loader } from 'fumadocs-core/source';
+import { icons } from 'lucide-react';
+import { createElement } from 'react';
 import { docsContentRoute, docsImageRoute, docsRoute } from './shared';
 
 // See https://fumadocs.dev/docs/headless/source-api for more info
@@ -7,6 +9,14 @@ export const source = loader({
   baseUrl: docsRoute,
   source: docs.toFumadocsSource(),
   plugins: [],
+  // Resolve the lucide icon names used in the docs `meta.json` files into
+  // rendered components for the sidebar.
+  icon(name) {
+    if (name && name in icons) {
+      return createElement(icons[name as keyof typeof icons]);
+    }
+    return undefined;
+  },
 });
 
 export function getPageImage(page: (typeof source)['$inferPage']) {

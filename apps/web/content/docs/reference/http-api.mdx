@@ -1,0 +1,237 @@
+---
+title: HTTP API
+description: The FastAPI service endpoints — health, ask, async ingestion jobs, and job status — with exact paths, methods, and representative request/response payloads.
+---
+
+The service layer (`src/ragspine/service/api/`) is a thin HTTP adapter: schema validation,
+dependency injection, resource assembly, the FAQ short-circuit, error shaping, and tracing.
+It never rewrites the agent / retrieval / ingestion logic — it calls the existing workflows.
+
+Start it from the repo root:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+```
+
+Ingestion jobs run out-of-process on the worker (needs Redis):
+
+```bash
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
+```
+
+## Endpoints
+
+| Method | Path                         | Purpose                                                                                       |
+| ------ | ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `GET`  | `/healthz`                   | Liveness — always returns `{"status": "ok"}`.                                                 |
+| `GET`  | `/readyz`                    | Readiness — checks the fact DB (and queue if it exposes `ping`); `200` ready, `503` degraded. |
+| `POST` | `/v1/ask`                    | Answer a question (FAQ short-circuit → dual-channel workflow).                                |
+| `POST` | `/v1/ingest/structured/jobs` | Enqueue a structured (numeric) ingestion job.                                                 |
+| `POST` | `/v1/ingest/narrative/jobs`  | Enqueue a narrative (chunk) ingestion job.                                                    |
+| `GET`  | `/v1/jobs/{job_id}`          | Poll an ingestion job's status.                                                               |
+
+## `GET /healthz`
+
+```bash
+curl -s localhost:8000/healthz
+```
+
+```json
+{ "status": "ok" }
+```
+
+## `GET /readyz`
+
+Returns `200` with `status: "ready"` when all checks pass, `503` with `status: "degraded"`
+otherwise. The `queue` check appears only when the configured queue exposes a `ping`.
+
+```json
+{ "status": "ready", "checks": { "fact_db": true, "queue": true } }
+```
+
+## `POST /v1/ask`
+
+The README curl example:
+
+```bash
+curl -s localhost:8000/v1/ask -H 'content-type: application/json' \
+     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
+```
+
+**Request** (`AskRequest`)
+
+<TypeTable
+  type={{
+    question: { type: 'string', description: 'The natural-language question.' },
+    reference_date: {
+      type: 'string | null',
+      default: 'null',
+      description:
+        'ISO YYYY-MM-DD anchor for relative periods (last year, H1, …). Falls back to the configured RAGSPINE_REFERENCE_DATE, then today.',
+    },
+  }}
+/>
+
+**Response** (`AskResponse`) — a found structured answer:
+
+```json
+{
+  "request_id": "req_...",
+  "answer": "ACME_CN FY2024 REVENUE 为 1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）",
+  "route": "structured",
+  "answer_kind": "normal",
+  "clarification": null,
+  "sources": [
+    { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
+  ],
+  "tool_status_summary": { "found": 1, "not_found": 0, "unrecognized": 0 },
+  "cache": { "hit": false, "type": null, "faq_id": null, "version": null, "source": null }
+}
+```
+
+<Callout type="info">
+  `answer_kind` is derived by the route layer: `"refusal"` when the structured/composite route found
+  no fact (anti-fabrication), `"clarification"` when the agent asks first, `"normal"` otherwise. A
+  FAQ short-circuit hit returns `route: "faq"`, `cache.hit: true`, and never touches the provider,
+  fact store, or retriever.
+</Callout>
+
+A FAQ short-circuit hit:
+
+```json
+{
+  "request_id": "req_...",
+  "answer": "...vetted answer...",
+  "route": "faq",
+  "answer_kind": "normal",
+  "clarification": null,
+  "sources": [],
+  "tool_status_summary": { "found": 0, "not_found": 0, "unrecognized": 0 },
+  "cache": { "hit": true, "type": "exact", "faq_id": "faq_001", "version": 1, "source": "..." }
+}
+```
+
+## `POST /v1/ingest/structured/jobs`
+
+Enqueues a structured ingestion job. Accepted suffixes: `.xlsx`, `.xlsm`, `.pptx`, `.pdf`.
+A path outside `RAGSPINE_ALLOWED_UPLOAD_ROOT` (when set) returns `400 PathNotAllowedError`.
+
+**Request** (`IngestStructuredJobRequest`)
+
+<TypeTable
+  type={{
+    file: {
+      type: 'string',
+      description: 'Path to the source file (must resolve inside the allowed upload root).',
+    },
+    dry_run: {
+      type: 'boolean',
+      default: 'false',
+      description: 'Validate/extract without writing facts.',
+    },
+    valid_as_of: {
+      type: 'string | null',
+      default: 'null',
+      description: "Business 'as of' date for the ingested facts.",
+    },
+    batch_id: {
+      type: 'string | null',
+      default: 'null',
+      description: 'Idempotent batch identifier (manifest ledger).',
+    },
+    job_id: {
+      type: 'string | null',
+      default: 'null',
+      description: 'Caller-supplied job id; generated when omitted.',
+    },
+  }}
+/>
+
+```bash
+curl -s localhost:8000/v1/ingest/structured/jobs -H 'content-type: application/json' \
+     -d '{"file":"/data/uploads/ACME_FY2024_Review.pptx"}'
+```
+
+**Response** (`JobSubmitResponse`)
+
+```json
+{ "job_id": "..." }
+```
+
+## `POST /v1/ingest/narrative/jobs`
+
+Enqueues a narrative ingestion job. Accepted suffixes: `.pptx`, `.pdf`. `inputs` may be a
+single path string or a list.
+
+**Request** (`IngestNarrativeJobRequest`)
+
+<TypeTable
+  type={{
+    inputs: {
+      type: 'string | string[]',
+      description:
+        'One path or a list of paths (each must resolve inside the allowed upload root).',
+    },
+    dry_run: { type: 'boolean', default: 'false', description: 'Extract/chunk without writing.' },
+    meta_by_doc: {
+      type: 'object | null',
+      default: 'null',
+      description: 'Per-document metadata keyed by doc id.',
+    },
+    job_id: {
+      type: 'string | null',
+      default: 'null',
+      description: 'Caller-supplied job id; generated when omitted.',
+    },
+  }}
+/>
+
+```bash
+curl -s localhost:8000/v1/ingest/narrative/jobs -H 'content-type: application/json' \
+     -d '{"inputs":["/data/uploads/report.pdf"]}'
+```
+
+```json
+{ "job_id": "..." }
+```
+
+## `GET /v1/jobs/{job_id}`
+
+Polls a job. Returns `404 JobNotFound` when the id is unknown.
+
+**Response** (`JobStatusResponse`) — `status` is one of `queued` / `started` / `finished` /
+`failed`:
+
+```json
+{
+  "id": "...",
+  "status": "finished",
+  "result": { "facts_written": 42 },
+  "error": null
+}
+```
+
+A failed job carries a structured `error`:
+
+```json
+{
+  "id": "...",
+  "status": "failed",
+  "result": null,
+  "error": { "type": "JobError", "message": "...", "stage": "execution", "retryable": false }
+}
+```
+
+## Errors
+
+Errors are shaped uniformly and never leak a traceback:
+
+```json
+{ "error": { "type": "InternalError", "message": "internal error", "request_id": "req_..." } }
+```
+
+| Status | `type`                | When                                                               |
+| ------ | --------------------- | ------------------------------------------------------------------ |
+| `400`  | `PathNotAllowedError` | Ingest path is outside the allowlist or has an unsupported suffix. |
+| `404`  | `JobNotFound`         | `GET /v1/jobs/{id}` for an unknown id.                             |
+| `500`  | `InternalError`       | Any unhandled exception in `/v1/ask` (defensive catch-all).        |
