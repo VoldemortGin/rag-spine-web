@@ -1,0 +1,53 @@
+# CLAUDE.md — rag-spine-web
+
+Routing table for the **RAGSpine documentation website** (https://rag-spine.org).
+A pnpm + Turborepo monorepo following the frontend project standard.
+
+## What this is
+
+A static **documentation site**: Fumadocs + Next.js App Router, `output: 'export'`,
+deployed to Cloudflare Pages. It is a **pure presentation site** — it never calls an
+LLM / embedding / vector store. Per the standard's "scale to project size": take the
+spine in full, skip the AI-provider layer entirely. Do **not** add `packages/domain`,
+`MockProvider`, provider seams, or LLM-output parsing here — that would be cargo-cult.
+
+## Layout (find the file by folder first)
+
+```
+.
+├── apps/web/            # the ONLY package; the Next/React/Tailwind composition root
+│   └── content/docs/    # documentation content (MDX) lives here
+├── tsconfig.base.json   # strict baseline (extended by apps/web)
+├── eslint.config.mjs    # shared type-aware flat config (composed by apps/web)
+├── turbo.json           # typecheck / lint / test / build
+└── ci.sh                # the one-command zero-warning gate
+```
+
+`pnpm-workspace.yaml` globs `apps/*` and `packages/*`, so new packages are picked up
+with no manifest edit (none exist yet — a single app is fine at this size).
+
+## The gate (the only "done" judge)
+
+```bash
+bash ci.sh    # typecheck + lint + format:check + test + build, exit 0, zero warnings
+```
+
+Run it after every change; fix until green. `lint` runs `eslint --max-warnings 0`
+(warnings are fatal). Never weaken the gate to make it pass.
+
+## Hard constraints
+
+- **Strict TypeScript + stricter flags** in `tsconfig.base.json`; keep the escape
+  hatches shut (no `any` / `!` / `@ts-ignore` — use justified `@ts-expect-error`).
+- **Static export only.** `next.config.mjs` has `output: 'export'`; don't add
+  server-only features that break the static build.
+- **Don't touch the theme/CSS/landing page** for scaffold work. Content authors own
+  `content/docs/`; leave the demo `index.mdx` / `test.mdx` building.
+- Any relaxed tsconfig/eslint flag must be narrowly scoped, commented, and recorded
+  in `docs/adr/0001-stack-and-divergences.md`.
+
+## Docs map
+
+- This file — the always-on routing table.
+- `apps/web/CLAUDE.md` — the app's local contract.
+- `docs/adr/` — numbered, immutable decision records.
