@@ -6,6 +6,12 @@ import { FeatureGrid } from '@/components/landing/features';
 import { InstallPill } from '@/components/landing/install-pill';
 import { AntiFabricationPanel } from '@/components/landing/terminal';
 import { gitConfig } from '@/lib/shared';
+import type { Metadata } from 'next';
+
+// Canonicalize to the apex host so www / preview deployments don't fragment SEO.
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+};
 
 const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 const pypiUrl = 'https://pypi.org/project/rag-spine/';
