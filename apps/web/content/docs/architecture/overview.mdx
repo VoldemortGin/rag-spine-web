@@ -57,7 +57,7 @@ the edges — never an SDK imported in the core:
     LLMProvider: {
       type: 'Protocol',
       description:
-        'agent/llm_provider.py — one method, create_message(...). MockProvider is the offline default; AnthropicProvider is real.',
+        'corespine, re-exported via agent/llm_provider.py — one method, chat(messages, tools) -> ChatCompletion (OpenAI shape). MockProvider is the offline default; AnthropicProvider is real.',
     },
     EmbeddingBackend: {
       type: 'Protocol',

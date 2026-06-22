@@ -21,7 +21,7 @@ offline with the deterministic `MockProvider`.
 <Cards>
   <Card
     title="LLMProvider"
-    description="agent/llm_provider.py — send system + messages + tools, get a unified response."
+    description="corespine (re-exported via agent/llm_provider.py) — chat(messages, tools) returns a ChatCompletion; OpenAI chat-completions shape."
   ></Card>
   <Card
     title="EmbeddingBackend"
@@ -47,19 +47,27 @@ offline with the deterministic `MockProvider`.
 
 ### `LLMProvider`
 
-`src/ragspine/agent/llm_provider.py` — the single method the agent's tool-use loop drives.
-`AnthropicProvider` lazy-imports the `anthropic` SDK; `MockProvider` needs neither key nor
-network.
+Owned by [`corespine`](https://pypi.org/project/corespine/) and re-exported from
+`src/ragspine/agent/llm_provider.py` — the single method the agent's tool-use loop drives. It
+speaks the **OpenAI chat-completions shape** (one `chat` method). `AnthropicProvider`
+lazy-imports the `anthropic` SDK and maps the shape onto the Anthropic API; `MockProvider`
+needs neither key nor network.
 
 <TypeTable
   type={{
-    create_message: {
-      type: '(*, system: str, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ProviderResponse',
+    chat: {
+      type: '(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion',
       description:
-        'Send the system prompt, message history, and tool schemas; return text + tool_calls + stop_reason + raw_content + usage.',
+        'Send the OpenAI-shaped message history (system prompt is the first message) and optional tool schemas; return a ChatCompletion (choices → ResponseMessage with content + tool_calls, plus usage / model / id).',
     },
   }}
 />
+
+<Callout type="info">
+  **0.3.0 migration.** This replaced the old `create_message(*, system, messages, tools) ->
+  ProviderResponse`. The seam now lives in the shared family core `corespine` so ragspine and
+  its sibling packages share one provider contract — see [ADR 0012](/docs/decisions/adr-0012).
+</Callout>
 
 ### `EmbeddingBackend`
 
@@ -144,33 +152,54 @@ inside `RQQueue` only.
 
 Because the seams are structural, you implement the method(s) and pass the instance in — no
 registration, no base class. Here is an OpenAI-backed `LLMProvider`, grounded in the real
-`create_message` signature and `ProviderResponse` shape:
+`chat` signature and the `ChatCompletion` shape (the dataclasses come from `corespine` and are
+re-exported from `ragspine.agent.llm_provider`):
 
 ```python title="my_openai_provider.py"
+from typing import Any
+
 from openai import OpenAI  # lazy: only your file imports the SDK
-from ragspine.agent.llm_provider import ProviderResponse, ToolCall
+from corespine import ChatCompletion, Choice, ResponseMessage, Usage
 
 
 class OpenAIProvider:
-    """A custom LLMProvider — no subclassing, just the create_message method."""
+    """A custom LLMProvider — no subclassing, just the chat method."""
 
     def __init__(self, model: str = "gpt-4o") -> None:
         self._client = OpenAI()
         self._model = model
 
-    def create_message(
+    def chat(
         self,
+        messages: list[dict[str, Any]],
         *,
-        system: str,
-        messages: list[dict[str, object]],
-        tools: list[dict[str, object]],
-    ) -> ProviderResponse:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion:
+        # The messages are already in the OpenAI chat-completions shape, so they pass
+        # through; the SDK response is the same shape, so the mapping back is direct.
         resp = self._client.chat.completions.create(
             model=self._model,
-            messages=[{"role": "system", "content": system}, *messages],  # adapt as needed
+            messages=messages,
+            tools=tools or [],  # adapt / omit as needed
         )
-        text = resp.choices[0].message.content or ""
-        return ProviderResponse(text=text, tool_calls=[], stop_reason="end_turn")
+        choice = resp.choices[0]
+        message = ResponseMessage(role="assistant", content=choice.message.content)
+        u = resp.usage
+        usage = (
+            Usage(
+                prompt_tokens=u.prompt_tokens,
+                completion_tokens=u.completion_tokens,
+                total_tokens=u.total_tokens,
+            )
+            if u is not None
+            else None
+        )
+        return ChatCompletion(
+            choices=(Choice(index=0, message=message, finish_reason=choice.finish_reason or "stop"),),
+            usage=usage,
+            model=resp.model,
+            id=resp.id,
+        )
 ```
 
 Inject it exactly where `MockProvider` would go:

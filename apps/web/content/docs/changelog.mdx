@@ -1,0 +1,70 @@
+---
+title: Changelog
+description: Notable, user-facing changes to RAGSpine by release — and where the Spine family stands alongside it.
+---
+
+This page tracks **user-facing** changes per release: API shapes, configuration surfaces,
+packaging, and dependencies. For the reasoning behind a change, follow the linked
+[ADR](/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
+
+## 0.3.0
+
+The headline is an **LLM provider seam migration** onto the shared family core, plus an
+optional active rate limiter. See [ADR 0012](/docs/decisions/adr-0012) for the full rationale.
+
+### Changed (breaking for custom providers)
+
+- **`LLMProvider` now lives in [`corespine`](https://pypi.org/project/corespine/)** and is
+  re-exported from `ragspine.agent.llm_provider`. The interface moved from
+  `create_message(*, system, messages, tools) -> ProviderResponse` to the **OpenAI
+  chat-completions shape**:
+
+  ```python
+  def chat(
+      self,
+      messages: list[dict[str, Any]],
+      *,
+      tools: list[dict[str, Any]] | None = None,
+  ) -> ChatCompletion: ...
+  ```
+
+  The system prompt is now the first `{"role": "system", ...}` message rather than a separate
+  argument, and `ProviderResponse` is replaced by `corespine.ChatCompletion` (`choices` →
+  `ResponseMessage` with `content` + `tool_calls`, plus `usage` / `model` / `id`). Custom
+  providers must migrate — see [Extension points](/docs/reference/extension-points#llmprovider).
+
+### Added
+
+- **Active TPM rate limiting.** Set `RAGSPINE_TOKENS_PER_MINUTE` (int, default `0` = off) and
+  the service wraps the provider in corespine's `RateLimitedProvider` — a sliding-window soft
+  limit that stays *under* a tokens-per-minute ceiling, complementary to the SDK's passive
+  `max_retries` 429 backoff. See [Configuration](/docs/reference/configuration).
+- **`[all]` extra** — `pip install "rag-spine[all]"` pulls in every runtime capability
+  (`[pdf,ocr,llm,embed,vector,service]`; excludes `[dev]`). See
+  [Installation](/docs/getting-started/installation).
+
+### Dependencies
+
+- Adds one non-optional runtime dependency: **`corespine>=0.1.0`** (the thin shared family
+  core; it has empty `dependencies` of its own). The offline-first, zero-heavy-SDK default
+  path is preserved.
+
+## The Spine family
+
+RAGSpine is one package in a small family that shares the thin `corespine` core. Current
+sibling releases:
+
+<Cards>
+  <Card
+    title="corespine 0.1.0"
+    description="The thin shared core: the LLMProvider seam + RateLimitedProvider, six Protocol seams, a unified error type, and a mypy gate. Domain-neutral primitives only; empty runtime dependencies."
+  ></Card>
+  <Card
+    title="spineagent 0.0.3"
+    description="The general multi-agent collaboration framework (agent / tool / orchestration + MCP / A2A seams), offline-first and built on corespine. Hardened with a dual type gate: mypy --strict + beartype."
+  ></Card>
+  <Card
+    title="pdfspine"
+    description="An Apache-2.0, pure-Rust reimplementation of PyMuPDF (fitz) with PyO3 bindings — PP-OCRv5 OCR ships compiled into the wheel."
+  ></Card>
+</Cards>

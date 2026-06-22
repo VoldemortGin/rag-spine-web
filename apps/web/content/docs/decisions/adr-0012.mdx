@@ -1,0 +1,92 @@
+---
+title: 'ADR 0012: Adopt the corespine LLM seam — chat / ChatCompletion over create_message / ProviderResponse'
+description: Move the LLMProvider Protocol to the shared family core (corespine) and adopt the OpenAI chat-completions shape; add an optional active TPM throttle via corespine RateLimitedProvider.
+---
+
+> Status: **accepted** · Date: 2026-06-20
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+Relates to [0009](/docs/decisions/adr-0009) (framework/dependency policy)
+and [0011](/docs/decisions/adr-0011) (adopting the python-project-standard).
+Shipped in **rag-spine 0.3.0**.
+
+## Context
+
+RAGSpine has always isolated every external SDK behind a typed `Protocol`, with a
+zero-SDK offline core and a default `MockProvider` (ADRs [0005](/docs/decisions/adr-0005) /
+[0009](/docs/decisions/adr-0009)). The `LLMProvider` seam was defined **inside** ragspine
+(`agent/llm_provider.py`) with a ragspine-specific method:
+
+```python
+def create_message(*, system, messages, tools) -> ProviderResponse: ...
+```
+
+Two pressures converged:
+
+1. **A family of sibling packages now shares the same primitives.** ragspine,
+   [`spineagent`](https://pypi.org/project/spineagent/) (multi-agent orchestration), and the
+   thin shared core [`corespine`](https://pypi.org/project/corespine/) all need to talk to an
+   LLM through one provider contract. Duplicating a bespoke provider Protocol per package would
+   fragment the contract and the test seams. corespine is the family's deliberately thin shared
+   core for exactly these domain-neutral primitives.
+2. **The bespoke `create_message(*, system, messages, tools) -> ProviderResponse` shape was
+   gratuitously non-standard.** Pulling the system prompt out as a separate argument and
+   inventing a `ProviderResponse` envelope diverged from the widely-understood OpenAI
+   chat-completions shape that real SDKs (and every adapter author's mental model) already
+   speak — friction for no benefit.
+
+Separately, the only rate-limit defense was the SDK's **passive** `max_retries` 429 backoff,
+which reacts *after* a limit is hit. A client that wants to stay *under* a contractual TPM
+ceiling had no in-library knob.
+
+## Decision
+
+**Move the `LLMProvider` Protocol to corespine and adopt the OpenAI chat-completions shape.**
+ragspine takes a hard `corespine>=0.1.0` runtime dependency (its only non-optional one) and
+**re-exports** the seam from `agent/llm_provider.py`, so existing import sites
+(`from ragspine.agent.llm_provider import LLMProvider, MockProvider, AnthropicProvider`) keep
+working. Concretely:
+
+- The single method becomes
+  `chat(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion`.
+  The system prompt is just the first `{"role": "system", ...}` message — no separate argument.
+- `ProviderResponse` is replaced by corespine's `ChatCompletion` envelope: `choices` (each a
+  `Choice` wrapping a `ResponseMessage` with `content` + `tool_calls`), plus `usage`, `model`,
+  and `id` — all frozen dataclasses, the standard chat-completions shape.
+- `AnthropicProvider` keeps lazy-importing the `anthropic` SDK but now maps the OpenAI-shaped
+  `messages`/`tools` onto the Anthropic Messages API and the response back into a
+  `ChatCompletion`. `ProviderError` becomes a `corespine.CorespineError` subclass.
+- The offline `MockProvider` and the tool-use loop (`provider.chat(messages, tools=tools)`)
+  are updated in lock-step; the anti-fabrication guard is untouched (it never trusted provider
+  prose for the number).
+
+**Add an optional active TPM throttle.** A new `RAGSPINE_TOKENS_PER_MINUTE` env var (int,
+default `0` = off) makes `build_provider` wrap the constructed provider in corespine's
+`RateLimitedProvider` — a sliding-window soft limit that blocks before a `chat` call when the
+window has no budget. It is **complementary** to the SDK's passive `max_retries`: one stays
+under the ceiling proactively, the other recovers from a breach.
+
+## Alternatives considered (rejected)
+
+- **Keep the bespoke `create_message` / `ProviderResponse` seam in ragspine.** Rejected — it
+  fragments the contract across the family and stays needlessly non-standard. The seam is a
+  textbook domain-neutral primitive that belongs in the shared core.
+- **Define the seam in ragspine and have siblings depend on ragspine.** Rejected — it inverts
+  the dependency direction (a RAG package would become a dependency of a generic agent
+  package). corespine is the agreed sink for shared primitives; the arrows point *into* it.
+- **Rely only on SDK `max_retries` for rate limiting.** Rejected — passive backoff cannot keep
+  a client under a contractual TPM ceiling; the two mechanisms are complementary, not redundant.
+
+## Consequences
+
+- **Breaking for custom providers.** Anyone who implemented `create_message(*, system,
+  messages, tools) -> ProviderResponse` must migrate to `chat(messages, *, tools=None) ->
+  ChatCompletion` (import the dataclasses from `corespine`, or via the re-export in
+  `ragspine.agent.llm_provider`). The [Extension points](/docs/reference/extension-points#llmprovider)
+  guide carries a worked OpenAI example in the new shape.
+- ragspine gains exactly one new non-optional dependency (`corespine>=0.1.0`, which itself has
+  empty `dependencies`). The offline-first, zero-heavy-SDK default path is preserved.
+- The provider contract is now shared across the Spine family, so a provider written for one
+  package works for all of them.
+- `RAGSPINE_TOKENS_PER_MINUTE` is the one new config surface; everything else is internal.

@@ -3,14 +3,20 @@ title: Installation
 description: Install RAGSpine from PyPI or from source, pick the optional extras you need, and understand the offline-first core.
 ---
 
-RAGSpine requires **Python 3.10+**. The core imports zero third-party SDKs and runs fully
-offline with a deterministic `MockProvider` — you only pull in heavier dependencies via the
-optional extras below.
+RAGSpine requires **Python 3.10+**. The current release is **0.3.0**. The core imports zero
+third-party SDKs and runs fully offline with a deterministic `MockProvider` — you only pull in
+heavier dependencies via the optional extras below. Its one non-optional runtime dependency is
+the thin shared family core [`corespine`](https://pypi.org/project/corespine/) (`>=0.1.0`),
+which owns the cross-package primitives such as the `LLMProvider` seam and `RateLimitedProvider`.
 
 ## Install from PyPI
 
 ```bash title="install"
 pip install rag-spine
+# everything (all the optional extras below):
+pip install "rag-spine[all]"
+# or with uv:
+uv add rag-spine
 ```
 
 <Callout type="info">
@@ -33,9 +39,11 @@ The base install gives you the offline core. Add extras for the capabilities you
 | `[service]` | fastapi, uvicorn, httpx, rq, redis                          | the HTTP + async-queue layer                     |
 | `[pdf]`     | docling                                                     | digital-PDF table extraction                     |
 | `[ocr]`     | paddleocr                                                   | scanned-PDF OCR (Linux + NVIDIA GPU)             |
-| `[llm]`     | anthropic, openai                                           | real LLM providers (lazy-imported)               |
+| `[llm]`     | anthropic, openai                                           | the real Anthropic chat provider + OpenAI embeddings backend (lazy-imported) |
 | `[embed]`   | sentence-transformers                                       | real embedding models for the vector channel     |
+| `[vector]`  | sqlite-vec, pg8000, qdrant-client                           | persistent vector stores (sqlite-vec / pgvector / Qdrant) |
 | `[dev]`     | pytest, reportlab, markdown, pdoc, ruff, mypy, build, twine | tests, fixture generation, docs, lint, packaging |
+| `[all]`     | `[pdf,ocr,llm,embed,vector,service]`                        | every runtime capability at once (excludes `[dev]`) |
 
 Combine extras with commas:
 

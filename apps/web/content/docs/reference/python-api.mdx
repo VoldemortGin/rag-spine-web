@@ -32,7 +32,7 @@ def answer_question(
     provider: {
       type: 'LLMProvider',
       description:
-        'Any object with create_message — e.g. MockProvider (offline) or AnthropicProvider.',
+        'Any object with a chat(messages, *, tools=None) -> ChatCompletion method — e.g. MockProvider (offline) or AnthropicProvider.',
     },
     reference_date: {
       type: 'date | None',
@@ -68,14 +68,24 @@ class AgentResult:
 
 `src/ragspine/agent/llm_provider.py` — the deterministic, offline `LLMProvider`. No API key,
 no network: it scripts the tool-use loop from rule-based intent parsing and renders found /
-not-found / unrecognized answers — never fabricating a number.
+not-found / unrecognized answers — never fabricating a number. It implements the corespine
+`chat(messages, *, tools=None) -> ChatCompletion` seam (the Protocol and the `ChatCompletion`
+dataclass are re-exported from this module for convenience).
 
 ```python
 MockProvider(reference_date: date | None = None)
 ```
 
 The real-provider counterpart is `AnthropicProvider(model=..., base_url=...)`, which
-lazy-imports the `anthropic` SDK (install with `pip install 'rag-spine[llm]'`).
+lazy-imports the `anthropic` SDK (install with `pip install 'rag-spine[llm]'`) and maps the
+OpenAI-shaped `chat` call onto the Anthropic Messages API.
+
+<Callout type="info">
+  Both providers return the same `corespine.ChatCompletion` envelope (`choices` →
+  `ResponseMessage` with `content` + `tool_calls`, plus `usage` / `model` / `id`). This is the
+  0.3.0 shape — see [Agent → the pluggable seam](/docs/guides/agent#llm_provider-the-pluggable-seam)
+  and [ADR 0012](/docs/decisions/adr-0012).
+</Callout>
 
 ## `FactStore`
 

@@ -125,34 +125,58 @@ the active profile — never a hardcoded company.
 
 ## llm_provider — the pluggable seam
 
-`llm_provider.py` defines the `LLMProvider` Protocol — a single method:
+As of **0.3.0**, the `LLMProvider` Protocol is owned by the shared family core
+[`corespine`](https://pypi.org/project/corespine/) and re-exported from
+`ragspine.agent.llm_provider`. It speaks the **OpenAI chat-completions shape** — a single
+`chat` method:
 
 ```python
+from corespine import ChatCompletion  # re-exported via ragspine.agent.llm_provider
+
+
 class LLMProvider(Protocol):
-    def create_message(
+    def chat(
         self,
+        messages: list[dict[str, Any]],
         *,
-        system: str,
-        messages: list[dict[str, object]],
-        tools: list[dict[str, object]],
-    ) -> ProviderResponse: ...
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion: ...
 ```
+
+`messages` is the OpenAI-shaped history (each `{"role", "content", ...}`); the system prompt
+is just the first `{"role": "system", ...}` entry rather than a separate argument. A
+`ChatCompletion` carries `choices: tuple[Choice, ...]` (each `Choice` wraps a
+`ResponseMessage` with `content` and optional `tool_calls`), plus `usage`, `model`, and `id`
+— the standard chat-completions envelope, all frozen dataclasses from `corespine`.
+
+<Callout type="info">
+  **Migrated in 0.3.0.** The previous `create_message(*, system, messages, tools) ->
+  ProviderResponse` seam is gone; implement `chat(messages, *, tools=None) -> ChatCompletion`
+  instead. See [ADR 0012](/docs/decisions/adr-0012) for the rationale and the corespine boundary.
+</Callout>
 
 <Cards>
   <Card
     title="MockProvider"
-    description="Offline, deterministic, no key or network. First turn emits a query_metric ToolCall; second turn renders found / not_found / unrecognized text deterministically. The core runs entirely on this."
+    description="Offline, deterministic, no key or network. First turn emits a query_metric tool call; second turn renders found / not_found / unrecognized text deterministically. The core runs entirely on this."
   ></Card>
   <Card
     title="AnthropicProvider"
-    description="Real Claude Messages API. The SDK is lazy-imported inside __init__ (ImportError points you at the [llm] extra). SDK errors are wrapped as ProviderError; timeout/retries are delegated to the SDK."
+    description="Real Claude Messages API. The SDK is lazy-imported inside __init__ (ImportError points you at the [llm] extra); it maps the OpenAI-shaped messages/tools onto the Anthropic API and the response back into a ChatCompletion. SDK errors are wrapped as ProviderError; timeout/retries are delegated to the SDK."
   ></Card>
 </Cards>
 
-`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`. There is no `OpenAIProvider` yet — only a
-documented seam (the OpenAI tool schema is already pre-built in `query_tools.py`).
-`ProviderResponse` carries `text`, `tool_calls`, `stop_reason`, `raw_content`, and `usage`;
-`ProviderError` wraps only network/API/timeout errors (program errors propagate).
+`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`. There is no chat `OpenAIProvider` in the box
+yet — only a documented seam (the OpenAI tool schema is already pre-built in `query_tools.py`,
+and the `[llm]` extra ships `openai` for the embeddings backend). `ProviderError` (a
+`corespine.CorespineError` subclass) wraps only network/API/timeout errors — program errors
+propagate.
+
+<Callout type="info">
+  Set `RAGSPINE_TOKENS_PER_MINUTE` (> 0) and the service wraps the built provider in
+  corespine's `RateLimitedProvider` for **active** client-side TPM throttling — complementary
+  to the SDK's own passive `max_retries` 429 backoff. See [Configuration](/docs/reference/configuration).
+</Callout>
 
 ## agent — the orchestrator and the tool-use loop
 
@@ -188,8 +212,8 @@ Its flow: assign a request id → build a privacy-aware trace context → parse 
 </Steps>
 
 The tool loop (`_run_tool_loop`) is capped at `MAX_TOOL_ITERATIONS = 5`: it calls
-`provider.create_message`, executes any `query_metric` tool calls, feeds results back as a
-user message, and stops when the model returns no tool calls. On `ProviderError` it
+`provider.chat(messages, tools=tools)`, executes any `query_metric` tool calls, feeds results
+back as a user message, and stops when the model returns no tool calls. On `ProviderError` it
 degrades to fixed, **number-free** text rather than fabricating.
 
 `answer_question` returns an `AgentResult`:

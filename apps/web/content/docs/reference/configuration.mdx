@@ -99,6 +99,12 @@ All are optional — the defaults run the offline, deterministic path with no AP
       description:
         'Path to the structured-ingestion batch manifest ledger (idempotent batch tracking).',
     },
+    RAGSPINE_TOKENS_PER_MINUTE: {
+      type: 'int',
+      default: '0 (off)',
+      description:
+        'Active client-side TPM (tokens-per-minute) throttle. When > 0, build_provider wraps the LLM provider in corespine RateLimitedProvider — a sliding-window soft limit, complementary to the SDK max_retries passive 429 backoff. 0 disables it. New in 0.3.0.',
+    },
   }}
 />
 
@@ -107,8 +113,9 @@ All are optional — the defaults run the offline, deterministic path with no AP
   `RAGSPINE_BASE_URL`, `RAGSPINE_REDIS_URL`, `RAGSPINE_FAQ_SOURCE`, and
   `RAGSPINE_ALLOWED_UPLOAD_ROOT` are the variables surfaced in the README. The remaining ones
   (`RAGSPINE_EMBEDDING`, `RAGSPINE_REFERENCE_DATE`, `RAGSPINE_COMPANY_PROFILE`,
-  `RAGSPINE_MAPPING_DB_PATH`, `RAGSPINE_QUEUE_DB_PATH`, `RAGSPINE_MANIFEST_DB_PATH`) are also read
-  by `ServiceConfig.from_env` and are listed here for completeness.
+  `RAGSPINE_MAPPING_DB_PATH`, `RAGSPINE_QUEUE_DB_PATH`, `RAGSPINE_MANIFEST_DB_PATH`,
+  `RAGSPINE_TOKENS_PER_MINUTE`) are also read by `ServiceConfig.from_env` and are listed here for
+  completeness.
 </Callout>
 
 ### Example
@@ -117,11 +124,13 @@ All are optional — the defaults run the offline, deterministic path with no AP
 # Structured channel only, offline mock provider
 RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
 
-# Add the narrative channel and a real provider through an enterprise gateway
+# Add the narrative channel and a real provider through an enterprise gateway,
+# with an active 90k tokens/minute client-side throttle
 RAGSPINE_DB_PATH=data/fact_metric.db \
 RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
 RAGSPINE_PROVIDER=anthropic \
 RAGSPINE_BASE_URL=https://gateway.internal/anthropic \
+RAGSPINE_TOKENS_PER_MINUTE=90000 \
 .venv/bin/python scripts/run_server.py --port 8000
 
 # Worker for async ingestion (needs Redis)

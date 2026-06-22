@@ -234,7 +234,7 @@ falling back to identity) — make the rerank deterministic and testable without
   (`RESTRICTED_SENSITIVITY = "RESTRICTED"`) guards both exits.
 
 - `ProviderListwiseJudge(provider)` — a concrete `ListwiseJudge` backed by the agent's
-  `LLMProvider`. It builds the prompt, makes one `create_message` call, and parses the
+  `LLMProvider`. It builds the prompt, makes one `provider.chat(...)` call, and parses the
   response; provider errors propagate and are caught by `listwise_rerank`'s degradation.
 - `build_narrative_retriever(chunk_db, provider=None, *, embedding_backend=None) -> tuple[NarrativeIndexRetriever, ChunkStore]` — the CLI/service wiring entry. It opens the
   chunk store, calls `init_schema`, and assembles the default chain: **pure BM25 + RRF**
