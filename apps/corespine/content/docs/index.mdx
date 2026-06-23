@@ -1,0 +1,62 @@
+---
+title: Introduction
+description: corespine is the thin shared core of the Spine family — a small set of domain-neutral primitives, six seams plus a unified error shape, depended on by ragspine and spineagent but never the reverse.
+---
+
+**corespine** is the **thin shared core of the Spine family**: a small set of **domain-neutral
+primitives** — the stable bedrock that belongs to neither RAG nor agents. It is depended on by
+sibling packages like `ragspine` and `spineagent`, but never depends back on any of them, and
+carries none of their domain concepts.
+
+It is made of six "seams" plus an errors seam, each holding only the *smallest, obviously stable*
+mechanism. The core imports **zero third-party SDKs, zero network, zero runtime dependencies**
+(`dependencies` stays empty forever) — install it and it runs offline, deterministically,
+end to end.
+
+corespine provides **mechanism, not policy**: the conformance harness, the seam registry, the
+privacy-trace shape. The *specific invariants* are bound by each app, never baked into the core.
+
+## Start here
+
+<Cards>
+  <Card
+    title="Overview"
+    href="/docs/overview"
+    description="What corespine is, what it solves, when to use it, and the seam meta-pattern."
+  />
+  <Card
+    title="API"
+    href="/docs/api"
+    description="The real signature and contract of every export, grouped by seam."
+  />
+  <Card
+    title="Recipes"
+    href="/docs/recipes"
+    description="Runnable, offline, zero-dependency minimal examples with real output."
+  />
+  <Card
+    title="Gotchas"
+    href="/docs/gotchas"
+    description="Real pitfalls, ranked by how often people hit them — wrong vs. right."
+  />
+</Cards>
+
+## Reference
+
+<Cards>
+  <Card
+    title="PRD"
+    href="/docs/reference/prd"
+    description="Current state and the deliberately-deferred backlog (rule of three)."
+  />
+  <Card
+    title="Roadmap"
+    href="/docs/reference/roadmap"
+    description="Direction, the evidence each growth needs, and what is explicitly out of scope."
+  />
+  <Card
+    title="Extending"
+    href="/docs/reference/extending"
+    description="How a third party adds a seam implementation, a real backend, or its own invariants."
+  />
+</Cards>
