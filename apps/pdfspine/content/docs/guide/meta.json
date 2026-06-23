@@ -1,0 +1,15 @@
+{
+  "title": "Guide",
+  "icon": "BookOpen",
+  "pages": [
+    "index",
+    "installation",
+    "quickstart",
+    "text-extraction",
+    "editing",
+    "rendering",
+    "cli",
+    "migrating-from-pymupdf",
+    "license"
+  ]
+}

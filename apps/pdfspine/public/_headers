@@ -1,0 +1,9 @@
+# Cloudflare Pages headers. Next's static export emits the metadata image routes as
+# extension-less files (e.g. `opengraph-image`), which Pages would otherwise serve as
+# application/octet-stream — set the correct MIME so social scrapers accept them.
+/opengraph-image
+  Content-Type: image/png
+/twitter-image
+  Content-Type: image/png
+/apple-icon
+  Content-Type: image/png

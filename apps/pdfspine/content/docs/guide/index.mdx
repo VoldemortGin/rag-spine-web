@@ -1,0 +1,44 @@
+---
+title: Overview
+description: An orientation to pdfspine's two equivalent import styles and a map of where to go next in the guide.
+---
+
+This guide walks through using pdfspine for real work, from installation to the
+individual feature areas. Every code block uses the **actual** public API.
+
+## Two import styles
+
+pdfspine ships two equivalent entry points:
+
+```python
+import pdfspine               # the native, idiomatic package
+# or, the opt-in PyMuPDF compatibility shim:
+import pdfspine.fitz as fitz  # no global-name collision
+```
+
+Both expose the same `open()`, `Document`, `Page`, `Pixmap`, and geometry
+classes. Use `import pdfspine` for new code; for existing PyMuPDF code, the shim
+is opt-in (a default install does not claim the global `fitz` / `pymupdf` names,
+so it coexists with a real PyMuPDF). To make an unmodified `import fitz` resolve
+to the shim, call `pdfspine.install_fitz_shim()` once at startup — see
+[Migrating from PyMuPDF](/docs/guide/migrating-from-pymupdf).
+
+## Where to go next
+
+| Page | What it covers |
+|---|---|
+| [Installation](/docs/guide/installation) | Building and installing the wheel (not yet on PyPI). |
+| [Quickstart](/docs/guide/quickstart) | Open, extract, search, render, and save. |
+| [Text extraction](/docs/guide/text-extraction) | `get_text` variants, `search_for`, `TextPage`, tables. |
+| [Editing & saving](/docs/guide/editing) | Merge / split, metadata, TOC, annotations, forms, redaction. |
+| [Rendering](/docs/guide/rendering) | `get_pixmap`, `Pixmap`, `DisplayList`, SVG. |
+| [Command-line interface](/docs/guide/cli) | The planned `pdfspine` CLI. |
+| [Migrating from PyMuPDF](/docs/guide/migrating-from-pymupdf) | Compatibility mapping and gaps. |
+| [License](/docs/guide/license) | Apache-2.0, clean-room note, dependency licenses. |
+
+<Callout type="info">
+pdfspine is pre-1.0 and under active development. The implemented surface is
+substantial but accuracy validation against a real PDF corpus is ongoing.
+Methods that are not yet implemented raise `pdfspine.PdfUnsupportedError`
+with a hint, never a bare `AttributeError`.
+</Callout>

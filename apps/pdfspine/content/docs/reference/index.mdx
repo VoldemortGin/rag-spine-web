@@ -1,0 +1,35 @@
+---
+title: API reference
+description: Overview of the complete public pdfspine API, with a map of how the reference pages are organised.
+---
+
+This reference documents the **complete public API** of `pdfspine` — every name
+exported from the top-level package (`pdfspine.__all__`). Each class, function
+and constant is rendered directly from its docstring, so the reference never
+drifts from the implementation.
+
+```python
+import pdfspine
+```
+
+Methods that exist but raise `PdfUnsupportedError` are documented as such in
+their docstrings; see [Migrating from PyMuPDF](/docs/guide/migrating-from-pymupdf)
+for the deferred / out-of-scope surface.
+
+## How this reference is organised
+
+| Page | Covers |
+|---|---|
+| [Documents & pages](/docs/reference/document) | `Document`, `Page` |
+| [Text extraction](/docs/reference/textpage) | `TextPage` |
+| [Rendering](/docs/reference/pixmap) | `Pixmap`, `DisplayList` |
+| [Annotations & forms](/docs/reference/annotations) | `Annot`, `Widget` |
+| [Drawing & text](/docs/reference/drawing) | `Shape`, `Font`, `TextWriter` |
+| [Tables](/docs/reference/tables) | `Table`, `TableFinder` |
+| [Navigation](/docs/reference/navigation) | `Link`, `linkDest`, `Outline` |
+| [Color](/docs/reference/color) | `Colorspace` |
+| [Tools](/docs/reference/tools) | `Tools` |
+| [Geometry](/docs/reference/geometry) | `Rect`, `IRect`, `Point`, `Matrix`, `Quad` |
+| [Functions](/docs/reference/functions) | `open`, `install_fitz_shim`, `identity_matrix`, helpers |
+| [Exceptions](/docs/reference/exceptions) | `PdfError` hierarchy |
+| [Constants](/docs/reference/constants) | `PDF_*` / `TEXT_*` / `STAMP_*` values, colorspace singletons |
