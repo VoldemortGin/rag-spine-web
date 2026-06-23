@@ -1,0 +1,124 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+/* ---------------------------------------------------------------------------
+   spineagent — dark-technical theme.
+   Single confident accent: violet #8b5cf6 (the "agent / collaboration" colour).
+   Near-black canvas, off-white text, hairline borders, mono as part of the
+   personality. Light mode stays clean and legible.
+   --------------------------------------------------------------------------- */
+
+@theme {
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, 'SF Mono', 'JetBrains Mono', monospace;
+
+  /* Brand tokens reused across landing + chrome. */
+  --color-spine: #8b5cf6;
+  --color-spine-soft: #a78bfa;
+}
+
+/* Light mode — clean, legible, AA contrast. Violet stays the single accent. */
+:root {
+  --color-fd-background: #fbfbfa;
+  --color-fd-foreground: #16181c;
+  --color-fd-muted: #f1f1ef;
+  --color-fd-muted-foreground: #5c6068;
+  --color-fd-popover: #ffffff;
+  --color-fd-popover-foreground: #16181c;
+  --color-fd-card: #ffffff;
+  --color-fd-card-foreground: #16181c;
+  --color-fd-border: #e6e6e3;
+  --color-fd-primary: #7c3aed; /* violet-600 — meets AA on light bg */
+  --color-fd-primary-foreground: #fbfbfa;
+  --color-fd-secondary: #f1f1ef;
+  --color-fd-secondary-foreground: #16181c;
+  --color-fd-accent: #efeeec;
+  --color-fd-accent-foreground: #16181c;
+  --color-fd-ring: #8b5cf6;
+}
+
+/* Dark mode — the default. Near-black canvas, off-white text. */
+.dark {
+  --color-fd-background: #0a0a0b;
+  --color-fd-foreground: #ededed;
+  --color-fd-muted: #141416;
+  --color-fd-muted-foreground: #8b8f96;
+  --color-fd-popover: #0e0e10;
+  --color-fd-popover-foreground: #ededed;
+  --color-fd-card: #101012;
+  --color-fd-card-foreground: #ededed;
+  --color-fd-border: #ffffff14;
+  --color-fd-primary: #8b5cf6; /* the accent */
+  --color-fd-primary-foreground: #0d0a14;
+  --color-fd-secondary: #161618;
+  --color-fd-secondary-foreground: #ededed;
+  --color-fd-accent: #18181b;
+  --color-fd-accent-foreground: #f4f4f5;
+  --color-fd-ring: #8b5cf6;
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Code / pre use the real monospace. */
+code,
+kbd,
+pre,
+samp,
+.font-mono,
+[class*='language-'] {
+  font-family: var(--font-mono);
+  font-feature-settings: 'liga' 0;
+}
+
+/* Crisp focus ring in the accent, no heavy glow. */
+:focus-visible {
+  outline: 2px solid var(--color-fd-ring);
+  outline-offset: 2px;
+}
+
+/* Tasteful selection in the accent. */
+::selection {
+  background: color-mix(in oklab, var(--color-spine) 30%, transparent);
+  color: var(--color-fd-foreground);
+}
+
+/* Subtle technical grid texture for the landing canvas (dark only). */
+.dark .rs-grid-bg {
+  background-image:
+    linear-gradient(to right, #ffffff0a 1px, transparent 1px),
+    linear-gradient(to bottom, #ffffff0a 1px, transparent 1px);
+  background-size: 64px 64px;
+}
+
+/* A soft violet aura, used once behind the hero. Restrained, not a rainbow. */
+.rs-hero-glow {
+  background: radial-gradient(
+    60% 60% at 50% 0%,
+    color-mix(in oklab, var(--color-spine) 14%, transparent) 0%,
+    transparent 70%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

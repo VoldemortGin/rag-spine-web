@@ -1,0 +1,38 @@
+---
+title: Introduction
+description: spineagent is a framework-free multi-agent collaboration framework — agents, tools, and orchestration plus MCP / A2A protocol seams, built on the thin shared core corespine, offline-first and import-clean.
+---
+
+**spineagent** 是 Spine 家族的通用多 agent 协作框架:把「agent / tool / 编排 + MCP / A2A 协议缝 +
+统一 LLM provider 适配层」收成一组**小而稳定的原语**。它依赖薄核 `corespine`,复用其缝元模式与
+observability / config 形状,但**不**含任何 RAG 概念。
+
+默认路径**离线可跑、import-clean、零网络 SDK**:`import spineagent` 绝不拉入任何网络 SDK,默认
+LLM 是 `corespine.MockProvider`(确定性、零 key)。接真实后端时只在对应缝里换实现,其余代码一行不改。
+
+每条缝都长一个样(家族统一元模式):`Protocol + 离线确定性默认 + Registry 工厂 + 参数化 conformance`。
+
+## Start here
+
+<Cards>
+  <Card
+    title="Overview"
+    href="/docs/overview"
+    description="是什么、离线优先的设计取舍,以及 agent / tool / 编排 / 协议缝核心概念。"
+  />
+  <Card
+    title="API"
+    href="/docs/api"
+    description="完整公开 API:每个类、协议与工厂的真实签名。"
+  />
+  <Card
+    title="Recipes"
+    href="/docs/recipes"
+    description="可原样粘进 Python 跑的离线最小示例,以及接真实后端的接法。"
+  />
+  <Card
+    title="Gotchas"
+    href="/docs/gotchas"
+    description="给 LLM / agent 的「别踩」清单,每条都对应真实代码行为。"
+  />
+</Cards>
