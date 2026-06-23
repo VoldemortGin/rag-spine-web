@@ -2,6 +2,7 @@ import { ArrowRight } from 'lucide-react';
 import Link from 'next/link';
 import { Logo } from '@/components/logo';
 import { ChannelDiagram } from '@/components/landing/channels';
+import { FamilyGrid } from '@/components/landing/family';
 import { FeatureGrid } from '@/components/landing/features';
 import { InstallPill } from '@/components/landing/install-pill';
 import { AntiFabricationPanel } from '@/components/landing/terminal';
@@ -135,6 +136,23 @@ export default function HomePage() {
           </div>
           <ChannelDiagram />
         </div>
+      </section>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Spine Family */}
+      {/* ------------------------------------------------------------------ */}
+      <section className="mx-auto w-full max-w-6xl px-6 py-20 sm:py-24">
+        <div className="mb-10 flex flex-col gap-3">
+          <SectionLabel>Spine Family</SectionLabel>
+          <h2 className="max-w-2xl text-2xl font-bold tracking-tight text-fd-foreground sm:text-3xl">
+            One backbone, four packages.
+          </h2>
+          <p className="max-w-2xl text-sm leading-relaxed text-fd-muted-foreground">
+            RAGSpine is one member of a small family of framework-free Python packages — each owns a
+            single layer, none reaches across into another&apos;s domain. Pick the piece you need.
+          </p>
+        </div>
+        <FamilyGrid />
       </section>
 
       {/* ------------------------------------------------------------------ */}
