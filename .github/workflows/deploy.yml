@@ -64,16 +64,22 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler pages deploy apps/corespine/out --project-name corespine-docs --branch main --commit-dirty=true
+        run: |
+          pnpm exec wrangler pages project create corespine-docs --production-branch=main 2>/dev/null || true
+          pnpm exec wrangler pages deploy apps/corespine/out --project-name corespine-docs --branch main --commit-dirty=true
 
       - name: Deploy agent.rag-spine.org (apps/spineagent)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler pages deploy apps/spineagent/out --project-name spineagent-docs --branch main --commit-dirty=true
+        run: |
+          pnpm exec wrangler pages project create spineagent-docs --production-branch=main 2>/dev/null || true
+          pnpm exec wrangler pages deploy apps/spineagent/out --project-name spineagent-docs --branch main --commit-dirty=true
 
       - name: Deploy pdf.rag-spine.org (apps/pdfspine)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler pages deploy apps/pdfspine/out --project-name pdfspine-docs --branch main --commit-dirty=true
+        run: |
+          pnpm exec wrangler pages project create pdfspine-docs --production-branch=main 2>/dev/null || true
+          pnpm exec wrangler pages deploy apps/pdfspine/out --project-name pdfspine-docs --branch main --commit-dirty=true
