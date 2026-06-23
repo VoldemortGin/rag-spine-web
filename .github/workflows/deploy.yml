@@ -12,6 +12,22 @@ concurrency:
   group: pages-deploy
   cancel-in-progress: true
 
+# This monorepo builds and deploys FOUR Fumadocs sites, each to its own
+# Cloudflare Pages project. Custom domains / DNS are configured once in the
+# Cloudflare dashboard (the workflow only deploys to the Pages projects):
+#
+#   app             | package                      | Pages project   | custom domain
+#   ----------------+------------------------------+-----------------+----------------------
+#   apps/web        | @rag-spine/web               | rag-spine       | rag-spine.org (apex)
+#   apps/corespine  | @rag-spine/corespine-docs    | corespine-docs  | core.rag-spine.org
+#   apps/spineagent | @rag-spine/spineagent-docs   | spineagent-docs | agent.rag-spine.org
+#   apps/pdfspine   | @rag-spine/pdfspine-docs     | pdfspine-docs   | pdf.rag-spine.org
+#
+# First deploy to a new project auto-creates it (reusing the shared
+# CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets); after that, bind the
+# subdomain as a custom domain to the matching project in the dashboard and add
+# the CNAME record.
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -28,16 +44,36 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Gate (typecheck · lint · format · test · build)
+      - name: Gate (typecheck · lint · format · test · build all sites)
         run: |
           pnpm -w run typecheck
           pnpm -w run lint
           pnpm -w run format:check
           pnpm -w run test
-          pnpm --filter @rag-spine/web build
+          pnpm -w run build
 
-      - name: Deploy to Cloudflare Pages
+      # --- Deploy each site to its own Cloudflare Pages project ---------------
+
+      - name: Deploy rag-spine.org (apps/web)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm exec wrangler pages deploy apps/web/out --project-name rag-spine --branch main --commit-dirty=true
+
+      - name: Deploy core.rag-spine.org (apps/corespine)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler pages deploy apps/corespine/out --project-name corespine-docs --branch main --commit-dirty=true
+
+      - name: Deploy agent.rag-spine.org (apps/spineagent)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler pages deploy apps/spineagent/out --project-name spineagent-docs --branch main --commit-dirty=true
+
+      - name: Deploy pdf.rag-spine.org (apps/pdfspine)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler pages deploy apps/pdfspine/out --project-name pdfspine-docs --branch main --commit-dirty=true

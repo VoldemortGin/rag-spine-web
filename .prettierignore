@@ -7,4 +7,4 @@ pnpm-lock.yaml
 # Authored MDX docs: Prettier's Markdown formatter reflows fenced code blocks
 # embedded in Fumadocs components (e.g. inside <Tab>), which breaks the MDX
 # build. Content is owned by the docs, not the formatter — leave it untouched.
-apps/web/content/**/*.mdx
+apps/*/content/**/*.mdx
