@@ -2,7 +2,7 @@
 import { Check, Copy } from 'lucide-react';
 import { useCallback, useState } from 'react';
 
-const COMMAND = 'git clone https://github.com/VoldemortGin/pdfspine';
+const COMMAND = 'pip install pdfspine';
 
 export function InstallPill() {
   const [copied, setCopied] = useState(false);
