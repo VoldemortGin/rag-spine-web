@@ -11,8 +11,10 @@ agent. It is the counterpart to the deterministic structured channel; see
 
 Two properties are non-negotiable here and enforced in code:
 
-- **Pure-BM25 by default.** The vector channel is _injectable_. With no embedding backend
-  wired, retrieval is pure Okapi BM25 + RRF — fully offline, deterministic, zero SDKs.
+- **Semantic hybrid by default, pure-BM25 as the zero-dep fallback.** The vector channel is
+  _injectable_. With the `[embed-onnx]` extra installed, retrieval is genuinely hybrid
+  (BM25 + ONNX semantic → RRF) with no config (`RAGSPINE_EMBEDDING=auto`); with no embedding
+  backend wired it is pure Okapi BM25 + RRF — fully offline, deterministic, zero SDKs.
 - **RESTRICTED isolation at two exits.** Sensitivity-`RESTRICTED` content is stripped at
   **both** the `rerank/` and `link/` exits before it can reach a prompt. See
   [RESTRICTED isolation](/docs/concepts/restricted-isolation).
@@ -149,12 +151,19 @@ class EmbeddingBackend(Protocol):
 ```
 
 You inject an implementation via the `embedding_backend=` keyword on `HybridRetriever`,
-`NarrativeIndex`, and `build_narrative_retriever`. The default everywhere is `None`, which
-means **the vector channel is off and retrieval is pure BM25 + RRF**.
+`NarrativeIndex`, and `build_narrative_retriever`. The library-level default argument is
+`None` — **the vector channel is off and retrieval is pure BM25 + RRF**. At the **service**
+layer, though, `RAGSPINE_EMBEDDING` now defaults to `auto`: the ONNX semantic backend when
+`[embed-onnx]` is importable, else `None` — so a default install _with the extra_ is genuinely
+hybrid out of the box, while a bare install stays byte-identical pure BM25.
 
 `vector/embedding_backends.py` ships three concrete backends plus a factory:
 
 <Cards>
+  <Card
+    title="OnnxEmbeddingBackend"
+    description="The recommended semantic default (behind [embed-onnx], via fastembed). Model paraphrase-multilingual-MiniLM-L12-v2 (384-dim, multilingual — ZH/EN cross-lingual), offline and deterministic. Selected by onnx / auto; first-pull-then-offline weight download."
+  ></Card>
   <Card
     title="DeterministicEmbeddingBackend"
     description="Offline lexical-hash backend (blake2b token bucketing + L2 normalize). Zero network/SDK. Its docstring flags it as non-semantic — highly correlated with BM25, no true semantic recall gain."
@@ -173,11 +182,13 @@ means **the vector channel is off and retrieval is pure BM25 + RRF**.
 from ragspine.retrieval.vector.embedding_backends import make_embedding_backend
 
 # spec (case-insensitive; defaults to env RAGSPINE_EMBEDDING_BACKEND):
-#   None / "none"            → None  (pure BM25 + RRF, the default)
+#   None / "none"            → None  (pure BM25 + RRF, the zero-dep fallback)
+#   "auto"                   → OnnxEmbeddingBackend if [embed-onnx] importable, else None
+#   "onnx" / "fastembed" / "minilm" → OnnxEmbeddingBackend (semantic, offline, deterministic)
 #   "deterministic"          → DeterministicEmbeddingBackend
 #   "openai"                 → OpenAIEmbeddingBackend
 #   "qwen3" / "st" / "sentence-transformers" → SentenceTransformerEmbeddingBackend
-backend = make_embedding_backend("deterministic")
+backend = make_embedding_backend("onnx")
 ```
 
 `vector/store.py` additionally provides a pluggable `VectorStore` Protocol
@@ -264,6 +275,118 @@ finally:
   [RESTRICTED isolation](/docs/concepts/restricted-isolation) invariant; removing either one would
   let restricted content reach a prompt.
 </Callout>
+
+## The opt-in capability stack (0.7.0+)
+
+Everything above is the **default loop**: offline, deterministic, BM25 + RRF (dense on
+automatically when `[embed-onnx]` is present). Releases 0.7.0 and 0.8.0 add a broad set of
+mainstream RAG techniques as **opt-in layers** on the existing Protocol seams. Each is
+**default-off and byte-identical when unselected**, chosen by a `make_*` factory or the
+matching `RAGSPINE_*` environment variable, and each inherits the RESTRICTED two-exit
+isolation and provenance invariants — a new layer never weakens anti-fabrication. They group
+by the stage they act on.
+
+<Callout type="info">
+  The default stays deterministic and offline; selecting a layer is a deliberate opt-in.
+  Numbers always stay in the [structured channel](/docs/architecture/channels) — every layer
+  below only shapes *narrative* retrieval. The per-release list is in the
+  [Changelog](/docs/changelog).
+</Callout>
+
+### Indexing & chunking
+
+- **Contextual Retrieval** (`RAGSPINE_CONTEXTUAL` / `make_index_text_fn`) — prepends a
+  deterministic context header (`title · entity · period · heading`, controlled-vocab, zero
+  fabrication) to the **index/embed text only**. `chunk.text`, `source_locator`, and citations
+  stay byte-identical.
+- **Layout-aware & parent-child** (`RAGSPINE_CHUNKER=layout|parent_child`) — split on
+  structural boundaries instead of fixed char budget; children carry a `parent_id` for
+  small-to-big expansion at synthesis.
+- **Sentence-window & semantic** (`RAGSPINE_CHUNKER=sentence_window|semantic`) — one chunk per
+  sentence with a synthesis-time window, or embedding-boundary splits (semantic uses
+  `[embed-onnx]`).
+- **RAPTOR multi-granularity tree** (`make_raptor_retriever` / `RAGSPINE_RAPTOR*`) — recursive
+  **deterministic** threshold clustering; per-cluster `is_synthesis` summaries carry the union
+  of their members' provenance and are **never citable facts**. Retrieval can pull a leaf
+  (detail) or an internal node (theme).
+
+### Representation & rerank
+
+- **Semantic dense default** (`RAGSPINE_EMBEDDING=onnx|auto`, `[embed-onnx]`) — the
+  `OnnxEmbeddingBackend` above; `auto` resolves to ONNX when importable, else pure BM25, so the
+  shipped loop becomes genuinely hybrid BM25 + dense → RRF with no config.
+- **Local cross-encoder rerank** (`RAGSPINE_RERANKER=cross_encoder|ce|auto`, `[rerank]`) — the
+  offline rerank brain (`CrossEncoderReranker`, ms-marco MiniLM); when selected it takes
+  precedence over the LLM listwise judge.
+- **ColBERT late-interaction** (`RAGSPINE_RERANKER=colbert`, `[colbert]`) — token-level
+  multi-vector **MaxSim** scoring, shipped as a reranker.
+- **SPLADE learned-sparse** (`RAGSPINE_RERANKER=splade`, `[splade]`) — neural sparse
+  term-expansion scoring (interpretable like BM25, stronger), shipped as a reranker.
+
+<Callout type="info">
+  The cross-encoder, ColBERT, and SPLADE rerankers all run **inside** `listwise_rerank`, so
+  they inherit **RESTRICTED exit #1** for free — a RESTRICTED candidate never reaches the
+  reranker. ColBERT / SPLADE ship as **rerankers**; their multi-vector / sparse *retrieval
+  backends* (indexes) are an honest follow-up.
+</Callout>
+
+### Query transformation
+
+- **LLM decomposition** (`RAGSPINE_QUERY_DECOMPOSE=llm`) — multi-sub-question fan-out; each
+  sub-question re-runs the full guarded pipeline and its answers are deterministically merged.
+- **HyDE · RAG-Fusion · step-back** (`RAGSPINE_QUERY_TRANSFORM=hyde|rag_fusion|step_back`) —
+  LLM query transforms over the base retriever. RAG-Fusion reuses `rrf_fuse`; HyDE's
+  hypothetical document is a **retrieval probe, never a citable fact**.
+- **Adaptive-RAG** (`RAGSPINE_ADAPTIVE`) — a deterministic-heuristic (or opt-in LLM)
+  complexity classifier routes between the single-shot path and decomposition.
+- **Corrective retrieval / CRAG** (`RAGSPINE_CORRECTIVE`) — upgrades the lone
+  `retry_without_filters` fallback into a bounded (≤2) deterministic grade→act loop
+  (drop-filters → rewrite → refuse); refusing weak context is the anti-fabrication-safe choice.
+
+Every generated variant re-runs the deterministic security gate **before retrieval** — a
+competitor sub-query is refused, so home numbers never leak.
+
+### Post-retrieval
+
+- **MMR · lost-in-the-middle · compression** (`RAGSPINE_POSTPROCESSOR`, e.g.
+  `"mmr,lost_in_middle"`) — a deterministic `NodePostprocessor` chain that runs *after* rerank
+  and *before* prompt assembly: MMR diversity de-dup, lost-in-the-middle reordering (best hits
+  to the head and tail), and extractive context compression. Compression writes a separate
+  `prompt_text` key that the agent prefers for the prompt, leaving `text` and every reference
+  field byte-identical. The LLMLingua-2 / LLM compressor is a seam follow-up.
+
+### Graph and multi-hop
+
+- **Structured relation graph** (`graph/` domain) — a deterministic typed graph over the
+  controlled dimensions for **subsidiary roll-up, peer comparison, and derivation tracing**
+  (fully cited), plus a `GraphStore` Protocol (`RAGSPINE_GRAPH_STORE`, in-process default +
+  `[graph]` `networkx` adapter) and an **opt-in** narrative-GraphRAG extraction / community
+  skeleton (behind `[graph]` + `[llm]`). It is a standalone multi-hop surface, not a router
+  branch — see [Channels](/docs/architecture/channels).
+
+### Multimodal
+
+- **ColPali visual-document retrieval** (`RAGSPINE_VISUAL_EMBEDDER=colpali`, `[colpali]`) —
+  page-as-image late interaction (MaxSim over visual patches, reusing the ColBERT scorer), for
+  chart- and figure-dense reports where OCR→text loses layout. **Opt-in and GPU**; a visual
+  hit is a page-reference lead (`is_visual`), never a citable fact, and RESTRICTED pages are
+  dropped at index construction. Real GPU end-to-end is a follow-up (`colqwen2` is the more
+  permissive model alternative).
+
+Opting in is uniform — inject a factory result, or set the env var and let the service wire it:
+
+```python
+from ragspine.retrieval.rerank.cross_encoder import make_reranker
+from ragspine.retrieval.postprocess import make_postprocessor
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Offline cross-encoder rerank + an MMR / lost-in-the-middle post-chain.
+retriever, store = build_narrative_retriever(
+    "data/chunks.db",
+    reranker=make_reranker("cross_encoder"),                  # or RAGSPINE_RERANKER=cross_encoder
+    postprocessor=make_postprocessor("mmr,lost_in_middle"),   # or RAGSPINE_POSTPROCESSOR="mmr,lost_in_middle"
+)
+```
 
 ## See also
 

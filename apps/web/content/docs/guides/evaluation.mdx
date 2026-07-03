@@ -96,6 +96,50 @@ The report types:
 - `QAEvalReport` — `mode`, `n_cases`, `metrics: dict[str, GateMetric]`, and a separate
   `fabrication: GateMetric` (with a `fabrication_count` property). `evaluate(cases, outcomes, mode)` applies all four gate rules per case.
 
+## Faithfulness & groundedness gates (0.7.0+)
+
+The four gates above score citation-match, refusal, and clarification — but they never checked
+that a **narrative** answer is actually _entailed by_ its retrieved snippets, which is exactly
+where hallucination happens. `eval/groundedness.py` closes that hole with **two new ratcheted
+gates**:
+
+<TypeTable
+  type={{
+    FAITHFULNESS: {
+      type: '"faithfulness"',
+      description:
+        'Every claim in the narrative answer must be entailed by the retrieved context. Catches the common fabrication shape: a claim that introduces an entity / number / assertion absent from the snippets.',
+    },
+    ANSWER_ACCURACY: {
+      type: '"answer_accuracy"',
+      description:
+        'The free-text narrative answer must cover the substantive content of the expected document. Narrative cases had no content-correctness score before — only citation / refusal / clarification.',
+    },
+  }}
+/>
+
+`GROUNDEDNESS_METRICS = (faithfulness, answer_accuracy)` are **new keys in the same
+`report.metrics`**, so they fold into the **same baseline ratchet** as the four gates (below) —
+re-baselined at `1.0` and gated in both `--mode tool` and `--mode agent`. The four
+`GATE_METRICS` keep their **exact** semantics; nothing is merged.
+
+The default method is the **offline deterministic lexical-overlap entailment**
+(`LexicalOverlapJudge`: a claim is entailed iff its content-token coverage by the context clears
+a threshold) — no model, no network, so `make ci` gates it fully offline. Context is observed
+**eval-side only**; the default `answer_question` loop is byte-unchanged.
+
+<Callout type="warn">
+  The default judge is a **lexical proxy, not a real NLI** — blind to paraphrase, negation, and
+  numeric reversal; it catches the most common fabrication shape (new tokens absent from the
+  context), proven with a reverse test where an un-entailed claim **fails** the gate while a
+  faithful echo passes. The real ONNX-NLI judge (`[eval]`) and an LLM-judge (`[llm]`) behind the
+  `EntailmentJudge` seam (`make_entailment_judge`), plus context-precision / recall /
+  answer-relevance, are honest follow-ups.
+</Callout>
+
+This makes anti-fabrication a **measured** regression lock on the narrative channel, not just
+an asserted one — the invariant is now checked where it actually fails.
+
 ## QA baseline regression gating
 
 `qa_eval.py` also owns the baseline comparison:

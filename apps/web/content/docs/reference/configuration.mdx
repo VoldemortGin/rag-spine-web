@@ -48,10 +48,10 @@ All are optional — the defaults run the offline, deterministic path with no AP
         'Override the Anthropic API base URL — for an enterprise gateway forwarding the Anthropic API.',
     },
     RAGSPINE_EMBEDDING: {
-      type: '"none" | "deterministic" | "openai"',
-      default: 'none',
+      type: '"auto" | "onnx" | "none" | "deterministic" | "openai"',
+      default: 'auto',
       description:
-        'Embedding backend for the vector channel. none = pure BM25 (default, offline). Selects the backend built by make_embedding_backend.',
+        'Embedding backend for the vector channel. Default auto = the ONNX semantic backend when [embed-onnx] is importable, else pure BM25 (offline). onnx forces the semantic backend; none forces pure BM25. Selects the backend built by make_embedding_backend. Dense-on-by-default (auto) is new in 0.7.0.',
     },
     RAGSPINE_REFERENCE_DATE: {
       type: 'string (YYYY-MM-DD)',
@@ -136,6 +136,37 @@ RAGSPINE_TOKENS_PER_MINUTE=90000 \
 # Worker for async ingestion (needs Redis)
 RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
 ```
+
+### Opt-in retrieval, eval & graph selectors (0.7.0+)
+
+Releases 0.7.0 / 0.8.0 add a family of **opt-in** capability selectors, each read from a
+`RAGSPINE_*` environment variable that mirrors a `make_*` factory. All are **default-off** —
+unset, the pipeline runs the offline deterministic default (byte-identical), and the LLM- or
+vision-backed ones additionally need their extra and a provider. See the
+[Retrieval guide](/docs/guides/retrieval) and [Evaluation guide](/docs/guides/evaluation) for
+what each one does.
+
+| Variable                  | Default      | Selects                                                                                    |
+| ------------------------- | ------------ | ------------------------------------------------------------------------------------------ |
+| `RAGSPINE_RERANKER`       | `none`       | local reranker via `make_reranker` — `cross_encoder` / `ce` / `auto`, or `colbert` / `splade` |
+| `RAGSPINE_CHUNKER`        | default      | chunking strategy via `make_chunker` — `layout` / `parent_child` / `sentence_window` / `semantic` |
+| `RAGSPINE_CONTEXTUAL`     | `none`       | deterministic Contextual-Retrieval index header via `make_index_text_fn`                   |
+| `RAGSPINE_POSTPROCESSOR`  | `none`       | post-retrieval chain via `make_postprocessor` — e.g. `mmr,lost_in_middle`                  |
+| `RAGSPINE_CORRECTIVE`     | `none`       | CRAG grade→act retriever wrapper via `make_corrective_retriever`                           |
+| `RAGSPINE_QUERY_DECOMPOSE`| `none`       | LLM query decomposition via `make_decomposer`                                              |
+| `RAGSPINE_QUERY_TRANSFORM`| `none`       | query transform via `make_query_transform` — `hyde` / `rag_fusion` / `step_back`           |
+| `RAGSPINE_ADAPTIVE`       | `none`       | Adaptive-RAG complexity routing via `make_adaptive_decomposer`                             |
+| `RAGSPINE_RAPTOR*`        | `none`       | RAPTOR multi-granularity tree via `make_raptor_retriever` / `make_raptor_summarizer`       |
+| `RAGSPINE_GRAPH_STORE`    | `in_process` | GraphStore backend via `make_graph_store` — `in_process` / `networkx`                      |
+| `RAGSPINE_NARRATIVE_GRAPH`| `none`       | opt-in narrative-GraphRAG via `make_narrative_graph`                                        |
+| `RAGSPINE_VISUAL_EMBEDDER`| `none`       | ColPali visual-document retrieval via `make_visual_embedder`                               |
+
+<Callout type="info">
+  These knobs come from the quality-depth workstreams (W1–W12). Model overrides
+  (`RAGSPINE_COLBERT_MODEL`, `RAGSPINE_SPLADE_MODEL`, `RAGSPINE_COLPALI_MODEL`, …) pick a
+  specific pinned checkpoint; the full behavior of each layer is documented in the
+  [Retrieval guide](/docs/guides/retrieval).
+</Callout>
 
 ## CompanyProfile
 

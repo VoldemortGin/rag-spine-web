@@ -26,8 +26,8 @@ and the [package layout](/docs/architecture/package-layout).
     you read its name. A package splits the moment it holds a second responsibility.
   </Card>
   <Card title="Everything is a Protocol">
-    LLM provider, embeddings, reranker, OCR, retriever, and task queue are all typed `Protocol`s
-    injected at the edges. The core imports zero SDKs and runs offline.
+    LLM provider, embeddings, reranker, OCR, retriever, graph store, and task queue are all
+    typed `Protocol`s injected at the edges. The core imports zero SDKs and runs offline.
   </Card>
 </Cards>
 
@@ -73,6 +73,11 @@ the edges — never an SDK imported in the core:
       type: 'Protocol',
       description:
         'agent/agent.py — retrieve(query, filters, top_k). The seam the narrative channel plugs into.',
+    },
+    GraphStore: {
+      type: 'Protocol',
+      description:
+        'graph/store.py — upsert_nodes/edges, neighbors, subgraph, traverse. Zero-dep in-process deterministic default; networkx adapter behind [graph]. Backs the opt-in structured relation graph.',
     },
     OcrBackend: {
       type: 'Protocol',

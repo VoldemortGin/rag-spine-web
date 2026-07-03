@@ -7,6 +7,98 @@ This page tracks **user-facing** changes per release: API shapes, configuration 
 packaging, and dependencies. For the reasoning behind a change, follow the linked
 [ADR](/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
 
+## 0.8.0
+
+The **second competitor-parity batch** (workstreams W8–W12), benchmarked against the
+mainstream stacks (LlamaIndex · LangChain / LangGraph · Haystack · RAGFlow · Weaviate ·
+Vespa · Jina · Cohere). Like 0.7.0, every addition is **opt-in and default-off**: with
+nothing selected the offline deterministic loop is **byte-identical**, and each new backend
+inherits the RESTRICTED two-exit isolation and provenance conformance packs.
+
+### Added
+
+- **Post-retrieval postprocessor chain.** A `NodePostprocessor` seam
+  (`make_postprocessor` / `RAGSPINE_POSTPROCESSOR`, e.g. `"mmr,lost_in_middle"`) that runs
+  after rerank and before prompt assembly — **MMR** diversity de-dup, **lost-in-the-middle**
+  reordering, and deterministic **extractive context compression**. All zero-model; the
+  LLMLingua-2 / LLM compressor is a seam follow-up. Compression writes a separate
+  `prompt_text` key, leaving `text` and every reference field byte-identical.
+- **LLM query transformation.** **HyDE**, **RAG-Fusion** (reuses RRF), **step-back**
+  prompting, and **Adaptive-RAG** routing on the existing `QueryRewriter` / `IntentParser`
+  seam (`make_query_transform` / `RAGSPINE_QUERY_TRANSFORM`, `RAGSPINE_ADAPTIVE`). Each
+  generated sub-query re-runs the deterministic security gate; HyDE's hypothetical document
+  is a retrieval probe, never a citable fact.
+- **RAPTOR + chunking strategies.** A **RAPTOR** multi-granularity tree (deterministic
+  threshold clustering; `is_synthesis` cluster summaries that carry provenance and are never
+  citable facts) plus **sentence-window** and **semantic** chunking on the `Chunker` seam
+  (`RAGSPINE_CHUNKER`, `make_raptor_*` / `RAGSPINE_RAPTOR*`).
+- **ColBERT & SPLADE rerankers.** Token-level late-interaction (MaxSim) and learned-sparse
+  scoring on the existing `ListwiseJudge` seam via `make_reranker`
+  (`RAGSPINE_RERANKER=colbert|splade`, `[colbert]` / `[splade]`). Shipped as **rerankers**;
+  the heavy multi-vector / sparse retrieval indexes are a follow-up.
+- **ColPali visual-document retrieval.** Page-as-image late interaction on a `VisualEmbedder`
+  seam (`make_visual_embedder` / `RAGSPINE_VISUAL_EMBEDDER`, `[colpali]`), for chart- and
+  figure-dense reports where OCR→text loses layout. Opt-in and **GPU**; the deterministic
+  MaxSim orchestration and RESTRICTED-at-the-door isolation are complete, real GPU
+  end-to-end is a follow-up.
+
+### Dependencies
+
+- New **optional, permissive-license, lazy-imported** extras only: `[colbert]`, `[splade]`,
+  `[colpali]` (all via `fastembed`, Apache-2.0). No new non-optional runtime dependency; the
+  offline default path is unchanged.
+
+## 0.7.0
+
+The **quality-depth batch** (workstreams W1–W7): the default retrieval loop becomes
+genuinely semantic, gains an offline rerank brain, taps the Spine family's document stack,
+adds groundedness measurement, and grows a deterministic knowledge graph. Opt-in additions
+are default-off; the lean pure-BM25 path stays byte-identical.
+
+### Changed
+
+- **Dense-on-by-default when the extra is present.** `ServiceConfig.embedding` now defaults
+  to `"auto"`: with `[embed-onnx]` installed the shipped loop is genuinely hybrid
+  (BM25 + ONNX semantic → RRF) with no config; with no extra it resolves to `None` and the
+  lean pure-BM25 path is byte-identical. `RAGSPINE_EMBEDDING` gains `onnx` / `auto`.
+
+### Added
+
+- **Real semantic embedding default (W1).** `OnnxEmbeddingBackend` (via `fastembed`,
+  `paraphrase-multilingual-MiniLM-L12-v2`, 384-dim multilingual, offline, deterministic)
+  behind `[embed-onnx]`, registered as `onnx` / `auto` in `make_embedding_backend`.
+- **Local cross-encoder reranker (W2).** `CrossEncoderReranker` (`fastembed`
+  `ms-marco-MiniLM`, offline, deterministic) on the `ListwiseJudge` seam via a new
+  `make_reranker` factory (`RAGSPINE_RERANKER`, `[rerank]`) — the offline rerank brain; the
+  LLM listwise judge stays the higher-cost option.
+- **Family document stack (W3).** The default `OcrBackend` is now the family's offline OCR
+  (pdfspine → ocrspine) and the scanned-PDF path is **actually wired into ingestion** (was
+  enqueue-only); a new `.docx` Extractor (`docspine`, `[doc]`) and an opt-in `.pptx`
+  Extractor (`pptspine`, `[ppt]`); docx / pptx cell fills and nested tables now flow into the
+  `StyledGrid` IR.
+- **Contextual Retrieval + layout chunking (W4).** A deterministic context header
+  (`title · entity · period · heading`) injected into index text only (`RAGSPINE_CONTEXTUAL`),
+  plus layout-aware and parent-child / small-to-big chunking on the `Chunker` seam
+  (`RAGSPINE_CHUNKER`).
+- **Faithfulness / groundedness eval (W5).** Two new ratcheted gates — claim-level
+  **faithfulness** and free-text **answer-accuracy** — folded into the same baseline ratchet,
+  with an offline deterministic entailment default. See [Evaluation](/docs/guides/evaluation).
+- **Agentic depth, opt-in (W6).** LLM query decomposition (`RAGSPINE_QUERY_DECOMPOSE`),
+  corrective retrieval / CRAG grade→act loop (`RAGSPINE_CORRECTIVE`), and a bounded multi-turn
+  conversation-memory skeleton — each re-asserts the security gate and isolation per
+  sub-query / turn.
+- **GraphRAG (W7).** A new `graph/` domain: a deterministic **structured relation graph**
+  over the controlled dimensions (subsidiary roll-up, peer comparison, derivation tracing —
+  fully cited), a `GraphStore` Protocol with an in-process default plus a `networkx` adapter
+  (`RAGSPINE_GRAPH_STORE`, `[graph]`), and a narrative-GraphRAG extraction / community
+  **skeleton** (opt-in, behind `[graph]` + `[llm]`). See [Channels](/docs/architecture/channels).
+
+### Dependencies
+
+- New **optional, permissive-license, lazy-imported** extras only: `[embed-onnx]`,
+  `[rerank]`, `[doc]`, `[ppt]`, `[graph]`. The offline, zero-heavy-SDK default path is
+  preserved.
+
 ## 0.3.0
 
 The headline is an **LLM provider seam migration** onto the shared family core, plus an
@@ -65,6 +157,14 @@ sibling releases:
   ></Card>
   <Card
     title="pdfspine"
-    description="An Apache-2.0, pure-Rust reimplementation of PyMuPDF (fitz) with PyO3 bindings — PP-OCRv5 OCR ships compiled into the wheel."
+    description="An Apache-2.0, pure-Rust reimplementation of PyMuPDF (fitz) with PyO3 bindings — PP-OCRv5 OCR ships compiled into the wheel. RAGSpine reaches the family OCR through it (the [pdf] extra)."
+  ></Card>
+  <Card
+    title="docspine 0.1.0"
+    description="Apache-2.0, pure-Rust DOCX with a first-class table model (gridSpan / vMerge / nested). Backs RAGSpine's new .docx Extractor via the [doc] extra."
+  ></Card>
+  <Card
+    title="pptspine 0.1.0"
+    description="Apache-2.0, pure-Rust PowerPoint / OOXML with richer merge handling. Backs RAGSpine's opt-in .pptx Extractor via the [ppt] extra."
   ></Card>
 </Cards>

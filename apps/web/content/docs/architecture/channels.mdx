@@ -150,6 +150,28 @@ Sources from both channels are concatenated. The two channels never blur into a 
 "ask the model" path — the structured side remains the only thing allowed to produce a
 numeric fact, and it does so without trusting model prose.
 
+## Graph multi-hop (opt-in)
+
+Alongside the two router channels, 0.7.0 adds a **standalone** structured-graph surface
+(`graph/`) — deliberately **not** a third branch of the router (`answer_question` is
+byte-unchanged), but a separate opt-in `GraphQuery` entry for the multi-hop questions the flat
+top-k and exact-SQL channels structurally cannot answer:
+
+<Cards>
+  <Card title="Subsidiary roll-up" description="Walk parent_of edges, run one exact fact query per subsidiary, and sum with every contributing Fact cited." />
+  <Card title="Peer comparison" description="Compare an entity against its competitor edges, each side backed by its own cited facts." />
+  <Card title="Derivation tracing" description="Walk derives edges (a dimension's derived_from / derivation) with per-edge provenance." />
+</Cards>
+
+The graph is built **deterministically over the controlled dimensions** — zero LLM triple
+extraction, every node and edge carrying lineage — so it stays fully cited and
+anti-fabrication-safe, and it inherits the same `SecurityGate` (a competitor entity is refused)
+and RESTRICTED isolation (a RESTRICTED-sourced node never surfaces in a traversal). Backends
+plug in behind a `GraphStore` Protocol (in-process default, `networkx` adapter behind
+`[graph]`); a Microsoft-style narrative-GraphRAG extraction / community layer ships as an
+opt-in **skeleton** behind `[graph]` + `[llm]`. See the
+[Retrieval guide](/docs/guides/retrieval) and [Changelog](/docs/changelog).
+
 ## At a glance
 
 |                   | Structured                      | Narrative                             | Composite                   |
