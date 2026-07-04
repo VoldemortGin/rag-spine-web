@@ -1,0 +1,101 @@
+---
+title: Parsing
+description: Walk a .docx body of interleaved paragraphs and tables with docspine's first-class table model — gridSpan, vMerge, nesting, shading — plus text / Markdown / HTML export and OCR.
+---
+
+docspine parses a `.docx` into an introspectable model where **tables are a
+first-class citizen**. Open a document, then walk its body — paragraphs and
+tables interleaved in document order.
+
+## Opening a document
+
+```python
+import docspine
+
+doc = docspine.open("report.docx")         # from a path
+doc = docspine.open_bytes(raw_bytes)       # from in-memory bytes
+
+len(doc)             # block count (also doc.block_count)
+```
+
+Both return a `Document`. Malformed input raises a typed `docspine.DocError`
+subtype rather than panicking.
+
+## Walking the body
+
+`Document.body()` returns the paragraphs and tables of the document in order,
+each an introspectable `dict` tagged by `kind`:
+
+```python
+for block in doc.body():
+    if block["kind"] == "paragraph":
+        for run in block["runs"]:
+            print(run["text"], run["bold"], run["color"])
+    elif block["kind"] == "table":
+        ...   # see below
+```
+
+Convenience accessors each return one block type:
+
+```python
+paras = doc.paragraphs()   # list[dict], paragraph blocks only
+tables = doc.tables()      # list[dict], table blocks only
+sections = doc.sections()  # list[dict], section properties
+```
+
+## The table model
+
+A table block carries `rows`; each row carries `cells`; each cell carries its
+text, merge state, fill, width, and — for nested tables — its own child blocks:
+
+```python
+for table in doc.tables():
+    for row in table["rows"]:
+        for cell in row["cells"]:
+            cell["text"]        # the cell's text
+            cell["grid_span"]   # horizontal merge span (columns covered)
+            cell["v_merge"]     # vertical merge: "restart" / "continue" / None
+            cell["fill"]        # cell shading / fill
+            cell["width"]       # cell width (dxa)
+            cell["blocks"]      # nested paragraphs / tables inside the cell
+```
+
+`grid_span` captures horizontal (`gridSpan`) merges and `v_merge` captures
+vertical (`vMerge`) merges, so you can reconstruct the true grid. Nested tables
+are fully preserved through `cell["blocks"]`.
+
+## Text, Markdown, HTML
+
+```python
+text = doc.to_text()           # plain text (also doc.text())
+md = doc.to_markdown()         # GitHub-Flavored Markdown
+html = doc.to_html()           # HTML reconstruction
+```
+
+## Local OCR
+
+Given the media name of an embedded picture, its bytes can be OCR'd offline —
+and an image that *is* a table can be reconstructed into a grid from its OCR word
+boxes:
+
+```python
+data = doc.image_bytes(name)
+if data is not None:
+    for item in docspine.ocr_image(data):
+        print(item["text"], item["confidence"], item["bbox"])
+
+    grid = docspine.reconstruct_image_table(data)   # cells with row / col / text
+```
+
+## Errors
+
+| Exception | Raised when |
+|---|---|
+| `DocError` | Base class for every docspine error. |
+| `DocZipError` | The `.docx` zip container is unreadable. |
+| `DocXmlError` | An XML part is malformed. |
+| `DocUnsupportedError` | A structure isn't supported. |
+| `DocOcrError` | OCR failed. |
+| `DocRenderError` | PDF rendering failed. |
+
+See [PDF export](/docs/docspine/pdf-export) to render a parsed document to PDF.

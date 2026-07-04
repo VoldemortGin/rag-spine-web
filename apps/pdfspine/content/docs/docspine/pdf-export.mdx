@@ -1,0 +1,89 @@
+---
+title: PDF export
+description: Render a .docx document to PDF with Document.to_pdf and save_pdf — streaming pagination, per-section page geometry, table fidelity, font maps, and degradation warnings.
+---
+
+`Document.to_pdf()` renders a parsed document to PDF with a streaming flow
+layout and real pagination — content flows and breaks across pages the way Word
+lays it out.
+
+## API
+
+```python
+class Document:
+    def to_pdf(self, *, font_map: dict[str, str] | None = None) -> bytes: ...
+    def save_pdf(
+        self, path: str | os.PathLike[str], *, font_map: dict[str, str] | None = None
+    ) -> None: ...
+```
+
+```python
+import docspine
+
+doc = docspine.open("report.docx")
+
+pdf_bytes = doc.to_pdf()             # -> bytes, starts with b"%PDF-"
+doc.save_pdf("report.pdf")          # writes the same bytes to a file
+```
+
+## Per-section page geometry
+
+Page size, margins, and orientation come from each `sectPr`, so a document whose
+sections mix paper sizes and orientations paginates correctly — for example a
+US-Letter portrait section followed by an A4 landscape one:
+
+```python
+# section 1 -> 612 × 792 pt   (US Letter, portrait)
+# section 2 -> 841.9 × 595.3 pt (A4, landscape)
+pdf = docspine.open("mixed-sections.docx").to_pdf()
+```
+
+Section breaks and explicit page breaks (`w:br w:type="page"`) both start a new
+page.
+
+## Fonts and the `font_map`
+
+The renderer resolves `styles.xml` + theme effective fonts (including the
+east-Asian `eastAsia` slot for CJK) and embeds each used face once, subset. Pass
+`font_map` to override family resolution — each entry maps a requested family to
+a font file path or another family name:
+
+```python
+pdf = doc.to_pdf(font_map={"宋体": "Songti SC"})
+```
+
+<Callout type="warn" title="Substitution warns, never fails">
+When a requested font is missing, docspine substitutes a fallback (e.g. Calibri
+→ Liberation Sans) and emits a `UserWarning` through `warnings.warn` whose
+message names the substitute family — **one warning per unique kind**, not one
+per run. Other degradations (an unsupported multi-column layout, a table row
+taller than the page body) warn the same way. Export never raises for these; it
+degrades and warns.
+</Callout>
+
+```python
+import warnings
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    pdf = doc.to_pdf(font_map={"Missing Family": "Liberation Serif"})
+
+for w in caught:
+    print(w.category.__name__, w.message)   # UserWarning ...
+```
+
+## What the renderer covers
+
+| Feature | Support |
+|---|---|
+| Pagination | Streaming flow layout; content breaks across pages. |
+| Section geometry | Per-section page size / margins / orientation from `sectPr`. |
+| Styles | `styles.xml` inheritance (docDefaults → basedOn → direct) plus theme. |
+| Numbering | List counters via the per-`numId`, per-level numbering engine. |
+| Tables | Per-edge borders, shading, cell margins, vertical alignment, `gridSpan` / `vMerge` merges, and whole-row moves across page breaks. |
+| Indents | Hanging and first-line indents. |
+| Run styling | Underline styles, highlight, and strikethrough. |
+| CJK | East-Asian `eastAsia` font slot resolved for CJK runs. |
+
+Rendering is deterministic per font environment: the same document and the same
+installed fonts produce the same PDF bytes.

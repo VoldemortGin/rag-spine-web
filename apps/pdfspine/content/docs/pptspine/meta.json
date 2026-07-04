@@ -1,0 +1,5 @@
+{
+  "title": "pptspine",
+  "icon": "Presentation",
+  "pages": ["index", "pdf-export", "parsing"]
+}

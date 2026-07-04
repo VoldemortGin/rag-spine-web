@@ -1,0 +1,110 @@
+---
+title: Document generation
+description: Create PDFs with pdfspine — render Markdown to a PDF with markdown_to_pdf, open images as PDF documents, and serialize any document to PDF bytes with convert_to_pdf.
+---
+
+Beyond reading and editing existing PDFs, pdfspine can **create** them: render
+Markdown to a PDF, open an image as a one-page PDF, and serialize any open
+document back to PDF bytes.
+
+## Markdown → PDF
+
+`pdfspine.markdown_to_pdf()` renders CommonMark plus the GFM extensions (tables,
+strikethrough, task lists) to a new PDF `Document` through a self-authored,
+deterministic pure-Rust layout engine. The same input and options always produce
+the same PDF bytes. This is a pdfspine original extension — it is **not** part of
+the PyMuPDF surface.
+
+```python
+import pdfspine
+
+doc = pdfspine.markdown_to_pdf("# Title\n\nHello **world**.")
+doc.save("hello.pdf")
+```
+
+The first argument is Markdown **text or a file path**. It is treated as a file
+only when it names an existing `.md` / `.markdown` / `.txt` / suffix-less file
+(the file's parent directory then becomes the image base directory); anything
+else — including a path that does not exist — is used verbatim as Markdown.
+
+```python
+doc = pdfspine.markdown_to_pdf("README.md")
+doc.save("readme.pdf")
+```
+
+Coverage includes headings H1–H6, paragraphs with bold / italic / inline-code /
+links, nested ordered / unordered / task lists, nested blockquotes, fenced code
+blocks, horizontal rules, GFM tables (measured column widths, row-by-row
+cross-page pagination), and images from local paths or `data:` URIs.
+
+### Fonts and CJK
+
+The body and heading face defaults to the built-in Base-14 set (nothing
+embedded). Pass `font=` — a TTF/OTF path or its bytes — to replace it; the face
+is embedded once, subset to the glyphs used. `cjk_font=` is a **per-character
+fallback** for characters the active face cannot encode, such as Chinese;
+without it, CJK characters degrade to `?` (never an error).
+
+```python
+doc = pdfspine.markdown_to_pdf(
+    "report.md",
+    font="fonts/Inter.ttf",
+    cjk_font="fonts/NotoSansCJK.ttf",
+)
+doc.save("report.pdf")
+```
+
+### Options
+
+Every argument after the first is keyword-only.
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `font` | path / bytes | Base-14 | Body + heading face (embedded, subset). |
+| `cjk_font` | path / bytes | none | Per-character CJK fallback face. |
+| `base_dir` | path | file's parent, else none | Base directory for relative image paths. |
+| `page_width` | float (pt) | 595.32 (A4) | Page width. |
+| `page_height` | float (pt) | 841.92 (A4) | Page height. |
+| `margins` | float or 4-tuple | 72 | All four sides, or `(top, right, bottom, left)`. |
+| `body_font_size` | float (pt) | 11 | Body size; headings scale from it. |
+
+Images (`![alt](src)`) load from local paths and `data:` URIs only — remote URLs
+are rejected and **no network access ever happens**.
+
+<Callout type="info">
+`markdown_to_pdf` returns an open `pdfspine.Document`, so you can keep editing it
+(add pages, insert text, set metadata) before saving, or get the bytes directly
+with `doc.tobytes()`.
+</Callout>
+
+## Images → PDF
+
+`pdfspine.open()` transparently converts a raster image — from a path or
+in-memory bytes — into a **single-page PDF** `Document` at open time:
+
+```python
+doc = pdfspine.open("scan.png")                  # image by path
+doc = pdfspine.open(stream=image_bytes)          # image by bytes
+doc = pdfspine.open(stream=image_bytes, filetype="png")
+
+assert doc.page_count == 1 and doc.is_pdf
+```
+
+## `convert_to_pdf`
+
+`Document.convert_to_pdf()` serializes the open document to PDF `bytes`. Because
+pdfspine documents are already PDF-backed (an image opened via `open()` is
+converted to a single-page PDF at open time), it returns bytes that reparse
+cleanly via `open()`. It mirrors PyMuPDF's `doc.convert_to_pdf` and accepts the
+`from_page` / `to_page` / `rotate` arguments for compatibility:
+
+```python
+doc = pdfspine.open("scan.png")
+pdf_bytes = doc.convert_to_pdf()                 # -> bytes, starts with b"%PDF-"
+reparsed = pdfspine.open(stream=pdf_bytes)       # reparses cleanly
+
+# fitz-compatible signature:
+pdf_bytes = doc.convert_to_pdf(from_page=0, to_page=-1, rotate=0)
+```
+
+A genuinely non-image, non-PDF input raises `pdfspine.PdfUnsupportedError`.

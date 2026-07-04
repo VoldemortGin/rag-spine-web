@@ -51,10 +51,10 @@ repository tracks the disposition of every public PyMuPDF symbol:
 
 | Disposition | Count | What it means |
 |---|---:|---|
-| Implemented | 647 | Works today; does not raise on use. |
-| Deferred | 56 | Known and planned for a later milestone. |
+| Implemented | 682 | Works today; does not raise on use. |
+| Deferred | 21 | Known and planned for a later milestone. |
 | Out-of-scope | 66 | Intentionally never in v1. |
-| **Total** | **769** | **84.1% implemented** |
+| **Total** | **769** | **88.7% implemented** |
 
 <Callout type="warn">
 "Implemented" means the method exists and returns a result of the right
@@ -116,6 +116,8 @@ also sequences, so `r[0]`, `tuple(r)`, and unpacking all behave like PyMuPDF.
 | Save | `save`, `ez_save`, `tobytes`/`write`, `incremental=` | same | ✅ Implemented |
 | Page ops | `new_page`, `delete_page`, `select` | same | ✅ Implemented |
 | Merge | `insert_pdf` | same | ✅ Implemented |
+| Image → PDF | `convert_to_pdf`, image inputs to `open` | same | ✅ Implemented |
+| Markdown → PDF | — | `markdown_to_pdf` (pdfspine extra) | ✅ Implemented |
 | TOC | `get_toc`, `set_toc` | same | ✅ Implemented |
 | Links | `get_links`, `insert_link`, `delete_link` | same | ✅ Implemented |
 | Annotations | `add_*_annot`, `annots`, `delete_annot` | same | ✅ Implemented |
@@ -142,7 +144,6 @@ also sequences, so `r[0]`, `tuple(r)`, and unpacking all behave like PyMuPDF.
 
 These are *deferred* (planned) — they raise `PdfUnsupportedError` today:
 
-- `convert_to_pdf` / image-as-document inputs (milestone M5).
 - Page-level word/block helpers (`get_text_words`, `get_text_blocks`,
   `get_textbox`), `get_texttrace` (M2 follow-ups).
 - Image-info helpers (`get_image_info`, `get_image_bbox`, `get_image_rects`).

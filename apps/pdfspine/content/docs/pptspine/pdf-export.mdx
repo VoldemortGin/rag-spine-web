@@ -1,0 +1,87 @@
+---
+title: PDF export
+description: Render a .pptx deck to PDF with Presentation.to_pdf and save_pdf — one page per slide, font maps, degradation warnings, and the rendering features covered.
+---
+
+`Presentation.to_pdf()` renders a parsed deck to PDF: **one page per slide**, at
+the exact slide size (EMU → points, `12700` EMU per point), with every shape
+drawn at its absolute resolved position.
+
+## API
+
+```python
+class Presentation:
+    def to_pdf(self, *, font_map: dict[str, str] | None = None) -> bytes: ...
+    def save_pdf(
+        self, path: str | os.PathLike[str], *, font_map: dict[str, str] | None = None
+    ) -> None: ...
+```
+
+Both take zero required arguments. `to_pdf()` returns the PDF as `bytes`;
+`save_pdf(path)` writes it to disk.
+
+```python
+import pptspine
+
+pres = pptspine.open("deck.pptx")
+
+pdf_bytes = pres.to_pdf()            # -> bytes, starts with b"%PDF-"
+pres.save_pdf("deck.pdf")           # writes the same bytes to a file
+```
+
+The page count always equals the slide count, and each page's rectangle equals
+the slide size in points — a 16:9 deck yields `960 × 540` pt pages, a 4:3 deck
+`720 × 540` pt:
+
+```python
+pres = pptspine.open("widescreen.pptx")
+assert pres.slide_size_points == (960.0, 540.0)
+assert pres.to_pdf().startswith(b"%PDF-")   # page_count == slide_count
+```
+
+## Fonts and the `font_map`
+
+By default the renderer resolves each requested font family through a built-in
+substitution table (e.g. 宋体 → Songti SC) and embeds each used face once,
+subset to the glyphs actually drawn. Pass `font_map` to override family
+resolution — each entry maps a requested family name to either a font **file
+path** or another **family name**:
+
+```python
+pdf = pres.to_pdf(font_map={"Calibri": "Helvetica"})
+```
+
+`font_map` is keyword-only and defaults to `None`.
+
+<Callout type="warn" title="Degradation warnings">
+When a font is substituted, or when a shape uses a preset the renderer does not
+yet draw, pptspine emits a Python warning through `warnings.warn` — **one per
+unique kind**, not one per shape. Export never raises for these; it degrades and
+warns. Suppress or capture them with the standard `warnings` module when
+rendering decks in bulk.
+</Callout>
+
+```python
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    pdf = pres.to_pdf()
+```
+
+## What the renderer covers
+
+| Feature | Support |
+|---|---|
+| Slide geometry | One page per slide at the exact slide size (EMU → pt). |
+| Placeholder inheritance | `ph` capture resolved up the slideLayout → slideMaster chain. |
+| Theme | `clrScheme` + `clrMap` / `clrMapOvr`, `fontScheme` (incl. east-Asian), `p:style` fill / line / font references. |
+| Shape transforms | `rot`, `flipH` / `flipV`, `avLst` adjust values, dashed strokes, picture `srcRect` / stretch. |
+| Groups | Nested group affine remap: `(child − chOff) · (ext / chExt) + off`. |
+| Text bodies | `bodyPr` anchor / insets / wrap and `normAutofit` font-scale, applied as stored. |
+| Tables | Absolute cell x from `tblGrid`, per-side borders, fills, cell margins, anchoring. |
+| Backgrounds | Slide / layout / master `bg` solid and picture fills, `bgRef` via theme. |
+| Text extraction | `ToUnicode` always written, so output is selectable and searchable. |
+
+Rendering is **deterministic per font environment**: the same deck and the same
+installed fonts always produce the same PDF bytes.

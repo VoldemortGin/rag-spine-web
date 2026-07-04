@@ -8,6 +8,7 @@
     "text-extraction",
     "editing",
     "rendering",
+    "document-generation",
     "cli",
     "migrating-from-pymupdf",
     "license"

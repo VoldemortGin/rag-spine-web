@@ -1,0 +1,83 @@
+---
+title: Parsing
+description: Open a .pptx deck and walk its slides, shapes, tables, pictures, and speaker notes, or convert it to text / Markdown, with optional local OCR.
+---
+
+pptspine parses a `.pptx` into an introspectable model. Open a deck, then walk
+its slides and shapes, or convert the whole thing to text or Markdown.
+
+## Opening a deck
+
+```python
+import pptspine
+
+pres = pptspine.open("deck.pptx")          # from a path
+pres = pptspine.open_bytes(raw_bytes)      # from in-memory bytes
+
+len(pres)               # slide count (also pres.slide_count)
+pres.slide_size_points  # (width, height) in points
+```
+
+`open` and `open_bytes` both return a `Presentation` handle. A malformed file
+raises a typed `pptspine.PptError` subtype rather than panicking.
+
+## Slides and shapes
+
+```python
+for slide in pres.slides():
+    print(slide.index, slide.layout_name, slide.master_name)
+    print(slide.text)          # all text on the slide
+    print(slide.notes)         # speaker notes, or None
+```
+
+Each slide's shapes are returned as introspectable `dict` objects tagged by
+`kind`. A text shape exposes its paragraphs and styled runs; a table shape its
+rows and cells; a picture its media name:
+
+```python
+for shape in slide.shapes():
+    kind = shape["kind"]                       # "text" | "table" | "picture" | ...
+
+    if kind == "text":
+        for para in shape["paragraphs"]:
+            for run in para["runs"]:
+                print(run["text"], run["bold"], run["color"])
+    elif kind == "table":
+        for row in shape["rows"]:
+            print([cell["text"] for cell in row])
+    elif kind == "picture":
+        data = pres.image_bytes(shape["media"])  # raw image bytes, or None
+```
+
+## Text and Markdown
+
+```python
+text = pres.to_text()          # plain text in reading order
+md = pres.to_markdown()        # GitHub-Flavored Markdown
+```
+
+## Local OCR
+
+Embedded images can be OCR'd offline — no network, deterministic — via the
+module-level `ocr_image`:
+
+```python
+data = pres.image_bytes(name)
+if data is not None:
+    for item in pptspine.ocr_image(data):
+        print(item["text"], item["confidence"], item["bbox"])
+```
+
+## Errors
+
+Every failure surfaces as a typed exception under `pptspine.PptError`:
+
+| Exception | Raised when |
+|---|---|
+| `PptError` | Base class for every pptspine error. |
+| `PptZipError` | The `.pptx` zip container is unreadable. |
+| `PptXmlError` | An XML part is malformed. |
+| `PptUnsupportedError` | A structure isn't supported. |
+| `PptOcrError` | OCR failed. |
+
+See [PDF export](/docs/pptspine/pdf-export) to render a parsed deck to PDF.

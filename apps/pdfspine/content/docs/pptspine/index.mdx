@@ -1,0 +1,66 @@
+---
+title: pptspine
+description: A pure-Rust PowerPoint (.pptx) parser with Python bindings — structural parsing plus faithful .pptx → PDF export. Apache-2.0, on PyPI.
+---
+
+**A pure-Rust PowerPoint (`.pptx`) parser with Python bindings — now with faithful `.pptx → PDF` export.**
+
+A `.pptx` file is OOXML: a zip archive of XML parts. pptspine walks that XML
+directly to produce a structured, information-preserving model of a deck —
+slides, text frames (paragraphs + styled runs), tables (cells, merges, fills),
+pictures, and autoshapes. As of **v0.2.0** it also renders a deck to PDF. It
+ships as an `abi3-py311` wheel under **Apache-2.0**; the only runtime dependency
+is `ocrspine-models`.
+
+```bash
+pip install pptspine
+```
+
+## Capabilities
+
+- **Structural parsing.** Open a deck from a path or bytes, walk its slides and
+  shapes, and read text frames, tables, pictures, and speaker notes. Convert the
+  whole deck to plain text or Markdown with `to_text()` / `to_markdown()`.
+- **`.pptx → PDF` export.** `Presentation.to_pdf()` renders **one PDF page per
+  slide** at the exact slide size, resolving the slideLayout / slideMaster /
+  theme inheritance chain so placeholder text looks like it does in PowerPoint.
+- **Local OCR.** Embedded images can be OCR'd offline and deterministically via
+  the sibling `ocrspine` engine (PP-OCRv5 through `tract-onnx`) — no cloud, no
+  network.
+
+## PDF export in two lines
+
+```python
+import pptspine
+
+pres = pptspine.open("deck.pptx")
+pres.save_pdf("deck.pdf")            # one PDF page per slide
+```
+
+<Callout type="info" title="Shared typesetting engine">
+PDF export is built on **`pdf-typeset`**, a first-party Rust typesetting engine
+that lives in the pdfspine workspace and backs both pptspine's and
+[docspine](/docs/docspine)'s `→ PDF` export. It is a self-authored,
+deterministic layout engine — not an HTML/CSS or Story engine. Output is
+text-extractable (a `ToUnicode` map is always written) and deterministic per
+font environment.
+</Callout>
+
+## The Spine family
+
+pptspine is one of three document-processing packages that share this
+typesetting core:
+
+| Package | Handles | On this site |
+|---|---|---|
+| [pdfspine](/docs) | PDF read / edit / render, plus Markdown → PDF | Introduction |
+| [docspine](/docs/docspine) | `.docx` → model / PDF | docspine |
+| **pptspine** | `.pptx` → model / PDF | you are here |
+
+All three are Apache-2.0, pure-Rust, `abi3-py311` wheels installable with a
+single `pip install`.
+
+<Cards>
+  <Card title="PDF export" href="/docs/pptspine/pdf-export" description="to_pdf / save_pdf, font maps, and the rendering features they cover." />
+  <Card title="Parsing" href="/docs/pptspine/parsing" description="Open a deck and walk slides, shapes, tables, and speaker notes." />
+</Cards>

@@ -1,0 +1,5 @@
+{
+  "title": "docspine",
+  "icon": "FileText",
+  "pages": ["index", "pdf-export", "parsing"]
+}

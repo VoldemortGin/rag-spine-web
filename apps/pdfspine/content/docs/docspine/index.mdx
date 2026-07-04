@@ -1,0 +1,65 @@
+---
+title: docspine
+description: A pure-Rust Word (.docx) parser with a first-class table model and Python bindings — structural parsing plus faithful .docx → PDF export. Apache-2.0, on PyPI.
+---
+
+**A pure-Rust Word (`.docx`) parser with a first-class table model — now with faithful `.docx → PDF` export.**
+
+A `.docx` file is OOXML: a zip archive of XML parts. docspine walks
+`word/document.xml` directly to produce a structured, information-preserving
+model — paragraphs (styled runs), **tables** (rows, cells, merges, fills,
+nesting), and embedded pictures. Tables are a first-class focus. As of
+**v0.2.0** it also renders a document to PDF. It ships as an `abi3-py311` wheel
+under **Apache-2.0**; the only runtime dependency is `ocrspine-models`.
+
+```bash
+pip install docspine
+```
+
+## Capabilities
+
+- **Structural parsing.** Walk the document body in order — paragraphs and
+  tables interleaved — with a strong table model that preserves `gridSpan`
+  (horizontal merge), `vMerge` (vertical merge), nested tables, cell shading,
+  and column widths.
+- **`.docx → PDF` export.** `Document.to_pdf()` runs a streaming flow layout
+  with real pagination, honoring per-section page geometry, `styles.xml` + theme
+  effective styles, list numbering, and table fidelity.
+- **Local OCR.** Embedded images can be OCR'd offline, and an image that *is* a
+  table can be reconstructed into a grid from its OCR word boxes.
+
+## PDF export in two lines
+
+```python
+import docspine
+
+doc = docspine.open("report.docx")
+doc.save_pdf("report.pdf")
+```
+
+<Callout type="info" title="Shared typesetting engine">
+PDF export is built on **`pdf-typeset`**, a first-party Rust typesetting engine
+that lives in the pdfspine workspace and backs both docspine's and
+[pptspine](/docs/pptspine)'s `→ PDF` export. It is a self-authored,
+deterministic layout engine — not an HTML/CSS or Story engine. Output is
+text-extractable and deterministic per font environment.
+</Callout>
+
+## The Spine family
+
+docspine is one of three document-processing packages that share this
+typesetting core:
+
+| Package | Handles | On this site |
+|---|---|---|
+| [pdfspine](/docs) | PDF read / edit / render, plus Markdown → PDF | Introduction |
+| **docspine** | `.docx` → model / PDF | you are here |
+| [pptspine](/docs/pptspine) | `.pptx` → model / PDF | pptspine |
+
+All three are Apache-2.0, pure-Rust, `abi3-py311` wheels installable with a
+single `pip install`.
+
+<Cards>
+  <Card title="PDF export" href="/docs/docspine/pdf-export" description="to_pdf / save_pdf, pagination, per-section geometry, table fidelity, and font maps." />
+  <Card title="Parsing" href="/docs/docspine/parsing" description="Walk the body and tables — gridSpan, vMerge, nesting, shading — plus text / Markdown / HTML." />
+</Cards>
