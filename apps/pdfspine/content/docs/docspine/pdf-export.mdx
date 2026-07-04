@@ -85,5 +85,9 @@ for w in caught:
 | Run styling | Underline styles, highlight, and strikethrough. |
 | CJK | East-Asian `eastAsia` font slot resolved for CJK runs. |
 
+Embedded pictures are **not rendered yet**: the export emits a `UserWarning` and
+continues without the image (the picture's bytes stay available at parse level
+via `image_bytes()`).
+
 Rendering is deterministic per font environment: the same document and the same
 installed fonts produce the same PDF bytes.
