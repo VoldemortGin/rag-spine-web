@@ -22,9 +22,10 @@ description: The complete public API — every spineagent class, protocol, and f
 `AgentResult(agent: str, output: str, usage: dict[str, int] | None = None, error: dict[str, object] | None = None)`
 - frozen dataclass。一次 agent 步的结果。`agent` = provenance(产出它的 agent 名)。
 - 属性 `ok -> bool`:`self.error is None`。
-- 契约:成功路径 `error is None`;`error` 仅由编排层弹性模式(`Coordinator(..., resilient=True)`)
-  捕获 `step` 异常时填充,值是 `corespine.errors.error_to_dict(exc)` 的归一 dict(含 `code` /
-  `retryable` / `message` / `context`)。
+- 契约:成功路径 `error is None`;`error` 仅由编排层弹性模式(`Coordinator` 的
+  `run_sequential` / `run_parallel` / `run_pipeline` 传 `resilient=True`;`resilient` 是这些
+  方法的关键字参数,**不是**构造器参数)捕获 `step` 异常时填充,值是
+  `corespine.errors.error_to_dict(exc)` 的归一 dict(含 `code` / `retryable` / `message` / `context`)。
 
 ### `class Agent` (Protocol, runtime_checkable)
 - 属性 `name: str`;方法 `step(self, task: str, *, trace: TraceSink | None = None) -> AgentResult`。
