@@ -24,8 +24,8 @@ Every target defaults to the project venv interpreter (`.venv/bin/python`). Over
 | Command            | What it does                                                                             |
 | ------------------ | ---------------------------------------------------------------------------------------- |
 | `make venv`        | `uv venv .venv` — create the project venv                                                |
-| `make install`     | editable install with `[dev,service]` extras (the usual dev setup)                       |
-| `make install-all` | editable install with `[dev,service,llm,embed]` (adds real LLM + embeddings)             |
+| `make install`     | editable install with `[dev,service,vector]` extras (the usual dev setup)                |
+| `make install-all` | editable install with `[dev,service,vector,llm,embed]` (adds real LLM + embeddings)      |
 | `make hooks`       | `git config core.hooksPath .githooks` — enable the pre-push CI gate (one-time per clone) |
 
 </Tab>
@@ -34,9 +34,9 @@ Every target defaults to the project venv interpreter (`.venv/bin/python`). Over
 
 | Command      | What it does                                                                            |
 | ------------ | --------------------------------------------------------------------------------------- |
-| `make ci`    | the gate: tests (`-m "not gpu"`) + demo smoke — exactly what the pre-push hook runs     |
-| `make test`  | `pytest tests/ -q -m "not gpu"`                                                         |
-| `make lint`  | ruff + mypy (informational, non-blocking — not wired into the gate)                     |
+| `make ci`    | the gate, 8 steps: docstring-reference integrity → doc-drift check → `mypy --strict` → `ruff check src/ragspine` → test suite (`-m "not gpu and not docling and not network"`) → docling tests in their own process → QA eval ratchet (tool + agent mode) → demo smoke — exactly what the pre-push hook runs |
+| `make test`  | `pytest tests/ -q -m "not gpu and not network"`                                         |
+| `make lint`  | `scripts/lint.sh`'s ruff + mypy — always exits 0 (informational only); note `make ci` separately runs `mypy --strict` and `ruff check` as blocking gate steps, not through this script |
 | `make fmt`   | `ruff check --fix` then `ruff format` over `src/ragspine`, `scripts`, `tests`           |
 | `make drift` | flag docs whose covered code changed since last verified (`scripts/check_doc_drift.py`) |
 
@@ -92,7 +92,7 @@ lineage. `mock` mode is offline and deterministic and needs no API key.
 | `--provider`            | `mock`                      | `mock` (offline, deterministic) or `anthropic` (real Claude)                                                                                                              |
 | `--db`                  | the default fact DB         | path to the `fact_metric` sqlite store                                                                                                                                    |
 | `--chunk-db`            | `None`                      | narrative chunk-store path; when set, narrative/composite questions use real retrieval (BM25 + RRF + listwise rerank) — otherwise the narrative channel degrades honestly |
-| `--embedding`           | `none`                      | vector-channel backend: `none` (pure BM25), `deterministic` (offline lexical-hash, non-semantic), or `openai` (needs the SDK + config)                                    |
+| `--embedding`           | `none`                      | vector-channel backend: `none` (pure BM25, default), `auto` (semantic ONNX if `[embed-onnx]` is installed, else falls back to BM25), `onnx` (real semantic ONNX embeddings via fastembed, needs `[embed-onnx]`), `deterministic` (offline lexical-hash, non-semantic), or `openai` (needs the SDK + config) |
 | `--reference-date`      | today                       | base date `YYYY-MM-DD` for relative-period resolution                                                                                                                     |
 | `--model`               | the default Anthropic model | model name for the `anthropic` provider                                                                                                                                   |
 | `--base-url`            | `None`                      | override the Anthropic API base URL (for an enterprise gateway)                                                                                                           |
@@ -132,6 +132,27 @@ RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.
 | Argument  | Default           | Purpose                                       |
 | --------- | ----------------- | --------------------------------------------- |
 | `--queue` | `ragspine-ingest` | queue name (must match the `RQQueue` default) |
+
+### `ragspine` (console command)
+
+Installing the package (`pip install rag-spine`) also gives you a console command, wired via
+`[project.scripts]` in `pyproject.toml` (`ragspine = "ragspine.cli:main"`). Unlike the scripts
+above, this **does** ship inside the wheel — the `scripts/` directory itself does not (it's a
+dev-only convenience for the git checkout). The console command exposes a leaner, offline-first
+subset via subcommands:
+
+```bash title="ragspine console command"
+ragspine quickstart
+ragspine ask --db data/fact_metric.db "香港去年REVENUE多少"
+ragspine version
+```
+
+| Subcommand                                    | What it does                                                                                                                                          |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `quickstart`                                   | fully offline demo: builds an ephemeral fact KB, then one hit (with provenance) + one honest "not found" refusal via `MockProvider` — no API key, no network |
+| `ask <question>`                               | mirrors `scripts/ask.py`: build a `FactStore` from `--db`, pick `--provider` (`mock` default, `anthropic` needs the `[llm]` extra + a key), print the answer + sources |
+| `version`                                      | print the installed distribution version                                                                                                              |
+| `dify compile <path>` / `dify analyze <path>`  | Dify workflow YAML compiler (needs the `[dify]` extra): compile a `.yml` to plain Python (static-optimization suggestions on stderr), or just run the static analysis |
 
 ## Next steps
 

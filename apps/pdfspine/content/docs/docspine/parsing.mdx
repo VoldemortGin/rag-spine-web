@@ -54,7 +54,7 @@ for table in doc.tables():
         for cell in row["cells"]:
             cell["text"]        # the cell's text
             cell["grid_span"]   # horizontal merge span (columns covered)
-            cell["v_merge"]     # vertical merge: "restart" / "continue" / None
+            cell["v_merge"]     # vertical merge: "restart" / "continue" / "none"
             cell["fill"]        # cell shading / fill
             cell["width"]       # cell width (dxa)
             cell["blocks"]      # nested paragraphs / tables inside the cell

@@ -5,9 +5,11 @@ description: Install RAGSpine from PyPI or from source, pick the optional extras
 
 RAGSpine requires **Python 3.11+**. The current release is **0.8.1**. The core imports zero
 third-party SDKs and runs fully offline with a deterministic `MockProvider` — you only pull in
-heavier dependencies via the optional extras below. Its one non-optional runtime dependency is
-the thin shared family core [`corespine`](https://pypi.org/project/corespine/) (`>=0.1.0`),
-which owns the cross-package primitives such as the `LLMProvider` seam and `RateLimitedProvider`.
+heavier dependencies via the optional extras below. Its non-optional runtime dependencies are
+the thin shared family core [`corespine`](https://pypi.org/project/corespine/) (`>=0.1.1`), which
+owns the cross-package primitives such as the `LLMProvider` seam and `RateLimitedProvider`, plus
+a handful of lightweight utility libraries (`python-pptx`, `openpyxl`, `rootutils`, `pypdfium2`)
+and `beartype` for runtime type-checking.
 
 ## Install from PyPI
 
@@ -37,7 +39,8 @@ The base install gives you the offline core. Add extras for the capabilities you
 | Extra       | Pulls in                                                    | For                                              |
 | ----------- | ----------------------------------------------------------- | ------------------------------------------------ |
 | `[service]` | fastapi, uvicorn, httpx, rq, redis                          | the HTTP + async-queue layer                     |
-| `[pdf]`     | docling                                                     | digital-PDF table extraction                     |
+| `[pdf]`     | pdfspine                                                    | digital-PDF table extraction                     |
+| `[pdf-docling]` | docling (+ `transformers<5.9` on macOS)                 | optional docling fallback engine for digital-PDF layout/table extraction (heavy, ~600MB) |
 | `[ocr]`     | paddleocr                                                   | scanned-PDF OCR (Linux + NVIDIA GPU)             |
 | `[llm]`     | anthropic, openai                                           | the real Anthropic chat provider + OpenAI embeddings backend (lazy-imported) |
 | `[embed]`   | sentence-transformers                                       | real embedding models for the vector channel     |
@@ -47,8 +50,10 @@ The base install gives you the offline core. Add extras for the capabilities you
 | `[doc]`     | docspine                                                    | `.docx` table + narrative extraction (pure-Rust)  |
 | `[ppt]`     | pptspine                                                    | opt-in richer-merge `.pptx` extraction (pure-Rust) |
 | `[graph]`   | networkx                                                    | the `networkx` GraphStore adapter for the relation graph |
+| `[otel]`    | opentelemetry-api, opentelemetry-sdk                        | export privacy-safe traces via the OpenTelemetry `TraceSink` adapter |
+| `[dify]`    | PyYAML, pydantic                                            | the Dify workflow YAML compiler (`ragspine dify compile`/`analyze`) |
 | `[dev]`     | pytest, reportlab, markdown, pdoc, ruff, mypy, build, twine | tests, fixture generation, docs, lint, packaging |
-| `[all]`     | `[pdf,ocr,llm,embed,vector,service]`                        | every runtime capability at once (excludes `[dev]`) |
+| `[all]`     | `[pdf,ocr,doc,llm,embed,embed-onnx,rerank,colbert,splade,colpali,vector,graph,otel,service,dify]` | every runtime capability at once (excludes `[dev]`) |
 
 Combine extras with commas:
 
@@ -77,21 +82,21 @@ Clone the repo and create an isolated environment with [uv](https://docs.astral.
 ```bash title="from source"
 git clone https://github.com/VoldemortGin/ragspine.git && cd ragspine
 uv venv .venv
-VIRTUAL_ENV="$(pwd)/.venv" uv pip install -e ".[dev,service]"
+VIRTUAL_ENV="$(pwd)/.venv" uv pip install -e ".[dev,service,vector]"
 ```
 
 <Callout type="info">
   The `VIRTUAL_ENV="$(pwd)/.venv"` prefix is **required**: it tells `uv` to install into the `.venv`
   you just created rather than a system Python it might otherwise discover. This is the canonical
-  dev setup — editable (`-e`) with the `[dev,service]` extras.
+  dev setup — editable (`-e`) with the `[dev,service,vector]` extras.
 </Callout>
 
 If you have `make`, the same setup is wrapped as targets (run from the repo root):
 
 ```bash title="via make"
 make venv        # uv venv .venv
-make install     # editable install with [dev,service]
-make install-all # editable install with [dev,service,llm,embed]
+make install     # editable install with [dev,service,vector]
+make install-all # editable install with [dev,service,vector,llm,embed]
 ```
 
 ## Offline-first by design

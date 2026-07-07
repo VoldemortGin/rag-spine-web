@@ -8,9 +8,9 @@ description: A pure-Rust Word (.docx) parser with a first-class table model and 
 A `.docx` file is OOXML: a zip archive of XML parts. docspine walks
 `word/document.xml` directly to produce a structured, information-preserving
 model — paragraphs (styled runs), **tables** (rows, cells, merges, fills,
-nesting), and embedded pictures. Tables are a first-class focus. As of
-**v0.2.0** it also renders a document to PDF. It ships as an `abi3-py311` wheel
-under **Apache-2.0**; the only runtime dependency is `ocrspine-models`.
+nesting), and embedded pictures. Tables are a first-class focus. docspine also
+renders a document to PDF. It ships as an `abi3-py311` wheel under
+**Apache-2.0**; the only runtime dependency is `ocrspine-models`.
 
 ```bash
 pip install docspine
