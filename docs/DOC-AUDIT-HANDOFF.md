@@ -78,34 +78,70 @@ Doc fixes (on `rag-spine-web` `main`):
 
 ## 5. Remaining work
 
-### D — corespine docs (UNVERIFIED WIP on this branch)
+### D — corespine docs (DONE on this branch — verified & fixed)
 
-Files edited by an agent killed **during its final self-review** (edits look complete,
-prettier-clean, but claims were **not** independently source-verified):
-`apps/corespine/content/docs/{api,index,overview,recipes,reference/extending,reference/prd,reference/roadmap}.mdx`
+**Status: DONE.** All 7 pages re-verified against `corespine` source (`src/corespine/`
+@ `12249df`):
+`apps/corespine/content/docs/{api,index,overview,recipes,reference/extending,reference/prd,reference/roadmap}.mdx`.
+Every export signature, error string, and the `__all__` count (30) match source; all 8
+recipe snippets (R1–R8) were run offline (`PYTHONPATH=src`) and their printed outputs —
+including the MockProvider hash digests `e761052af1bb` / `3ce59d0eaa4c` — reproduce
+exactly. Confirmed fix:
 
-**To finish:** re-verify each edited claim against `corespine` source
-(`~/workspace/spine/corespine/src/corespine/` — modules: `seam/registry.py`,
-`observability/trace.py`, `llm/provider.py`, `config/env.py`, `queue/task_queue.py`,
-`conformance/harness.py`), fix any that are wrong, run example code if a corespine
-venv exists, `npx prettier --check` the changed files.
+- `reference/prd.mdx` — the `make ci` gate was described as "(ruff + pytest)" →
+  "(ruff + mypy + pytest)" (`Makefile:22` `ci: lint typecheck test`; `typecheck` runs
+  `mypy --strict` at line 34).
 
-### E — pdfspine guide/reference docs (UNVERIFIED WIP on this branch)
+Verified consistent (no edits): `api`, `index`, `overview`, `recipes`,
+`reference/extending`, `reference/roadmap`. `npx prettier --check` clean.
 
-Files edited by an agent killed **while rewriting `migrating-from-pymupdf.mdx`** (that
-rewrite landed and matches `COMPAT.toml`'s 21 deferred symbols + OCR-is-implemented;
-spot-checked as coherent). Other 4 files edited too:
-`apps/pdfspine/content/docs/guide/{cli,index,installation,migrating-from-pymupdf,rendering}.mdx`
+### E — pdfspine guide/reference docs (DONE on this branch — verified & fixed)
 
-**To finish:** re-verify each claim against `pdfspine` source
-(`~/workspace/spine/pdfspine/python/pdfspine/*.py` + `*.pyi`, `COMPAT.toml`,
-`CHANGELOG.md`), fix drift, `npx prettier --check`. (Scope was guide/reference/
-benchmarks/index — NOT the docspine/ or pptspine/ subdirs, already done by A.)
+**Status: DONE.** The 4 guide pages re-verified against `pdfspine` source
+(`python/pdfspine/*.pyi` + `crates/py-bindings` @ `9c725fd`; pdfspine now **0.3.0** on
+PyPI): `apps/pdfspine/content/docs/guide/{cli,index,installation,rendering}.mdx`.
+Checked: CLI subcommands / flags / `--format` choices + `pdfspine: <msg>` error shape
+(`cli.py`); `get_pixmap` / `Pixmap` / `DisplayList` API + `extract_image` dict keys +
+`convert_to_pdf() -> bytes` (`_core.pyi`, `crates/py-bindings/src/lib.rs:3220`); PyPI
+install, abi3, `ocrspine-models` runtime dep, `pdfspine.version` tuple,
+`fitz.pymupdf_version` — all match (imported the built `_core.abi3.so` to confirm
+`version`, raster `open()`, and `convert_to_pdf` at runtime). Confirmed fix:
 
-### F — ragspine remaining pages (NOT STARTED)
+- `guide/index.mdx` — installation-row "(not yet on PyPI)" → "Installing from PyPI, or
+  building the wheel from source" (`installation.mdx` already said on PyPI; 0.3.0 live).
 
-No edits made yet. Audit these `apps/web/content/docs/` pages vs `ragspine` source
-(`~/workspace/spine/ragspine/src/ragspine/`, `pyproject.toml`, `README.md`, current
+`migrating-from-pymupdf.mdx` left untouched (already verified — matches `COMPAT.toml`'s
+682/769 = 88.7%, 21 deferred, 66 out-of-scope). `npx prettier --check` clean.
+
+### F — ragspine remaining pages (DONE on this branch — audited & fixed)
+
+**Status: DONE.** All pages below audited vs `ragspine` 0.8.1 source and fixed where
+confirmed-drifted (prettier-clean). Confirmed fixes:
+
+- `reference/python-api.mdx` — `FactStore` reframed as the `@runtime_checkable` Protocol
+  seam; instantiation code + runnable example now use the concrete `SqliteFactStore`
+  (Protocol has no constructor — `storage/fact_store.py:187,234,241`).
+- `reference/extension-points.mdx` — inject example → `SqliteFactStore`; `TaskQueue.enqueue`
+  first param corrected `func_path: str` → `func: JobFunc | str`
+  (`service/tasks/task_queue.py:71`).
+- `reference/configuration.mdx` — CompanyProfile Step env var `RAGSPINE_COMPANY_PROFILE` →
+  `RAGSPINE_COMPANY_CONFIG` (the var `load_company_profile()` actually reads —
+  `common/company_profile.py:29`; `RAGSPINE_COMPANY_PROFILE` only maps to the unused
+  `ServiceConfig.company_profile_path` field).
+- `architecture/package-layout.mdx` — `observability.py` → `observability/` (it is a package
+  dir `common/observability/{sink,trace}.py`, not a module).
+
+Verified consistent (no edits): `reference/http-api.mdx` (all 6 `service/api` routes + schemas
+match), `concepts/glossary.mdx`, `architecture/{overview,channels,request-flow}.mdx`.
+
+ADRs 0001–0012 + index — **no edits** (immutable). Notable reported divergence: web `adr-0012`
+documents the corespine LLM seam, but ragspine's in-repo `0012` is a different decision
+(onboarding-budget); the corespine-seam decision is a family-level ADR, and ragspine's real
+0012/0013/0014 are unrepresented. Renumbering is out of scope for a minimal audit — reported,
+not changed. Minor immutable-prose staleness: `corespine>=0.1.0` (now pinned `>=0.1.1`).
+
+Original scope (for reference) — audit these `apps/web/content/docs/` pages vs `ragspine`
+source (`~/workspace/spine/ragspine/src/ragspine/`, `pyproject.toml`, `README.md`, current
 version **0.8.1**):
 
 - `reference/python-api.mdx`, `reference/http-api.mdx`,

@@ -15,16 +15,21 @@ spine in full, skip the AI-provider layer entirely. Do **not** add `packages/dom
 
 ```
 .
-├── apps/web/            # the ONLY package; the Next/React/Tailwind composition root
-│   └── content/docs/    # documentation content (MDX) lives here
-├── tsconfig.base.json   # strict baseline (extended by apps/web)
-├── eslint.config.mjs    # shared type-aware flat config (composed by apps/web)
-├── turbo.json           # typecheck / lint / test / build
+├── apps/                # four independent Fumadocs sites, one per spine package
+│   ├── web/             # ragspine docs      → rag-spine.org       (Pages: rag-spine)
+│   ├── corespine/       # corespine docs     → core.rag-spine.org  (Pages: corespine-docs)
+│   ├── spineagent/      # spineagent docs    → agent.rag-spine.org (Pages: spineagent-docs)
+│   └── pdfspine/        # pdfspine+docspine+pptspine docs → pdf.rag-spine.org (pdfspine-docs)
+│                        #   each app is its own Next/React/Tailwind root; MDX in content/docs/
+├── tsconfig.base.json   # strict baseline (extended by every app)
+├── eslint.config.mjs    # shared type-aware flat config (composed by every app)
+├── turbo.json           # typecheck / lint / test / build (fanned out across all apps)
 └── ci.sh                # the one-command zero-warning gate
 ```
 
-`pnpm-workspace.yaml` globs `apps/*` and `packages/*`, so new packages are picked up
-with no manifest edit (none exist yet — a single app is fine at this size).
+`pnpm-workspace.yaml` globs `apps/*` and `packages/*`, so the four sibling docs sites
+under `apps/*` are picked up with no manifest edit. No shared `packages/*` exists yet —
+each site is self-contained pure presentation, needing no shared domain layer.
 
 ## The gate (the only "done" judge)
 
@@ -48,6 +53,9 @@ Run it after every change; fix until green. `lint` runs `eslint --max-warnings 0
 
 ## Docs map
 
-- This file — the always-on routing table.
-- `apps/web/CLAUDE.md` — the app's local contract.
+- This file — the always-on routing table for the whole monorepo.
+- `apps/*/content/docs/` — each site's MDX content (`web` = ragspine, plus `corespine`,
+  `spineagent`, and `pdfspine` = pdfspine + docspine + pptspine).
+- `apps/web/CLAUDE.md` — the web app's local contract; the sibling docs apps follow the
+  same shape.
 - `docs/adr/` — numbered, immutable decision records.

@@ -17,7 +17,7 @@ lazy-loads its children.
       <File name="company_profile.py" />
       <File name="glossary.py" />
       <File name="sensitivity.py" />
-      <File name="observability.py" />
+      <Folder name="observability" />
       <File name="core.py" />
     </Folder>
     <Folder name="extraction">
@@ -100,7 +100,7 @@ src/ragspine/
     Cross-domain primitives that everything builds on and which depend on nothing first-party.
     `company_profile.py` (config-driven identity / metrics / competitors — never hardcoded),
     `glossary.py` (ZH/EN/abbrev synonym → controlled code normalization), `sensitivity.py`
-    (the sensitivity tiers), `observability.py` (request_id + privacy-aware structured traces:
+    (the sensitivity tiers), `observability/` (request_id + privacy-aware structured traces:
     codes / counts / timings only), and `core.py` (global path constants).
 
     [Guide → /docs/guides/common](/docs/guides/common)

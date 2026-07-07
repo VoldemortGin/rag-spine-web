@@ -137,9 +137,9 @@ inside `RQQueue` only.
 <TypeTable
   type={{
     enqueue: {
-      type: '(func_path: str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
+      type: '(func: JobFunc | str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
       description:
-        'Enqueue a job by dotted func_path with a serializable payload; return the job id.',
+        'Enqueue a job by dotted path or callable with a serializable payload; return the job id.',
     },
     get: {
       type: '(job_id: str) -> JobStatus | None',
@@ -206,10 +206,10 @@ Inject it exactly where `MockProvider` would go:
 
 ```python
 from ragspine.agent.agent import answer_question
-from ragspine.storage.fact_store import FactStore
+from ragspine.storage.fact_store import SqliteFactStore
 from my_openai_provider import OpenAIProvider
 
-store = FactStore("data/fact_metric.db")
+store = SqliteFactStore("data/fact_metric.db")
 store.init_schema()
 result = answer_question("...", store, OpenAIProvider())
 ```
