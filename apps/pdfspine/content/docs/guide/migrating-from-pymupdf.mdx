@@ -142,23 +142,37 @@ also sequences, so `r[0]`, `tuple(r)`, and unpacking all behave like PyMuPDF.
 
 ## What is not yet implemented
 
-These are *deferred* (planned) — they raise `PdfUnsupportedError` today:
+These are the 21 *deferred* (planned) symbols — they raise `PdfUnsupportedError`
+today:
 
-- Page-level word/block helpers (`get_text_words`, `get_text_blocks`,
-  `get_textbox`), `get_texttrace` (M2 follow-ups).
-- Image-info helpers (`get_image_info`, `get_image_bbox`, `get_image_rects`).
-- `show_pdf_page`, `write_text`, `insert_font`, `replace_image`, `delete_image`.
-- Page-label read/write, `copy_page` / `move_page` / `delete_pages`.
+- **OCG / layer-config nesting** — `add_layer`, `get_layers`, `switch_layer`,
+  `set_layer_ui_config`, `get_oc`, `get_ocmd`, `set_ocmd` (the basic
+  `get_ocgs` / `set_layer` / `set_oc` read+toggle+bind surface works today).
+- **Low-level text writing** — `Page.write_text`, `Page.insert_font` (the
+  higher-level `insert_text` / `insert_textbox` / `TextWriter` work today).
+- **Device-callback replay** — `Page.run`, `DisplayList.run`,
+  `DisplayList.get_textpage` (`get_pixmap` covers the raster path).
+- Misc `Page` helpers — `remove_rotation`, `refresh`, `extend_textpage`.
+- `Pixmap.warp`, `Annot.get_textbox`, `Document.insert_file` (non-image
+  attachments; image inputs to `open` are supported), `Document.FormFonts`.
+- `Tools.set_annot_stem`, `Tools.set_subset_fontnames`.
 
 ## Out of scope for v1
 
 Intentionally **never** in v1 (these raise `PdfUnsupportedError`):
 
-- **OCR** (`get_textpage_ocr`).
-- **EPUB-class reflow** (`doc.layout`, chapters, locations, bookmarks).
-- **HTML/CSS layout** (`insert_htmlbox`).
-- **Journalling / undo-redo** (`journal_*`, `save_snapshot`).
+- **EPUB-class reflow** (`doc.layout`, `next_location` / `prev_location`,
+  `make_bookmark` / `find_bookmark`).
+- **HTML/CSS layout** (`Story`, `insert_htmlbox`, `Xml`, `Archive`).
+- **Journalling op-naming / persistence** (`journal_start_op`,
+  `journal_stop_op`, `journal_op_name`, `journal_position`, `journal_save`,
+  `journal_load`, `save_snapshot`) — the basic `journal_enable` /
+  `journal_undo` / `journal_redo` / `journal_can_do` surface is implemented.
 - **Full Unicode shaping** (complex scripts).
+
+`get_textpage_ocr` and the `pdfocr_*` sandwich-PDF export are **implemented**,
+not out of scope — see [Rendering](/docs/guide/rendering) and the
+[OCR benchmark](/docs/benchmarks#6-ocr-accuracy--paddleocr-vs-tesseract--fitzs-ocr-2026-06-19).
 
 Consult the repository's `COMPAT.toml` for the authoritative, per-symbol
 disposition — it is CI-enforced to stay in sync with the code.

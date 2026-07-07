@@ -144,6 +144,7 @@ with open(f"image.{img['ext']}", "wb") as fh:
 ```
 
 <Callout type="info">
-PyMuPDF's `convert_to_pdf` (treating an image file as a one-page document) is
-on the roadmap (milestone M5) and currently raises `PdfUnsupportedError`.
+Opening a raster image (`pdfspine.open("scan.png")`) and serializing a document
+back to PDF bytes (`doc.convert_to_pdf()`) are both implemented — see
+[Document generation](/docs/guide/document-generation).
 </Callout>

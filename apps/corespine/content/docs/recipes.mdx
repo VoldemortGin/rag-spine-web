@@ -75,7 +75,34 @@ print(out.choices[0].message.tool_calls)              # None
 注意是 `chat(messages)`,**不是** `complete(prompt)`(见 [gotchas](/docs/gotchas))。`tools` 是关键字参数:
 `prov.chat(messages, tools=[...])`(Mock 收下但仍不产 tool_calls)。
 
-## R4 · load_from_env:env → frozen dataclass
+## R4 · RateLimitedProvider:包装任意 LLMProvider 主动限流
+
+```python
+from corespine import RateLimitedProvider, MockProvider, LLMProvider
+
+provider = MockProvider()
+limited = RateLimitedProvider(provider, tokens_per_minute=1000, window_seconds=60.0)
+
+out = limited.chat([{"role": "user", "content": "hello"}])
+print(out.choices[0].message.content)                 # [mock:3ce59d0eaa4c] hello
+print(isinstance(limited, LLMProvider))               # True —— 满足 LLMProvider 协议,可无缝替换任意 provider
+
+# 参数非法在【构造期】就报错,不必等到 chat 时才发现
+try:
+    RateLimitedProvider(provider, tokens_per_minute=0)
+except ValueError as e:
+    print(e)                                          # tokens_per_minute 必须为正:0
+try:
+    RateLimitedProvider(provider, tokens_per_minute=100, window_seconds=0)
+except ValueError as e:
+    print(e)                                          # window_seconds 必须为正:0
+```
+
+预算够时(如上例)`chat` 直接放行、不阻塞。窗口内已用 token 达到 `tokens_per_minute` 上限时,
+`chat` 会**阻塞等待**到最老一条记录滑出窗口再放行——这是软限流:token 用量从返回的
+`ChatCompletion.usage.total_tokens` 事后累计,并发下可能小幅超额,但长期收敛到上限。
+
+## R5 · load_from_env:env → frozen dataclass
 
 ```python
 from dataclasses import dataclass
@@ -105,7 +132,7 @@ except ValueError as e:
 
 bool 解析:`{1,true,yes,on}` 真、`{0,false,no,off,""}` 假(大小写不敏感)。支持 `str/int/float/bool` 及 `X|None`。
 
-## R5 · FakeQueue:同步内联执行
+## R6 · FakeQueue:同步内联执行
 
 ```python
 from corespine import FakeQueue
@@ -130,7 +157,7 @@ print(q.get("unknown-id"))                            # None
 
 `func` 也可传点路径字符串(如 `"mypkg.jobs.process"`,末段为可调用对象)。
 
-## R6 · ConformanceSuite:实现 × 不变量 笛卡尔积
+## R7 · ConformanceSuite:实现 × 不变量 笛卡尔积
 
 ```python
 from corespine import ConformanceSuite, InvariantPack
@@ -169,7 +196,7 @@ print(suite.passed())                                 # False(broken 挂了)
 # 也可逐格断言:suite.check("counter", "first")  # 通过则静默返回,违反则原样抛
 ```
 
-### R6b · 接入 pytest(`parametrize_kwargs`,core 不 import pytest)
+### R7b · 接入 pytest(`parametrize_kwargs`,core 不 import pytest)
 
 ```python
 # 消费者的测试文件里(corespine 只返回纯数据,pytest 依赖留在你这边):
@@ -188,10 +215,10 @@ def test_conformance(case):
 #  'ids': ['counter-first', 'counter-accum']}
 ```
 
-## R7 · errors:统一异常基类 + 归一 dict
+## R8 · errors:统一异常基类 + 归一 dict
 
 ```python
-from corespine import CorespineError, ConfigError, error_to_dict
+from corespine import CorespineError, ConfigError, ProviderError, error_to_dict
 
 # 子类:覆盖 code/retryable 类属性;任意 kwargs 进 context
 class JobError(CorespineError):
@@ -209,9 +236,14 @@ print(error_to_dict(ValueError("bad")))
 # 内置语义子类(供 app 自用的示范)
 print(ConfigError("missing key", key="API_KEY").to_dict())
 # {'type': 'ConfigError', 'code': 'config.invalid', 'message': 'missing key', 'retryable': False, 'context': {'key': 'API_KEY'}}
+
+# ProviderError:provider/外部服务调用失败的统一边界异常(网络/超时/API 错误归一到此)
+print(ProviderError("upstream timeout", vendor="openai").to_dict())
+# {'type': 'ProviderError', 'code': 'provider.error', 'message': 'upstream timeout', 'retryable': False, 'context': {'vendor': 'openai'}}
 ```
 
 ## 仓库内的完整可跑范例
 
 - [`examples/quickstart.py`](https://github.com/VoldemortGin/corespine/blob/main/examples/quickstart.py) —— Registry + ConformanceSuite + 隐私 trace,末行打印 `corespine OK`(或 `make demo`)。
 - [`examples/conformance_usage.py`](https://github.com/VoldemortGin/corespine/blob/main/examples/conformance_usage.py) —— 守约 vs 违约实现,证明 conformance 能逮住坏实现。
+- [`examples/trace_seam_usage.py`](https://github.com/VoldemortGin/corespine/blob/main/examples/trace_seam_usage.py) —— trace 缝两种真实消费形态(隐私闸门 / `TraceSink` 注入点)+ 自定义导出 sink 的形状(详见 [extending 四](/docs/reference/extending#四用-trace-缝做可观测))。

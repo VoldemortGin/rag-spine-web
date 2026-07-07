@@ -8,7 +8,7 @@ description: The real signature, contract, and one-liner for every corespine exp
 > [overview](/docs/overview),易错点见 [gotchas](/docs/gotchas)。
 >
 > 全部从顶层包导入:`from corespine import Registry, MockProvider, ...`。
-> `corespine.__version__ == "0.0.1"`。`__all__` 共 28 项(含 `__version__`)。
+> `corespine.__version__ == "0.1.1"`。`__all__` 共 30 项(含 `__version__`)。
 
 ## seam —— `corespine.seam.registry`
 
@@ -133,6 +133,25 @@ Usage(prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0)
 ```
 
 取文本的惯用路径:`completion.choices[0].message.content`。
+
+## llm rate limit —— `corespine.llm.rate_limit`
+
+### `class RateLimitedProvider`
+
+包装任意 `LLMProvider`,按每分钟 token 上限主动限流(provider-agnostic)。
+
+```python
+RateLimitedProvider(inner: LLMProvider, *, tokens_per_minute: int, window_seconds: float = 60.0) -> None
+    # tokens_per_minute / window_seconds 必须为正,否则抛 ValueError。
+
+chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion
+    # 限流后转发给 inner.chat。滑动窗口(过去 window_seconds 秒)内已用 token 达到
+    # tokens_per_minute 上限时【阻塞等待】,直到最老一条记录滑出窗口再放行;预算够则直接放行。
+    # token 用量从返回的 ChatCompletion.usage.total_tokens 在调用后【事后累计】(usage 为 None 记 0),
+    # 故为软限流:并发下可能小幅超额,但长期收敛到上限。线程安全(内部用锁保护窗口状态)。
+```
+
+与 SDK 的 `max_retries` 互补:SDK 撞 429 后被动退避,`RateLimitedProvider` 预先主动节流。
 
 ## config —— `corespine.config.env`
 
@@ -261,9 +280,14 @@ to_dict(self) -> dict[str, object]
 ### 内置子类
 
 ```python
-class ConfigError(CorespineError): code = "config.invalid"    # 配置非法(缺必填、类型不符等)
-class SeamError(CorespineError):   code = "seam.unknown"      # 缝相关错误(未知实现、工厂构造失败等)
+class ConfigError(CorespineError):   code = "config.invalid"   # 配置非法(缺必填、类型不符等)
+class SeamError(CorespineError):     code = "seam.unknown"     # 缝相关错误(未知实现、工厂构造失败等)
+class ProviderError(CorespineError): code = "provider.error"   # provider/外部服务调用失败的统一边界异常
 ```
 
+`ProviderError` 只包裹 SDK / 外部服务抛出的网络 / 超时 / API 异常;程序错误(`KeyError` /
+`TypeError` 等)不归此类,照常向上抛出,避免韧性兜底掩盖逻辑 bug。
+
 > 注:`Registry.make` 的未知 spec 抛的是标准库 `ValueError`(非 `SeamError`);`load_from_env` 的缺失/
-> 非法抛标准库 `ValueError` / `TypeError`。`SeamError` / `ConfigError` 是供各 app 自用的语义子类示范。
+> 非法抛标准库 `ValueError` / `TypeError`。`SeamError` / `ConfigError` / `ProviderError` 是供各 app
+> 自用的语义子类示范。

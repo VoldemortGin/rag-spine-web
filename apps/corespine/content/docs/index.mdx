@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: corespine is the thin shared core of the Spine family — a small set of domain-neutral primitives, six seams plus a unified error shape, depended on by ragspine and spineagent but never the reverse.
+description: corespine is the thin shared core of the Spine family — a small set of domain-neutral primitives, seven seams plus a unified error shape, depended on by ragspine and spineagent but never the reverse.
 ---
 
 **corespine** is the **thin shared core of the Spine family**: a small set of **domain-neutral
@@ -8,7 +8,7 @@ primitives** — the stable bedrock that belongs to neither RAG nor agents. It i
 sibling packages like `ragspine` and `spineagent`, but never depends back on any of them, and
 carries none of their domain concepts.
 
-It is made of six "seams" plus an errors seam, each holding only the *smallest, obviously stable*
+It is made of seven "seams" plus an errors seam, each holding only the *smallest, obviously stable*
 mechanism. The core imports **zero third-party SDKs, zero network, zero runtime dependencies**
 (`dependencies` stays empty forever) — install it and it runs offline, deterministically,
 end to end.
