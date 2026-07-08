@@ -57,8 +57,9 @@ When a requested font is missing, docspine substitutes a fallback (e.g. Calibri
 → Liberation Sans) and emits a `UserWarning` through `warnings.warn` whose
 message names the substitute family — **one warning per unique kind**, not one
 per run. Other degradations (an unsupported multi-column layout, a table row
-taller than the page body, a cell's `center` / `bottom` vertical alignment)
-warn the same way. Export never raises for these; it degrades and warns.
+taller than the page body, a cell's `center` / `bottom` vertical alignment,
+custom `w:tabs` tab stops) warn the same way. Export never raises for these; it
+degrades and warns.
 </Callout>
 
 ```python
@@ -82,6 +83,7 @@ for w in caught:
 | Numbering | List counters via the per-`numId`, per-level numbering engine. |
 | Tables | Per-edge borders, shading, cell margins, `gridSpan` / `vMerge` merges, and whole-row moves across page breaks. Vertical alignment is top-only in v1 — `center` / `bottom` degrade to top with a warning. |
 | Indents | Hanging and first-line indents. |
+| Tab stops | A `w:tab` advances to the next tab stop. The interval is `settings.xml`'s `w:defaultTabStop` (0.5″ Word default when absent); custom per-paragraph `w:tabs` stops degrade to the default interval with a warning. |
 | Run styling | Underline styles, highlight, and strikethrough. |
 | CJK | East-Asian `eastAsia` font slot resolved for CJK runs. |
 | Images | Embedded pictures are rendered as block images at their `wp:extent` size, downscaled to the column width (never upscaled). JPEG passes through; PNG / BMP / GIF / WEBP / TIFF decode on emission. |
