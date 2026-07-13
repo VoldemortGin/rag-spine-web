@@ -92,6 +92,21 @@ if doc.needs_pass:
     doc.authenticate("open-sesame")
 ```
 
+The encryption read flags follow PyMuPDF's semantics exactly:
+
+- `is_encrypted` means **still locked** — encrypted *and* not yet authenticated.
+  It flips to `False` after the empty-password auto-authentication at open time or
+  after a successful `authenticate()`, so it is not permanently truthy just
+  because the file carries an `/Encrypt` dictionary.
+- `needs_pass` is the stateless "the empty password does not unlock this"
+  predicate. It stays truthy even after you authenticate with a real password
+  (mirroring MuPDF's `pdf_needs_password`).
+- `permissions` returns `0` while the document is still locked, the `/P`
+  permission flags once it is unlocked, and `-4` for an unencrypted document.
+- `metadata` returns `None` while locked (rather than a decrypted-garbage dict);
+  once unlocked, `metadata["encryption"]` names the cipher suite, e.g.
+  `"Standard V2 R3 128-bit RC4"` or `"Standard V5 R6 256-bit AES"`.
+
 ## Metadata
 
 ```python

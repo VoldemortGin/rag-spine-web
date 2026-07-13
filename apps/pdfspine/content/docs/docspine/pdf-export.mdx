@@ -57,9 +57,10 @@ When a requested font is missing, docspine substitutes a fallback (e.g. Calibri
 → Liberation Sans) and emits a `UserWarning` through `warnings.warn` whose
 message names the substitute family — **one warning per unique kind**, not one
 per run. Other degradations (an unsupported multi-column layout, a table row
-taller than the page body, a cell's `center` / `bottom` vertical alignment,
-custom `w:tabs` tab stops) warn the same way. Export never raises for these; it
-degrades and warns.
+taller than the page body, custom `w:tabs` tab stops, text-wrap around an
+anchored image, a document-internal `w:hyperlink` bookmark, and the between-edge
+or intra-paragraph-break cases of paragraph borders / shading) warn the same
+way. Export never raises for these; it degrades and warns.
 </Callout>
 
 ```python
@@ -81,20 +82,26 @@ for w in caught:
 | Section geometry | Per-section page size / margins / orientation from `sectPr`. |
 | Styles | `styles.xml` inheritance (docDefaults → basedOn → direct) plus theme. |
 | Numbering | List counters via the per-`numId`, per-level numbering engine. |
-| Tables | Per-edge borders, shading, cell margins, `gridSpan` / `vMerge` merges, and whole-row moves across page breaks. Vertical alignment is top-only in v1 — `center` / `bottom` degrade to top with a warning. |
+| Tables | Per-edge borders, shading, cell margins, `gridSpan` / `vMerge` merges, and whole-row moves across page breaks. Cell vertical alignment renders — `w:vAlign` `center` / `bottom` offset the cell content after the row height settles. |
+| Paragraph borders & shading | A paragraph's `w:pBdr` (top / right / bottom / left) edges and `w:shd` fill are drawn (visible in `get_drawings`); the border `@w:space` folds into padding. The `w:between` edge and intra-paragraph page-break cases still degrade with a warning. |
 | Indents | Hanging and first-line indents. |
 | Tab stops | A `w:tab` advances to the next tab stop. The interval is `settings.xml`'s `w:defaultTabStop` (0.5″ Word default when absent); custom per-paragraph `w:tabs` stops degrade to the default interval with a warning. |
+| Hyperlinks | External `w:hyperlink` runs render as `/Link` URI annotations (readable via pdfspine `get_links`). Document-internal anchor bookmarks are stored but not drawn as links, with a one-time warning. |
 | Run styling | Underline styles, highlight, and strikethrough. |
 | CJK | East-Asian `eastAsia` font slot resolved for CJK runs. |
-| Images | Embedded pictures are rendered as block images at their `wp:extent` size, downscaled to the column width (never upscaled). JPEG passes through; PNG / BMP / GIF / WEBP / TIFF decode on emission. |
+| Images | Inline pictures are rendered as block images at their `wp:extent` size, downscaled to the column width (never upscaled). Anchored (`wp:anchor`) pictures are absolutely positioned at their `posOffset` on the section's first page. JPEG passes through; PNG / BMP / GIF / WEBP / TIFF decode on emission. |
 
-Embedded pictures now render. Each inline picture (with usable media bytes and a
+Embedded pictures render. Each inline picture (with usable media bytes and a
 `wp:extent` size) is placed in the flow as a block image at the point its
 paragraph occurs; a picture that is the whole paragraph takes no extra blank
-line. Floating (`wp:anchor`) images render **inline** as an approximation — v1
-does no absolute positioning or text wrap, and emits a one-time `UserWarning`. A
-picture with missing media bytes or no size is skipped with a `UserWarning` (its
-bytes stay available at parse level via `image_bytes()`).
+line. Floating (`wp:anchor`) raster pictures are **absolutely positioned** — the
+picture is drawn as a page overlay at its `wp:positionH` / `wp:positionV`
+`posOffset` (relative to the page or the section margins) on the section's first
+page. Text does **not** wrap around it — that emits a one-time `FloatingNoWrap`
+warning (per-line exclusion rectangles remain out of v1). Vector-format
+(EMF / WMF) or byte-missing anchored pictures fall back to the inline-placeholder
+or skip paths; a picture with missing media bytes or no size is skipped with a
+`UserWarning` (its bytes stay available at parse level via `image_bytes()`).
 
 Rendering is deterministic per font environment: the same document and the same
 installed fonts produce the same PDF bytes.

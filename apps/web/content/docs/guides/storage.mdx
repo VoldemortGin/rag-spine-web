@@ -69,6 +69,12 @@ the contract**: the first ten are positional-frozen, and new fields are appended
   only**, appended at the end — `dimensions` is the last field.
 </Callout>
 
+Because those ten positional fields are easy to transpose, build a metric fact through the
+keyword-only classmethod `Fact.metric(*, metric_code, entity, period_type, period, value, unit,
+source_doc_id, source_locator, channel="TOTAL", geography="", **extra)` — order-independent,
+with `channel` / `geography` defaulted and additive v2 fields passed through `**extra`. It
+returns an ordinary `Fact`, so the positional 10-tuple contract (`Fact(*row)`) is untouched.
+
 `dimensions` is an in-memory arbitrary-dimension bag, **excluded from DB columns**. Its
 `__post_init__` guard raises `ValueError` if any key collides with a structural / lineage /
 `dim_key` reserved name, and an empty bag derives an identity mirror
@@ -104,6 +110,7 @@ store.close()
 | `upsert_facts(facts, ingested_at=None) -> int`                                                                            | batch insert; on `dim_key` conflict, overwrite value + lineage; returns count written |
 | `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | exact parameterized lookup, returns 0 or 1 row                                        |
 | `count() -> int`                                                                                                          | total facts                                                                           |
+| `has_source_doc(source_doc_id) -> bool`                                                                                   | `True` if _any_ fact exists for that doc (any review status) — an existence probe for idempotent / incremental refresh |
 | `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | read-only SELECT entry point for ledger/metrics reuse                                 |
 | `delete_by_source_doc(source_doc_id) -> int`                                                                              | physically delete a doc's facts (any review status); idempotent                       |
 | `close()`                                                                                                                 | idempotent connection close (also auto-closed on GC via `weakref.finalize`)           |

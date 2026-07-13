@@ -19,17 +19,22 @@ description: The complete public API — every spineagent class, protocol, and f
 ## agent
 
 ### `class AgentResult`
-`AgentResult(agent: str, output: str, usage: dict[str, int] | None = None, error: dict[str, object] | None = None)`
+`AgentResult(agent: str, output: str, usage: dict[str, int] | None = None, error: dict[str, object] | None = None, artifacts: tuple[ArtifactRef, ...] = ())`
 - frozen dataclass。一次 agent 步的结果。`agent` = provenance(产出它的 agent 名)。
 - 属性 `ok -> bool`:`self.error is None`。
+- `artifacts`:该步产出的产物**引用**(`tuple[ArtifactRef, ...]`,默认空;`ArtifactRef` 是轻量元数据引用,
+  不含字节,见下「artifact 缝」小节。默认路径不产出产物,由使用 artifact sink 的 agent 自行填充)。
 - 契约:成功路径 `error is None`;`error` 仅由编排层弹性模式(`Coordinator` 的
   `run_sequential` / `run_parallel` / `run_pipeline` 传 `resilient=True`;`resilient` 是这些
   方法的关键字参数,**不是**构造器参数)捕获 `step` 异常时填充,值是
   `corespine.errors.error_to_dict(exc)` 的归一 dict(含 `code` / `retryable` / `message` / `context`)。
 
 ### `class Agent` (Protocol, runtime_checkable)
-- 属性 `name: str`;方法 `step(self, task: str, *, trace: TraceSink | None = None) -> AgentResult`。
+- **只读**属性 `name`(声明为 `@property def name(self) -> str`);方法 `step(self, task: str, *, trace: TraceSink | None = None) -> AgentResult`。
 - 所有 agent 实现都满足它,故可互换进编排 / 桥接。
+- `name` 声明为**只读 `@property`**(而非可写变量):具体实现既有 `@property`(如 `LlmAgent.name`)也有
+  纯类属性(如 `EchoTool.name = "echo"`),只读属性对两者都兼容;若协议把 `name` 声明成可写变量,
+  `mypy --strict` 会因「只读 property vs 可写变量」的型变冲突而报错。语义上不改任何具体实现。
 
 ### `class LlmAgent`
 `LlmAgent(name: str, provider: LLMProvider, *, system: str = "")`
@@ -64,6 +69,19 @@ description: The complete public API — every spineagent class, protocol, and f
 - `run(arg: str) -> ToolResult`:对子 agent 跑一步,把 `output` 包成带 provenance 的 `ToolResult`。
 - 用于分层 / 督导式多 agent(可层层嵌套)。最薄桥:只搬运文本,子 agent 的 usage / error 不透传;
   子 agent 抛异常照常上抛(错误处理归编排层 / 调用方)。
+
+### `class DeepResearchAgent`
+`DeepResearchAgent(name: str = "deep_research", *, provider: LLMProvider | None = None, tools: Iterable[FunctionTool] = (), planner: Callable[[str], list[str]] | None = None, max_subqueries: int = 5, retriever_system: str = "", synthesis_system: str = "")`
+- 预置 agent(实现 `Agent` 协议),**纯组合**已有原语,不引入新机制。`step(task, *, trace=None)` 三段:
+  1. **拆解**:用 `planner`(默认 `default_planner`,按换行 / `;` / `;` 结构切分)把任务拆成 ≤ `max_subqueries` 个子查询;
+  2. **并行检索**:共享一个 `FunctionCallingAgent` 检索器,每个子查询包成 `FunctionAgent`,经
+     `Coordinator(...).run_parallel("", resilient=True)` 扇出;
+  3. **综合**:一个 `LlmAgent` 把各路发现拼成 prompt 产出终答。
+- 离线默认 `provider=MockProvider()`、`tools=()`,零网络即可端到端跑(输出是确定性 mock 综合)。产出
+  隐私安全 `"deep_research"` trace(只记子查询数 / 发现数 / 输出长度)。结果 provenance = `name`。
+
+### `default_planner`
+`default_planner(task: str) -> list[str]` — `DeepResearchAgent` 的默认拆解器:按换行 / `;` / `;` 做结构化切分(非 LLM)。
 
 ---
 
@@ -104,7 +122,9 @@ description: The complete public API — every spineagent class, protocol, and f
 `ToolResult(tool: str, output: str)` — frozen dataclass。`tool` = provenance(产出它的工具名)。
 
 ### `class Tool` (Protocol, runtime_checkable)
-- 属性 `name: str`;方法 `run(self, arg: str) -> ToolResult`。
+- **只读**属性 `name`(声明为 `@property def name(self) -> str`);方法 `run(self, arg: str) -> ToolResult`。
+- 同 `Agent.name`:声明成只读 `@property` 是为满足 `mypy --strict` 型变——纯类属性(`EchoTool.name = "echo"`)
+  与 `@property` 实现都兼容。
 
 ### `class EchoTool`
 `EchoTool()`,`name = "echo"`。`run(arg) -> ToolResult`:原样回显 `arg`。
@@ -218,6 +238,127 @@ description: The complete public API — every spineagent class, protocol, and f
 
 ---
 
+## sandbox 缝(代码执行的隔离缝)
+
+同家族元模式:`Protocol + 离线确定性默认 + Registry 工厂 + 真实后端经可选 extra 延迟 import`。模块 `spineagent.sandbox.seam`。
+
+### `class Sandbox` (Protocol, runtime_checkable)
+- 只读属性 `name`;方法 `run(self, code: str, *, timeout: float | None = None, limits: Limits | None = None, env: Mapping[str, object] | None = None) -> SandboxResult`。
+
+### `class InProcessSandbox`
+`InProcessSandbox()`,`name = "in_process"`。离线确定性默认:**白名单 AST 求值器**,把代码当「纯表达式白名单迷你语言」跑。
+- 安全内建白名单仅 `len/str/int/float/bool/abs/round/min/max/sum/sorted/repr/list/dict/tuple/set`——**故意没有**
+  `open/eval/exec/__import__/getattr/range`;拒绝 `import` / 属性访问 / 任意调用 / 非白名单名字。
+- 失败**不抛异常**,归一为非零 `SandboxResult`(`error` 原因码 `syntax` / `disallowed` / `limit_exceeded` / `error`)。
+
+### 支撑 dataclass
+- `Limits(timeout_seconds: float | None = None, max_output_chars: int | None = None, max_ops: int | None = None)` — frozen。
+- `DEFAULT_LIMITS = Limits(timeout_seconds=5.0, max_output_chars=64_000, max_ops=100_000)`。
+- `ResourceUsage(ops: int = 0, output_chars: int = 0, wall_seconds: float = 0.0)` — frozen。
+- `SandboxResult(sandbox: str, output: str, returncode: int = 0, usage: ResourceUsage = ..., error: str | None = None)` — frozen,属性 `ok -> bool`(`returncode == 0`)。
+
+### `sandboxes`
+`Registry[Sandbox]`(seam 名 `sandbox`)。`make(spec, **kw)` / `names()`。支持 entry-point group `corespine.sandbox`。
+- 已注册:`"in_process"`(→ `InProcessSandbox`)、`"subprocess"`、`"container"`。
+- `"subprocess"` / `"container"` 是**桩**:`make(...)` 直接抛 `corespine.errors.SeamError`(留待使用者按平台接入;
+  `"container"` 先经 `load_container_sdk()` 延迟 import `docker`(`[sandbox]` extra)再抛 `SeamError`)。本壳只提供缝 + `InProcessSandbox`。
+
+### `load_container_sdk() -> Any`
+延迟 import `docker`(`[sandbox]` extra);未装时给友好报错。
+
+---
+
+## skills 缝(manifest 文件夹包 → 桥成 FunctionTool)
+
+模块 `spineagent.skills.*`。把一个「manifest 文件夹包」当技能,桥进 `FunctionTool` 供 `FunctionCallingAgent` 用。
+
+### `class SkillSpec`
+`SkillSpec(name: str, description: str, inputs: dict[str, Any])` — frozen。技能规格(`inputs` 是 JSON-schema object)。
+
+### `class SkillResult`
+`SkillResult(skill: str, output: str, usage: ResourceUsage | None = None)` — frozen。`skill` = provenance。
+
+### `class Skill` (Protocol, runtime_checkable)
+- 属性 `spec: SkillSpec`;`describe() -> dict[str, Any]`(产出 OpenAI function-tool schema);`invoke(args: dict[str, Any]) -> SkillResult`。
+
+### `class FixtureSkill`
+`FixtureSkill(spec: SkillSpec, script: str, *, sandbox: Sandbox | None = None)` — 离线默认实现。
+- `describe()` 回 OpenAI function-tool schema;`invoke(args)` 把 `script` 经 `sandbox.run(..., env=args)` 跑(默认 `InProcessSandbox`),非 ok 抛 `SkillError`。
+
+### `class SkillBundle`
+- `@staticmethod SkillBundle.load(path: str | Path, *, sandbox: Sandbox | None = None) -> Skill`:从文件夹包加载。
+  - manifest 文件名 `manifest.toml`(3.11+ 走 `tomllib`,3.10 回退 `tomli`);必填字段 `name` / `description` / `inputs`,
+    可选 `script`(默认脚本文件名 `skill.py`)。返回一个 `FixtureSkill`。
+
+### `skill_as_function_tool`
+`skill_as_function_tool(skill: Skill) -> FunctionTool` — 桥:取 `skill.describe()["function"]` 的 name/description/parameters
+建 `FunctionTool`,`func=lambda **kwargs: skill.invoke(kwargs).output`。桥出来即可丢进 `FunctionCallingAgent`。
+
+### `class SkillError`
+`SkillError(skill: str, reason: str, detail: str)`(继承 `RuntimeError`)。
+
+### `skill_registry`
+`Registry[Skill]`(seam 名 `skill`)。`make(spec, **kw)` / `names()`。支持 entry-point group `corespine.skill`。
+- 已注册:`"fixture"`(→ `FixtureSkill`)、`"bundle"`(→ `SkillBundle.load`,需传 `path=`)。
+
+---
+
+## middleware 缝(agent step 的洋葱环切面)
+
+模块 `spineagent.agent.middleware`。围绕任意 `Agent` 的一次 `step` 装一圈可组合切面(**只记元数据**,隐私安全)。
+
+### `class StepContext`
+`StepContext(agent: str, task: str, trace: TraceSink | None = None, step: int = 0, tools: list[str] = ..., attachments: list[str] = ..., extras: dict[str, Any] = ...)` — dataclass。中间件读写的一步上下文。
+
+### `class Middleware` (Protocol, runtime_checkable)
+- `before_step(self, ctx: StepContext) -> None`、`after_step(self, ctx: StepContext, result: AgentResult) -> AgentResult`。
+- **只有 `before_step` / `after_step` 两个钩子,没有 `wrap`。**
+
+### `class MiddlewareAgent`
+`MiddlewareAgent(name: str, agent: Agent, middlewares: Iterable[Middleware])` — 实现 `Agent` 协议。
+- `step(...)`:**洋葱式**——正序跑各 `before_step` → 内层 `agent.step` → 逆序跑各 `after_step`,末了把 `result.agent` 重盖为 `name`。
+
+### 四件套(内建 Middleware)
+- `TokenUsageMiddleware(tokenizer: Callable[[str], int] | None = None)` — 数入(`ctx.task`)/出(`result.output`)token 累进 `self.totals`,发 `"mw_token_usage"` trace(默认 tokenizer = 空白切分)。
+- `SummaryMiddleware(provider: LLMProvider | None = None, *, max_chars: int = 2000)` — `ctx.task` 超 `max_chars` 时调 `provider`(默认 `MockProvider`)摘要并替换 `ctx.task`,发 `"mw_summary"`。
+- `DynamicToolMiddleware(tools_by_step: Mapping[int, Sequence[str]] | None = None, *, default: Sequence[str] = ())` — 按当前步号设 `ctx.tools`,发 `"mw_dynamic_tools"`。
+- `AttachmentMiddleware(attachments: Mapping[str, str] | None = None)` — 把附件正文前置进 `ctx.task`、填 `ctx.attachments`,发 `"mw_attachment"`。
+
+### `middlewares`
+`Registry[Middleware]`(seam 名 `middleware`)。`make(spec, **kw)` / `names()`。支持 entry-point group `corespine.middleware`。
+- 已注册:`"token_usage"`、`"summary"`、`"dynamic_tool"`、`"attachment"`。
+
+---
+
+## artifact 缝(agent 产物落地缝)
+
+模块 `spineagent.agent.artifact`。让一步产出的二进制 / 文本产物有统一的 store / fetch 缝,引用回填进 `AgentResult.artifacts`。
+
+### `class Artifact`
+`Artifact(name: str, data: bytes, mime: str = "application/octet-stream", producer: str = "")` — frozen。**带字节**的产物。
+- classmethod `Artifact.from_text(name, text, *, mime="text/plain", producer="") -> Artifact`;属性 `text`(UTF-8 解码)。
+
+### `class ArtifactRef`
+`ArtifactRef(key: str, sink: str, name: str, mime: str, producer: str, size: int)` — frozen。**轻量引用**(不含字节),即 `AgentResult.artifacts` 的元素。元数据随引用走。
+
+### `class ArtifactSink` (Protocol, runtime_checkable)
+- 只读属性 `name`;`store(self, artifact: Artifact) -> ArtifactRef`、`fetch(self, ref: ArtifactRef) -> Artifact`。
+
+### `class InProcessArtifactSink`
+`InProcessArtifactSink()`,`name = "in_process"`。进程内 dict 落地,离线确定性默认。
+
+### `class BlobArtifactSink`
+`BlobArtifactSink(store: BlobStore, *, name: str = "blob")` — 组合 **corespine 的 `corespine.blob.store.BlobStore`**。
+- `store(artifact)`:算内容寻址 key `sha256(data).hexdigest()`,调 `store.put(key, artifact.data)`,回带元数据的 `ArtifactRef`。
+- `fetch(ref)`:`data = store.get(ref.key)`,用 `ref` 上的元数据重建 `Artifact`。
+- 跨仓关系:本类只**注入并包裹**一个 corespine `BlobStore` 实例(内存 / 文件系统 / 第三方 S3 皆可);元数据全放 `ArtifactRef`,`BlobStore` 只负责字节往返(`put` / `get`),不存元数据。方向 `spineagent → corespine`。
+
+### `artifact_sinks`
+`Registry[ArtifactSink]`(seam 名 `artifact_sink`)。`make(spec, **kw)` / `names()`。支持 entry-point group `corespine.artifact_sink`。
+- 已注册:`"in_process"`(→ `InProcessArtifactSink`)、`"blob"`(→ `BlobArtifactSink`,需注入 `store=`)。
+
+---
+
 ## llm provider 适配器(对外统一 OpenAI ChatCompletion 形状)
 
 所有适配器都实现 corespine 的 `LLMProvider` 协议:
@@ -250,6 +391,18 @@ fake / 真实 client 做离线单测;不注入则在构造时经对应 `load_*_s
 `BedrockConverseProvider(model: str, *, client: Any = None, region_name: str | None = None, extra: dict[str, Any] | None = None, **client_kwargs)`
 - 走 `boto3` 的 `bedrock-runtime` Converse API(跨模型同形)。`model` 必填(= Bedrock modelId)。
   Converse native → OpenAI `ChatCompletion`。extra `[bedrock]`。
+
+### 流式:`StreamingLLMProvider`(增量输出的可选加成协议)
+除 `chat` 外,部分适配器**额外**实现 corespine 的 `StreamingLLMProvider` 协议:
+`stream_chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> Iterator[ChatCompletionChunk]`。
+- 产出 `corespine.llm.provider.ChatCompletionChunk`(`ChunkChoice` / `ChoiceDelta`)。契约:按序拼接每块的
+  `delta.content` 恒等于非流式 `chat()` 的 content(由 conformance 钉死)。
+- 消费方经 `isinstance(provider, StreamingLLMProvider)` 检测支持与否。
+- **实现流式的**:`OpenAICompatProvider`(`stream=True`,SDK 块 ~1:1 转 `ChatCompletionChunk`)、
+  `AnthropicProvider`(把 Anthropic 事件转成 OpenAI 形状块:`message_start`→role、`content_block_delta`/`text_delta`→content、
+  `message_delta` 的 stop_reason→finish_reason;仅流式文本,tool_use 流式未实现)。
+- **诚实不实现**:`CohereProvider` / `GeminiProvider` / `BedrockConverseProvider` **不**实现 `stream_chat`(其 native 流式形状差异大);
+  `isinstance(..., StreamingLLMProvider)` 对它们如实回 `False`。
 
 ### `llm_providers`
 `Registry[LLMProvider]`(seam 名 `llm`)。`make(spec, **kw)` / `names()`。

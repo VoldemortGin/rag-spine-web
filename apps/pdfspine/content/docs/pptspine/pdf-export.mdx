@@ -78,8 +78,8 @@ with warnings.catch_warnings():
 | Theme | `clrScheme` + `clrMap` / `clrMapOvr`, `fontScheme` (incl. east-Asian), `p:style` fill / line / font references. |
 | Shape transforms | `rot`, `flipH` / `flipV`, `avLst` adjust values, dashed strokes, picture `srcRect` / stretch. |
 | Groups | Nested group affine remap: `(child − chOff) · (ext / chExt) + off`. |
-| Text bodies | `bodyPr` anchor / insets / wrap and `normAutofit` font-scale, applied as stored. |
-| Tables | Absolute cell x from `tblGrid`, per-side borders, fills, cell margins, anchoring. |
+| Text bodies | `bodyPr` anchor / insets / wrap and `normAutofit` font-scale. A stored `fontScale` is applied as stored; when `normAutofit` is on but no scale was stored, the text is recomputed to fit — `fontScale` steps down (95% → 25%) and `lnSpcReduction` escalates (0 → 10 → 20%) until the measured content height fits its box. |
+| Tables | Absolute cell x from `tblGrid`, per-side borders, fills, cell margins, anchoring. Row height is content-adaptive — each row grows to `max(declared height, measured content height)` so long cell text is not clipped; `rowSpan` cells distribute their content height evenly across the rows they span. |
 | Backgrounds | Slide / layout / master `bg` solid and picture fills, `bgRef` via theme. |
 | Text extraction | `ToUnicode` always written, so output is selectable and searchable. |
 

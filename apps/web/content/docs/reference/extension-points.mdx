@@ -43,6 +43,14 @@ offline with the deterministic `MockProvider`.
     title="TaskQueue"
     description="service/tasks/task_queue.py — async job queue (FakeQueue in tests, RQQueue in prod)."
   ></Card>
+  <Card
+    title="SourceConnector"
+    description="ingestion/source/connector.py — iter_documents() yields RawDoc from a knowledge-base source (filesystem, HTTP, Notion, in-memory)."
+  ></Card>
+  <Card
+    title="RelationExtractor"
+    description="graph/extractor.py — extract(chunks) returns graph edges; the opt-in narrative-relation slot beside build_relation_graph."
+  ></Card>
 </Cards>
 
 ### `LLMProvider`
@@ -147,6 +155,77 @@ inside `RQQueue` only.
     },
   }}
 />
+
+### `SourceConnector`
+
+`src/ragspine/ingestion/source/connector.py` — the knowledge-base source seam. A connector
+yields raw documents from wherever your KB lives; the default `FilesystemConnector` needs no
+extra, and the HTTP / Notion connectors lazy-import `httpx` behind the `[connectors]` extra.
+
+<TypeTable
+  type={{
+    iter_documents: {
+      type: '() -> Iterable[RawDoc]',
+      description:
+        'Yield each source document as a frozen RawDoc (source_doc_id, locator, content: bytes, content_type, metadata).',
+    },
+  }}
+/>
+
+Built-ins register by name in a module-level table; third-party connectors are discovered
+through the `ragspine.source_connectors` entry-point group (built-in names win on a clash).
+Select one with the `make_source_connector(spec=None, **kwargs)` factory or the
+`RAGSPINE_SOURCE_CONNECTOR` env var (`none` / `None` → `None`):
+
+<TypeTable
+  type={{
+    filesystem: {
+      type: "'filesystem' | 'fs' | 'local'",
+      description: 'FilesystemConnector — the zero-dependency default; walks a local path.',
+    },
+    in_memory: {
+      type: "'in_memory' | 'memory' | 'fixture'",
+      description: 'InMemoryConnector — documents supplied in-process (tests / fixtures).',
+    },
+    http: {
+      type: "'http' | 'https' | 'url'",
+      description: 'HttpConnector — fetches over HTTP; needs the [connectors] extra (httpx).',
+    },
+    notion: {
+      type: "'notion'",
+      description: 'NotionConnector — reads a Notion source; needs the [connectors] extra (httpx).',
+    },
+  }}
+/>
+
+### `RelationExtractor`
+
+`src/ragspine/graph/extractor.py` — the opt-in narrative-relation slot consumed by
+`build_relation_graph(..., relation_extractor=None)`. With the default `None`, the base graph
+is byte-identical (no extra edges). See [ADR 0015](/docs/decisions/adr-0015).
+
+<TypeTable
+  type={{
+    extract: {
+      type: '(chunks: Iterable[object]) -> tuple[GraphEdge, ...]',
+      description:
+        'Return the edges extracted from the given chunks. DeterministicRelationExtractor emits rule-based co_occurs_with edges with clean lineage; LLMRelationExtractor (opt-in, [llm]) stamps every edge derived=model-derived + verified=unverified, screens both endpoints through the SecurityGate, and never lets RESTRICTED text reach the model.',
+    },
+  }}
+/>
+
+Select via `make_relation_extractor(spec=None, *, provider=None, profile=None, **kwargs)` or
+`RAGSPINE_RELATION_EXTRACTOR` (`none` → `None`; `deterministic` / `rule` / `cooccurrence` →
+the deterministic default; `llm` / `on` → the LLM extractor, honestly degrading to `None`
+when no provider is available).
+
+<Callout type="warn">
+  A model-extracted edge is **useful but untrusted**. `LLMRelationExtractor` writes the
+  `derived=model-derived` and `verified=unverified` markers into every edge's metadata, takes
+  lineage from the chunk (the caller) rather than the model's self-report, and drops any edge
+  whose endpoint the deterministic `SecurityGate` refuses. A model-asserted relation can never
+  read as a controlled, verified fact.
+</Callout>
 
 ## Implement a Protocol and inject it
 

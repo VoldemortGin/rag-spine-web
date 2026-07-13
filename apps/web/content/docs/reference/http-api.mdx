@@ -26,6 +26,7 @@ RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.
 | `GET`  | `/healthz`                   | Liveness — always returns `{"status": "ok"}`.                                                 |
 | `GET`  | `/readyz`                    | Readiness — checks the fact DB (and queue if it exposes `ping`); `200` ready, `503` degraded. |
 | `POST` | `/v1/ask`                    | Answer a question (FAQ short-circuit → dual-channel workflow).                                |
+| `POST` | `/v1/ask/stream`             | Same answer as `/v1/ask`, streamed token-by-token over SSE — after the guards have run.       |
 | `POST` | `/v1/ingest/structured/jobs` | Enqueue a structured (numeric) ingestion job.                                                 |
 | `POST` | `/v1/ingest/narrative/jobs`  | Enqueue a narrative (chunk) ingestion job.                                                    |
 | `GET`  | `/v1/jobs/{job_id}`          | Poll an ingestion job's status.                                                               |
@@ -109,6 +110,46 @@ A FAQ short-circuit hit:
   "tool_status_summary": { "found": 0, "not_found": 0, "unrecognized": 0 },
   "cache": { "hit": true, "type": "exact", "faq_id": "faq_001", "version": 1, "source": "..." }
 }
+```
+
+## `POST /v1/ask/stream`
+
+Streams the **same** answer as `/v1/ask`, token-by-token, as
+[Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+(`Content-Type: text/event-stream`). It accepts the identical `AskRequest` body.
+
+<Callout type="warn">
+  **The guards run before the stream, not during it.** The full workflow — FAQ short-circuit,
+  the dual-channel retrieval, the anti-fabrication rewrite, and the provenance guard — runs to
+  completion **synchronously** and produces the finished answer string _before_ a single SSE
+  byte is sent. Only then does the endpoint open the stream and replay that already-computed
+  answer in chunks. The stream touches no provider, store, or retriever. So a fabrication can
+  never be "half-streamed" and then retracted: if any guard would rewrite the answer to a
+  refusal, it has already done so, and the refusal is what streams. If the pre-stream
+  computation fails, the endpoint returns a normal JSON `500` (never a half-open stream).
+</Callout>
+
+The event sequence is three frame types, each a `data: {json}\n\n` line:
+
+```text
+data: {"type": "start", "request_id": "req_..."}
+
+data: {"type": "delta", "text": "ACME_CN FY2024 REVENUE "}
+
+data: {"type": "delta", "text": "为 1320 USD_M（来源：…）"}
+
+data: {"type": "done", "request_id": "req_...", "route": "structured", "answer_kind": "normal", "clarification": null, "sources": [{"doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024"}], "tool_status_summary": {"found": 1, "not_found": 0, "unrecognized": 0}, "cache": {"hit": false, "type": null, "faq_id": null, "version": null, "source": null}}
+```
+
+- A `start` frame carries the `request_id`.
+- Zero or more `delta` frames carry successive `text` chunks of the answer.
+- A terminating `done` frame carries the same metadata fields the non-streaming
+  `AskResponse` returns (`route`, `answer_kind`, `clarification`, `sources`,
+  `tool_status_summary`, `cache`).
+
+```bash
+curl -N -s localhost:8000/v1/ask/stream -H 'content-type: application/json' \
+     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
 ```
 
 ## `POST /v1/ingest/structured/jobs`

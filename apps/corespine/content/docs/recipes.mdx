@@ -242,6 +242,102 @@ print(ProviderError("upstream timeout", vendor="openai").to_dict())
 # {'type': 'ProviderError', 'code': 'provider.error', 'message': 'upstream timeout', 'retryable': False, 'context': {'vendor': 'openai'}}
 ```
 
+## R9 · BlobStore:按 key 存取字节(0.2.0)
+
+```python
+from corespine import make_blob_store, BlobNotFound, BLOB_REGISTRY
+
+store = make_blob_store("memory")                     # 内置 "memory" / "filesystem"(大小写/连字符/留白不敏感)
+print(BLOB_REGISTRY.names())                          # ['filesystem', 'memory']
+
+store.put("k/one", b"hello bytes")                    # 写入 / 覆盖(元数据最小化:核心只承诺字节 round-trip)
+print(store.get("k/one"))                             # b'hello bytes'
+print(store.exists("k/one"), store.exists("nope"))    # True False
+
+store.delete("k/one")                                 # 幂等:删不存在的 key 也不报错
+print(store.exists("k/one"))                          # False
+
+# get 一个不存在的 key -> BlobNotFound(code="blob.not_found",继承 CorespineError)
+try:
+    store.get("k/one")
+except BlobNotFound as e:
+    print(e.code, "|", e)                             # blob.not_found | blob 不存在:'k/one'
+```
+
+`FileSystemBlobStore` 需显式 `root`,key 经 **sha256** 摊平成扁平文件名——杜绝路径穿越、跨平台安全、
+同 key 跨进程确定映射:
+
+```python
+import tempfile
+from corespine import make_blob_store
+
+fs = make_blob_store("filesystem", root=tempfile.mkdtemp())   # 需 root=...(离线默认不猜落地位置)
+fs.put("a/b/c.txt", b"payload")                       # 含斜杠的 key 也逃不出 root
+print(fs.get("a/b/c.txt"))                            # b'payload'
+# root 下落地文件名是 sha256(key) 的 hex(不可逆、不支持枚举);S3/MinIO 等真实后端走 entry-point + 可选 extra。
+```
+
+## R10 · StreamingLLMProvider:流式拼接 == 非流式(0.2.0)
+
+```python
+from corespine import MockProvider, StreamingLLMProvider, LLMProvider
+
+prov = MockProvider()
+msgs = [{"role": "user", "content": "hello"}]
+
+# 探测能力:流式是【独立叠加协议】,用 isinstance 判断某 provider 是否支持流式
+print(isinstance(prov, LLMProvider), isinstance(prov, StreamingLLMProvider))   # True True
+
+chunks = list(prov.stream_chat(msgs))                 # 逐块吐 ChatCompletionChunk
+print(len(chunks))                                    # 4(首块 role + 2 content 片段 + 末块 stop)
+print(chunks[0].choices[0].delta.role)                # assistant(首块只给 role,不含 content)
+print(chunks[1].choices[0].delta.content)             # [mock:3ce59d0eaa
+print(chunks[-1].choices[0].finish_reason)            # stop(仅末块非空)
+print(chunks[0].object)                               # chat.completion.chunk
+
+# 等价不变量:所有 chunk 的 delta.content 顺序拼接,逐字等于非流式 chat 的 message.content
+streamed = "".join(c.choices[0].delta.content or "" for c in chunks)
+full = prov.chat(msgs).choices[0].message.content
+print(streamed == full)                               # True
+print(full)                                           # [mock:3ce59d0eaa4c] hello
+```
+
+`stream_chat` 是叠加协议里的方法——**不**给 `LLMProvider` 直接加,故只实现 `chat` 的既有 provider
+仍是合法 `LLMProvider`(见 [gotchas](/docs/gotchas))。`MockProvider` 与 `chat` 共用同一派生逻辑
+(同 id、同文本),这正是「流式 == 非流式」得以成立的根。
+
+## R11 · TraceExporter:隐私校验之后才扇出(0.2.0)
+
+```python
+from corespine import InProcessPrivacyTraceSink, InProcessTraceExporter, TraceError
+
+exp = InProcessTraceExporter()                        # 进程内默认 exporter(离线 / 测试用)
+sink = InProcessPrivacyTraceSink(exporters=[exp])     # 可选挂 0..N 个 TraceExporter
+
+sink.emit("retrieve", count=3, took_ms=12)
+sink.emit("rank", n=5)
+print(sink.codes())                                   # ['retrieve', 'rank']
+print([e.code for e in exp.events])                   # ['retrieve', 'rank'](扇出面与本地面等宽)
+print(exp.events[0].fields)                           # {'count': 3, 'took_ms': 12}
+
+# 隐私不变量:受限载荷在【校验阶段】就被 TraceError 挡下,一条都到不了 exporter
+try:
+    sink.emit("leak", content="secret body")
+except TraceError as e:
+    print(e.code)                                     # trace.forbidden
+print(len(exp.events))                                # 2(被拒的那条既没本地记录也没扇出)
+
+# 也可事后追加扇出目标
+exp2 = InProcessTraceExporter()
+sink.add_exporter(exp2)
+sink.emit("late")
+print([e.code for e in exp2.events])                  # ['late']
+```
+
+扇出**严格发生在隐私校验之后**:导出面天然只承载 code / 计数 / 耗时,与本地记录面等宽。真实导出
+后端(OTel / Langfuse)由各 app 在自己的适配器里经可选 extra 延迟 import,绝不进核心(见
+[extending 四](/docs/reference/extending#四用-trace-缝做可观测))。
+
 ## 仓库内的完整可跑范例
 
 - [`examples/quickstart.py`](https://github.com/VoldemortGin/corespine/blob/main/examples/quickstart.py) —— Registry + ConformanceSuite + 隐私 trace,末行打印 `corespine OK`(或 `make demo`)。

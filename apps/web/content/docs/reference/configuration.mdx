@@ -149,7 +149,9 @@ what each one does.
 | Variable                  | Default      | Selects                                                                                    |
 | ------------------------- | ------------ | ------------------------------------------------------------------------------------------ |
 | `RAGSPINE_RERANKER`       | `none`       | local reranker via `make_reranker` — `cross_encoder` / `ce` / `auto`, or `colbert` / `splade` |
-| `RAGSPINE_CHUNKER`        | default      | chunking strategy via `make_chunker` — `layout` / `parent_child` / `sentence_window` / `semantic` |
+| `RAGSPINE_CHUNKER`        | default      | chunking strategy via `make_chunker` — `layout` / `parent_child` / `sentence_window` / `semantic`, plus the domain presets `laws` / `qa` / `book` |
+| `RAGSPINE_SOURCE_CONNECTOR`| `none`      | KB source connector via `make_source_connector` — `filesystem` (default, no extra) / `in_memory` / `http` / `notion` (`http` and `notion` need `[connectors]`) |
+| `RAGSPINE_RELATION_EXTRACTOR`| `none`    | opt-in relation-graph slot via `make_relation_extractor` — `deterministic` / `rule` / `cooccurrence`, or `llm` (needs `[llm]` + a provider); see [ADR 0015](/docs/decisions/adr-0015) |
 | `RAGSPINE_CONTEXTUAL`     | `none`       | deterministic Contextual-Retrieval index header via `make_index_text_fn`                   |
 | `RAGSPINE_POSTPROCESSOR`  | `none`       | post-retrieval chain via `make_postprocessor` — e.g. `mmr,lost_in_middle`                  |
 | `RAGSPINE_CORRECTIVE`     | `none`       | CRAG grade→act retriever wrapper via `make_corrective_retriever`                           |

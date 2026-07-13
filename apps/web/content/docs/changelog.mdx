@@ -36,6 +36,48 @@ ratchet holds at zero.
 - One new **optional, permissive-license, lazy-imported** extra: `[otel]` (OpenTelemetry,
   Apache-2.0). No new non-optional runtime dependency.
 
+**Source connectors, relation-graph provenance, domain chunking & streaming.** The same
+release opens three more opt-in seams, a streaming answer endpoint, `.txt` ingestion, and two
+ergonomics helpers — all default-off and **byte-identical** when unselected.
+
+### Added
+
+- **KB source-connector seam.** A `SourceConnector` Protocol
+  (`iter_documents() -> Iterable[RawDoc]`, `make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`)
+  makes the ingestion source pluggable: `filesystem` (the zero-dependency default), `in_memory`,
+  `http`, and `notion`. Third-party connectors register through the `ragspine.source_connectors`
+  entry-point group. See [Ingestion](/docs/guides/ingestion#source-connectors).
+- **Opt-in `RelationExtractor` slot with provenance markers.** A `RelationExtractor` Protocol
+  beside `build_relation_graph` (`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`). The
+  default `None` leaves the base graph byte-identical; the deterministic co-occurrence extractor
+  adds clean-lineage `co_occurs_with` edges; the opt-in LLM extractor (behind `[llm]`) stamps
+  every edge `model-derived` + `unverified`, screens both endpoints through the `SecurityGate`,
+  and never lets RESTRICTED text reach the model. See [ADR 0015](/docs/decisions/adr-0015).
+- **Domain chunk presets — `laws` / `qa` / `book`.** Three layout-aware `RAGSPINE_CHUNKER`
+  presets that only tune heading detection per document family (clause / chapter / question-answer
+  pairing), inheriting the base budget, `parent_id`, and locators. See
+  [Retrieval](/docs/guides/retrieval#indexing--chunking).
+- **Streaming ask endpoint — `POST /v1/ask/stream` (SSE).** The same answer as `/v1/ask`,
+  streamed token-by-token. The full guard chain (FAQ short-circuit, dual-channel retrieval,
+  anti-fabrication rewrite, provenance) runs to completion **before** the first byte is streamed,
+  so a fabrication can never be half-streamed and then retracted. See
+  [HTTP API](/docs/reference/http-api#post-v1askstream).
+- **`.txt` narrative ingestion.** Plain-text files join the narrative path
+  (`extract_txt_narrative`): UTF-8, blank-line paragraph splitting, one segment per block with a
+  `para={N}` locator — zero-dependency and deterministic. See
+  [Ingestion](/docs/guides/ingestion#narrative-ingestion).
+- **Ergonomics helpers.** `AgentResult.answer_plain` (the answer with the inline `（来源：…）`
+  suffix stripped, for UIs that render citations from `sources`), the keyword-only
+  `Fact.metric(...)` builder (order-independent construction over the frozen 10-tuple), and
+  `SqliteFactStore.has_source_doc(source_doc_id)` (an existence probe for incremental refresh).
+  See [Python API](/docs/reference/python-api).
+
+### Dependencies
+
+- One new **optional, permissive-license, lazy-imported** extra: `[connectors]` (`httpx`,
+  needed only by the `http` / `notion` connectors). No new non-optional runtime dependency; the
+  offline default path is unchanged.
+
 ## 0.8.0
 
 The **second competitor-parity batch** (workstreams W8–W12), benchmarked against the

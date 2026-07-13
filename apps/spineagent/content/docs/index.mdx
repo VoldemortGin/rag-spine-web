@@ -1,10 +1,11 @@
 ---
 title: Introduction
-description: spineagent is a framework-free multi-agent collaboration framework — agents, tools, and orchestration plus MCP / A2A protocol seams, built on the thin shared core corespine, offline-first and import-clean.
+description: spineagent is a framework-free multi-agent collaboration framework — agents, tools, and orchestration plus MCP / A2A protocol seams and Sandbox / Skills / Middleware / Artifact extension seams, built on the thin shared core corespine, offline-first and import-clean.
 ---
 
 **spineagent** 是 Spine 家族的通用多 agent 协作框架:把「agent / tool / 编排 + MCP / A2A 协议缝 +
-统一 LLM provider 适配层」收成一组**小而稳定的原语**。它依赖薄核 `corespine`,复用其缝元模式与
+Sandbox / Skills / Middleware / Artifact 扩展缝 + 统一 LLM provider 适配层(含流式)」收成一组
+**小而稳定的原语**,并预置一个纯组合的 `DeepResearchAgent`。它依赖薄核 `corespine`,复用其缝元模式与
 observability / config 形状,但**不**含任何 RAG 概念。
 
 默认路径**离线可跑、import-clean、零网络 SDK**:`import spineagent` 绝不拉入任何网络 SDK,默认

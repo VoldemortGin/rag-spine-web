@@ -126,11 +126,18 @@ The narrative lane is two modules with a clean split:
 <Tab value="narrative_extract">
 
 Pure, deterministic text extraction — zero OCR, zero LLM, no store. `extract_narrative(path)`
-dispatches by suffix (`{.pptx, .pdf}`) to `extract_pptx_narrative` / `extract_pdf_narrative`
-and returns a **`NarrativeDoc`**: `doc_id`, `file_hash`, a list of `NarrativeSegment`
+dispatches by suffix (`SUPPORTED_SUFFIXES = {.pptx, .pdf, .docx, .docm, .txt}`) to the matching
+extractor and returns a **`NarrativeDoc`**: `doc_id`, `file_hash`, a list of `NarrativeSegment`
 (`text` + `source_locator`), `skipped_pages`, and `warnings`. Locators look like
-`'slide={N},frame={M}'`, `'slide={N},notes'`, or `'page={N}'`. `NarrativeDoc.to_text()`
-joins segments with blank lines — that string is the chunking input contract.
+`'slide={N},frame={M}'`, `'slide={N},notes'`, `'page={N}'`, or (for plain text) `'para={N}'`.
+`NarrativeDoc.to_text()` joins segments with blank lines — that string is the chunking input
+contract.
+
+Plain `.txt` files take the same narrative path — treated as continuous prose, never coerced
+into structured facts. `extract_txt_narrative(path)` reads UTF-8 (with `errors="replace"`),
+splits on blank lines into paragraph blocks, normalizes each block, and emits one
+`NarrativeSegment` per non-empty block with a 1-based `source_locator="para={N}"`. It is
+zero-dependency and deterministic.
 
 </Tab>
 <Tab value="narrative_ingest">
@@ -192,6 +199,34 @@ API:
 Every transition appends an `AuditRecord` (`enqueue` / `approve` / `reject`) — the trail is
 append-only and never mutated, so review history is fully reconstructable. See the
 [review queue concept](/docs/concepts/review-queue).
+
+## Source connectors
+
+Both lanes ingest from local paths by default, but the source is itself a pluggable seam.
+`ingestion/source/connector.py` defines the `SourceConnector` Protocol — a single
+`iter_documents() -> Iterable[RawDoc]` that yields each document as a frozen `RawDoc`
+(`source_doc_id`, `locator`, `content: bytes`, `content_type`, `metadata`).
+
+The default `FilesystemConnector` is zero-dependency. `InMemoryConnector` supplies documents
+in-process (tests / fixtures). `HttpConnector` and `NotionConnector` reach remote knowledge
+bases and lazy-import `httpx` behind the `[connectors]` extra. Pick one with
+`make_source_connector(spec, **kwargs)` or `RAGSPINE_SOURCE_CONNECTOR`; third-party connectors
+register through the `ragspine.source_connectors` entry-point group (built-in names win on a
+clash). See [Extension points → SourceConnector](/docs/reference/extension-points#sourceconnector).
+
+```python
+from ragspine.ingestion.source.connector import make_source_connector
+
+# None / "none" → None; "filesystem"/"fs" → local walk; "http"/"notion" → remote ([connectors]).
+connector = make_source_connector("filesystem")
+for raw in connector.iter_documents():
+    ...  # raw is a RawDoc: source_doc_id, locator, content bytes, content_type, metadata
+```
+
+<Callout type="info">
+  The `[connectors]` extra pulls in only `httpx` (permissive-licensed, lazy-imported). With no
+  connector selected, ingestion reads local paths exactly as before — byte-identical.
+</Callout>
 
 ## Invariants this domain upholds
 

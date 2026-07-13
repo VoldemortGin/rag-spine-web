@@ -59,10 +59,19 @@ It returns an `AgentResult` dataclass:
 class AgentResult:
     answer: str
     route: str
+    answer_plain: str = ""
     clarification: ClarificationResult | None = None
     tool_results: list[dict[str, object]] = ...
     sources: list[dict[str, object]] = ...
 ```
+
+<Callout type="info">
+  `answer_plain` is the **no-inline-sources** variant of `answer`: byte-for-byte identical
+  prose but with the trailing `（来源：…）` / `（资料来源：…）` citation suffix stripped, so a UI
+  can render citations itself from `sources` instead of duplicating them. For a refusal it
+  equals `answer` (and still leaks no suppressed number). Every answer branch — structured,
+  multi-subtask, narrative, decomposed — produces both in lock-step.
+</Callout>
 
 ## `MockProvider`
 
@@ -110,8 +119,16 @@ class SqliteFactStore:
         review_statuses: tuple[str, ...] | None = VISIBLE_REVIEW_STATUSES,
     ) -> list[Fact]: ...
     def count(self) -> int: ...
+    def has_source_doc(self, source_doc_id: str) -> bool: ...
     def close(self) -> None: ...
 ```
+
+<Callout type="info">
+  `has_source_doc(source_doc_id)` is an existence probe — `True` when _any_ fact is already
+  stored for that document (regardless of `review_status`), else `False`. Use it to decide
+  whether a source has been ingested before an idempotent / incremental refresh. It is a
+  helper on the concrete `SqliteFactStore`, not on the `FactStore` Protocol.
+</Callout>
 
 A `Fact`'s first ten fields are positional-frozen:
 
@@ -130,6 +147,35 @@ class Fact:
     source_locator: str
     # ... additive v2 / lineage fields follow
 ```
+
+Because those first ten fields are positional and easy to transpose, construct a metric fact
+through the keyword-only `Fact.metric(...)` builder instead of the raw positional constructor:
+
+```python
+@classmethod
+def metric(
+    cls,
+    *,
+    metric_code: str,
+    entity: str,
+    period_type: str,
+    period: str,
+    value: float,
+    unit: str,
+    source_doc_id: str,
+    source_locator: str,
+    channel: str = "TOTAL",
+    geography: str = "",
+    **extra: object,
+) -> Fact: ...
+```
+
+<Callout type="info">
+  `Fact.metric(...)` is order-independent: `channel` defaults to `"TOTAL"`, `geography` to
+  `""`, and any additive v2 field (`tags`, `confidence`, `review_status`, `valid_as_of`,
+  `dimensions`, …) passes through `**extra`. It returns an ordinary `Fact`, so the positional
+  constructor stays the frozen 10-tuple contract the evaluation harness binds with `Fact(*row)`.
+</Callout>
 
 ## Runnable example
 

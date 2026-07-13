@@ -305,6 +305,12 @@ by the stage they act on.
 - **Sentence-window & semantic** (`RAGSPINE_CHUNKER=sentence_window|semantic`) — one chunk per
   sentence with a synthesis-time window, or embedding-boundary splits (semantic uses
   `[embed-onnx]`).
+- **Domain presets — laws / qa / book** (`RAGSPINE_CHUNKER=laws|qa|book`) — thin
+  layout-aware chunkers that only change heading detection for one document family each: **laws**
+  starts a section at every clause (`第N条/款/项`), **book** at every chapter (`第N章/节/篇`, or a
+  markdown / numbered heading), and **qa** pairs each question (`Q:` / `问：` / a `?`-ending line)
+  with the answer paragraphs that follow under a shared `parent_id`. Everything else — the
+  budget, `parent_id`, and locators — is inherited from the base chunker.
 - **RAPTOR multi-granularity tree** (`make_raptor_retriever` / `RAGSPINE_RAPTOR*`) — recursive
   **deterministic** threshold clustering; per-cluster `is_synthesis` summaries carry the union
   of their members' provenance and are **never citable facts**. Retrieval can pull a leaf
@@ -363,6 +369,13 @@ competitor sub-query is refused, so home numbers never leak.
   `[graph]` `networkx` adapter) and an **opt-in** narrative-GraphRAG extraction / community
   skeleton (behind `[graph]` + `[llm]`). It is a standalone multi-hop surface, not a router
   branch — see [Channels](/docs/architecture/channels).
+- **Relation-extractor slot** (`RAGSPINE_RELATION_EXTRACTOR`, `make_relation_extractor`) — an
+  opt-in slot beside `build_relation_graph` for relations that live only in narrative text.
+  The default (`None`) leaves the base graph byte-identical; the deterministic co-occurrence
+  extractor adds clean-lineage `co_occurs_with` edges; the LLM extractor (behind `[llm]`)
+  stamps every edge `model-derived` + `unverified`, screens both endpoints through the
+  `SecurityGate`, and never lets RESTRICTED text reach the model. See
+  [ADR 0015](/docs/decisions/adr-0015).
 
 ### Multimodal
 

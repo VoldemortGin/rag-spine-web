@@ -212,7 +212,117 @@ print(agent.step("2+3 等于几?").output)   # 答案是 5(模型调了 add(2,3)
 
 ---
 
-## 11) 接真实 LLM 后端(只示范接法,需联网 + key)
+## 11) 沙箱里跑不可信代码(InProcessSandbox 白名单求值)
+
+`InProcessSandbox` 把代码当「纯表达式白名单迷你语言」跑:只认极小内建白名单,拒 `import` / 属性 / 任意调用;
+失败**不抛异常**,归一为非零 `SandboxResult`(带原因码)。
+
+```python
+from spineagent import InProcessSandbox
+
+sb = InProcessSandbox()
+ok = sb.run("sum(sorted([3, 1, 2]))")
+print(ok.ok, ok.output)          # True 6
+
+# 越权即被容住:open / __import__ / 属性访问 / 任意调用都拒
+bad = sb.run("open('/etc/passwd')")
+print(bad.ok, bad.error)         # False 只允许调用白名单内建函数(len/str/int/…),不允许任意调用
+
+# env 绑定自由名(subprocess/container 桩会抛 SeamError,本壳只提供缝 + InProcessSandbox)
+print(sb.run("a + b", env={"a": 2, "b": 3}).output)   # 5
+```
+
+---
+
+## 12) Skills:manifest 能力包 → 桥成 FunctionTool
+
+`FixtureSkill` 的脚本经 Sandbox 隔离执行;`skill_as_function_tool` 把技能桥成 `FunctionTool` 给 `FunctionCallingAgent` 用。
+(`SkillBundle.load(path)` 则从含 `manifest.toml` + `skill.py` 的文件夹包加载,此处直接构造演示。)
+
+```python
+from spineagent import SkillSpec, FixtureSkill, InProcessSandbox, skill_as_function_tool
+
+spec = SkillSpec(
+    "add", "两个整数相加",
+    {"type": "object",
+     "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+     "required": ["a", "b"]},
+)
+skill = FixtureSkill(spec, "a + b", sandbox=InProcessSandbox())
+print(skill.invoke({"a": 2, "b": 3}).output)          # 5(脚本 "a + b" 在沙箱里跑,args 当 env)
+
+# 桥成 FunctionTool:name/description/parameters 取自 skill.describe()
+tool = skill_as_function_tool(skill)
+print(tool.schema()["function"]["name"])              # add
+print(tool.invoke({"a": 4, "b": 5}))                  # 9
+```
+
+---
+
+## 13) Middleware:给一次 step 套洋葱环切面
+
+`MiddlewareAgent` 正序进各 `before_step`、逆序出各 `after_step`,包住内层 agent 的一次 `step`。四件套只记元数据。
+
+```python
+from spineagent import (
+    FunctionAgent, MiddlewareAgent, TokenUsageMiddleware, AttachmentMiddleware,
+)
+
+base = FunctionAgent("greeter", lambda t: f"收到:{t}")
+tok = TokenUsageMiddleware()
+wrapped = MiddlewareAgent("greeter+mw", base, [
+    AttachmentMiddleware({"ctx": "背景资料"}),   # 把附件正文前置进 ctx.task
+    tok,                                          # 数入/出 token,累进 tok.totals
+])
+
+r = wrapped.step("你好")
+print(r.agent, "->", r.output)   # greeter+mw -> 收到:背景资料\n你好(附件被前置)
+print(dict(tok.totals))          # {'input_tokens': ..., 'output_tokens': ...}(只有计数)
+```
+
+---
+
+## 14) Artifact:产物落地缝(进程内 + 组合 corespine BlobStore)
+
+`InProcessArtifactSink` 进程内落地;`BlobArtifactSink` 组合 corespine 的 `BlobStore`(内容寻址 `sha256` key,
+`put`/`get` 只管字节,元数据全在 `ArtifactRef`)。`ArtifactRef` 就是 `AgentResult.artifacts` 的元素。
+
+```python
+from corespine import MemoryBlobStore
+from spineagent import Artifact, InProcessArtifactSink, BlobArtifactSink
+
+# 进程内 sink
+sink = InProcessArtifactSink()
+ref = sink.store(Artifact.from_text("note.txt", "hello"))
+print(ref.sink, ref.name, ref.size)       # in_process note.txt 5
+print(sink.fetch(ref).text)               # hello
+
+# 组合 corespine BlobStore(内存 / 文件系统 / 第三方 S3 皆可注入)
+blob = BlobArtifactSink(MemoryBlobStore())
+bref = blob.store(Artifact.from_text("note.txt", "hello"))
+print(bref.sink, len(bref.key), bref.size)  # blob 64 5（key = sha256 十六进制）
+print(blob.fetch(bref).text)                # hello
+```
+
+---
+
+## 15) 预置 DeepResearchAgent(离线纯组合)
+
+`DeepResearchAgent` 纯组合已有原语:拆解子查询 → `Coordinator` 并行检索 → `LlmAgent` 综合。离线默认
+`provider=MockProvider()`,零网络即可端到端跑(输出是确定性 mock 综合)。
+
+```python
+from spineagent import DeepResearchAgent
+
+agent = DeepResearchAgent(max_subqueries=3)
+r = agent.step("介绍 A\n介绍 B\n介绍 C")   # default_planner 按换行 / ; 结构化拆解
+print(r.agent)          # deep_research
+print(bool(r.output))   # True（离线是确定性 mock 综合;换真实 provider + tools 即成真检索研究）
+```
+
+---
+
+## 16) 接真实 LLM 后端(只示范接法,需联网 + key)
 
 对外统一 OpenAI `ChatCompletion` 形状,`LlmAgent` / `FunctionCallingAgent` / 编排只认 `LLMProvider`
 协议——把 `MockProvider` 换成真实适配器,其余代码一行不改。先装对应 extra:

@@ -8,7 +8,7 @@ description: The real signature, contract, and one-liner for every corespine exp
 > [overview](/docs/overview),易错点见 [gotchas](/docs/gotchas)。
 >
 > 全部从顶层包导入:`from corespine import Registry, MockProvider, ...`。
-> `corespine.__version__ == "0.1.1"`。`__all__` 共 30 项(含 `__version__`)。
+> `corespine.__version__ == "0.2.0"`。`__all__` 共 43 项(含 `__version__`)。
 
 ## seam —— `corespine.seam.registry`
 
@@ -60,16 +60,47 @@ trace 出口的最小结构接口。
 emit(self, code: str, **fields: object) -> None    # 发射一条事件(code + 非敏感字段)
 ```
 
-### `class InProcessPrivacyTraceSink`
+### `class TraceExporter(Protocol)`(`@runtime_checkable`,0.2.0)
 
-进程内默认 `TraceSink`:把事件存进内存列表,且**拒绝**任何携带受限内容的载荷。
+trace 导出面的最小结构接口:接收一条**已通过隐私校验的**事件,扇出到进程外。
 
 ```python
-InProcessPrivacyTraceSink() -> None                 # 无参构造
+export(self, event: TraceEvent) -> None            # 接收一条已过 FORBIDDEN_KEYS 校验的 TraceEvent
+```
+
+隐私契约(不可放松):exporter 只会收到已在 sink 的 `emit` 里【先过 `FORBIDDEN_KEYS` 校验、再扇出】
+的 `TraceEvent`——受限正文在校验阶段就被 `TraceError` 挡下,根本到不了任何 exporter。故导出面天然
+只承载 code / 计数 / 耗时,**与本地记录面等宽**。真实导出后端(opentelemetry / langfuse SDK)由各 app
+在自己的适配器里经可选 extra 延迟 import,绝不进核心。
+
+### `class InProcessTraceExporter`(0.2.0)
+
+进程内默认 `TraceExporter`:把扇出到的事件收集进内存列表(离线 / 测试用,零依赖)。
+
+```python
+InProcessTraceExporter() -> None                    # 无参构造
+
+export(self, event: TraceEvent) -> None             # 追加到内部列表(只可能收到已过隐私校验的事件)
+
+# 属性(只读 property)
+events -> list[TraceEvent]                           # 已导出事件的只读副本(外部改动不污染内部)
+```
+
+### `class InProcessPrivacyTraceSink`
+
+进程内默认 `TraceSink`:把事件存进内存列表,且**拒绝**任何携带受限内容的载荷;可选挂 0..N 个
+`TraceExporter` 做扇出。
+
+```python
+InProcessPrivacyTraceSink(*, exporters: Sequence[TraceExporter] | None = None) -> None
+    # exporters 仅关键字参数;不传即无扇出,纯进程内收集。
 
 emit(self, code: str, **fields: object) -> None
-    # 先扫 fields 键,命中 FORBIDDEN_KEYS(归一为小写后比对)立即抛 TraceError、不记录;
-    # 通过校验的事件以 TraceEvent 追加到内部列表。隐私 by construction。
+    # 先扫 fields 键,命中 FORBIDDEN_KEYS(归一为小写后比对)立即抛 TraceError、不记录、不扇出;
+    # 通过校验的事件以 TraceEvent 追加到内部列表,再扇出到每个 exporter。隐私 by construction。
+    # 扇出【严格发生在隐私校验之后】——受限载荷一条都到不了 exporter。
+
+add_exporter(self, exporter: TraceExporter) -> None  # 追加一个扇出目标;后续合法事件都会扇出到它(0.2.0)
 
 codes(self) -> list[str]                            # 已记录事件的 code 序列(按记录顺序)
 
@@ -104,9 +135,25 @@ chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None
     # tools 是关键字参数(* 之后),必须 tools=... 传。
 ```
 
+### `class StreamingLLMProvider(Protocol)`(`@runtime_checkable`,0.2.0)
+
+流式 provider 的**独立叠加协议**——**不**给 `LLMProvider` 直接加方法(那会让所有只实现 `chat`
+的既有实现瞬间不再满足 `@runtime_checkable` 协议、破坏兼容)。非流式实现继续是合法 `LLMProvider`;
+支持流式的实现同时满足两者。
+
+```python
+stream_chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> Iterator[ChatCompletionChunk]
+    # 逐块吐 ChatCompletionChunk;tools 签名与 chat 对齐(便于同一调用点二选一)。
+    # 消费者用 isinstance(p, StreamingLLMProvider) 探测能力再决定走哪条路,不必强迫每个 provider 都实现流式。
+```
+
+**等价不变量:** 同一次对话流式吐出的所有 chunk 的 `delta.content` 顺序拼接,**逐字等于**对应
+`chat().choices[0].message.content`。
+
 ### `class MockProvider`
 
-确定性离线 provider:零网络、零 key,输出由 messages 派生、可复现。
+确定性离线 provider:零网络、零 key,输出由 messages 派生、可复现。同时满足 `LLMProvider` 与
+`StreamingLLMProvider`。
 
 ```python
 MockProvider(*, prefix: str = "mock") -> None       # prefix 仅关键字参数
@@ -115,6 +162,11 @@ chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None
     # 回显最后一条 user 消息,附一段由【整段对话】计算的稳定 12 位 hex 指纹。
     # 同一对话恒定产出同一文本(纯函数);finish_reason 恒为 "stop"。
     # 【绝不伪造 tool_calls】——离线默认不假装会 function-calling(返回 message.tool_calls 为 None)。
+
+stream_chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> Iterator[ChatCompletionChunk]  # 0.2.0
+    # 确定性分块流式:首块吐 role(delta.role="assistant"),随后按 16 字符宽度逐块吐 content 片段,
+    # 末块吐空 delta + finish_reason="stop"。所有 content 片段拼接 == chat() 的 message.content(等价不变量)。
+    # chat 与 stream_chat 共用同一派生逻辑(同 id / 同文本),这正是等价不变量成立的根。
 ```
 
 ### 响应数据类(均 frozen dataclass,字段与 OpenAI 完全一致)
@@ -134,6 +186,20 @@ Usage(prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0)
 
 取文本的惯用路径:`completion.choices[0].message.content`。
 
+### 流式数据类(0.2.0,均 frozen dataclass,字段与 OpenAI 完全一致)
+
+```python
+ChatCompletionChunk(
+    choices: tuple[ChunkChoice, ...],               # 必填
+    model: str = "", id: str = "", created: int = 0, object: str = "chat.completion.chunk",
+)
+ChunkChoice(index: int, delta: ChoiceDelta, finish_reason: str | None = None)  # index/delta 必填;finish_reason 仅末块非空
+ChoiceDelta(role: str | None = None, content: str | None = None)               # 首块给 role,后续块给 content 片段
+```
+
+拼接文本的惯用路径:`"".join(c.choices[0].delta.content or "" for c in chunks)`(== 非流式的
+`message.content`)。
+
 ## llm rate limit —— `corespine.llm.rate_limit`
 
 ### `class RateLimitedProvider`
@@ -152,6 +218,57 @@ chat(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None
 ```
 
 与 SDK 的 `max_retries` 互补:SDK 撞 429 后被动退避,`RateLimitedProvider` 预先主动节流。
+
+## blob —— `corespine.blob.store`(0.2.0)
+
+> 「key → bytes」制品存储的最小面。Protocol 只承诺**字节 round-trip**,元数据最小化(核心不背
+> content-type / 大小 / 时间戳;需要元数据的 app 自行在 key 命名空间或外层包装里绑)。
+
+### `class BlobStore(Protocol)`(`@runtime_checkable`)
+
+```python
+put(self, key: str, data: bytes) -> None            # 写入 / 覆盖
+get(self, key: str) -> bytes                         # 读回字节;缺失抛 BlobNotFound
+delete(self, key: str) -> None                       # 删除,幂等(删不存在的 key 不报错)
+exists(self, key: str) -> bool                        # 是否存在(空字节也算存在,不是缺失)
+```
+
+### `class MemoryBlobStore`
+
+进程内 dict 实现:零落地、离线确定性(测试 / 临时缓存用)。
+
+```python
+MemoryBlobStore() -> None                            # 无参构造
+```
+
+### `class FileSystemBlobStore`
+
+本地文件系统实现:key 经 **sha256 摊平**成 root 下扁平文件名。
+
+```python
+FileSystemBlobStore(root: str | Path) -> None        # 需显式 root;构造时 mkdir(parents=True, exist_ok=True)
+```
+
+用 `sha256(key)` 的 hex 作文件名(而非把 key 直接当路径):杜绝路径穿越(含 `..` / 斜杠的 key
+也逃不出 root)、跨平台文件名安全、同 key 跨进程确定映射(同 root 新实例读回同字节)。**不追求可逆**,
+不支持枚举 / 反查 key;需要枚举语义的 app 走真实后端。
+
+### `make_blob_store(spec: str, **kwargs: object) -> BlobStore` · `BLOB_REGISTRY`
+
+```python
+make_blob_store(spec, **kwargs) -> BlobStore
+    # 按 spec 构造(大小写 / 连字符 / 留白不敏感)。内置 "memory"(无参)、"filesystem"(需 root=...);
+    # 未知 spec 抛 ValueError 并列清可用名。真实后端(s3 / minio)由第三方经 entry-point 注册后同样以 spec 名选用。
+
+BLOB_REGISTRY: Registry[BlobStore]                   # 缝 "blob" 的注册表(内置 memory / filesystem);group "corespine.blob"
+```
+
+### `class BlobError(CorespineError)` · `class BlobNotFound(BlobError)`
+
+```python
+class BlobError(CorespineError):    code = "blob.error"       # blob 缝的边界异常基类
+class BlobNotFound(BlobError):      code = "blob.not_found"   # get 一个不存在的 key 时抛出
+```
 
 ## config —— `corespine.config.env`
 
