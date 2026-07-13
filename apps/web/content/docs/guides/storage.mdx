@@ -21,7 +21,7 @@ entry point so observability code never touches the raw connection.
 
 <Files>
   <Folder name="storage" defaultOpen>
-    <File name="fact_store.py — Fact dataclass + FactStore (table fact_metric)" />
+    <File name="fact_store.py — Fact dataclass + FactStore Protocol + SqliteFactStore (table fact_metric)" />
   </Folder>
   <Folder name="retrieval/chunking">
     <File name="chunk_store.py — StoredChunk + ChunkStore (table narrative_chunk)" />
@@ -54,6 +54,16 @@ the contract**: the first ten are positional-frozen, and new fields are appended
     review_status: { type: 'str', default: 'REVIEW_AUTO_APPROVED' },
     valid_as_of: { type: 'str | None', default: 'None' },
     ingested_at: { type: 'str | None', default: 'None' },
+    corrected_by: {
+      type: 'str | None',
+      default: 'None',
+      description: 'Correction lineage — the SME who applied the correction.',
+    },
+    corrected_audit_seq: {
+      type: 'int | None',
+      default: 'None',
+      description: 'Correction lineage — the review-audit seq behind the value.',
+    },
     dimensions: {
       type: 'dict[str, str]',
       default: '{}',
@@ -89,10 +99,16 @@ reconstructed into a `Fact(**data)`.
 
 ## FactStore
 
-```python
-from ragspine.storage.fact_store import Fact, FactStore
+`FactStore` is a `@runtime_checkable` **Protocol** — the seam the core imports (use it only as
+a type hint / `isinstance` target; instantiating it raises). The class you construct is the
+zero-dependency sqlite default, `SqliteFactStore`, either directly or through the
+`make_fact_store(spec, **kwargs)` factory / `RAGSPINE_FACT_STORE` env var (third-party
+backends register under the `ragspine.fact_stores` entry-point group).
 
-store = FactStore("data/fact_metric.db")
+```python
+from ragspine.storage.fact_store import Fact, SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
 store.init_schema()
 
 store.upsert_facts([
@@ -113,6 +129,9 @@ store.close()
 | `has_source_doc(source_doc_id) -> bool`                                                                                   | `True` if _any_ fact exists for that doc (any review status) — an existence probe for idempotent / incremental refresh |
 | `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | read-only SELECT entry point for ledger/metrics reuse                                 |
 | `delete_by_source_doc(source_doc_id) -> int`                                                                              | physically delete a doc's facts (any review status); idempotent                       |
+| `set_review_status(dim_key, status) -> int`                                                                               | human-review write-back: flip one fact's `review_status` by `dim_key`; returns 0 or 1 |
+| `dim_key_for(fact) -> str` _(static)_                                                                                     | compute a `Fact`'s `dim_key` from its typed identity columns (the public accessor — `dim_key` is never a `Fact` field) |
+| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | fetch one fact by `dim_key` (any review status); `None` if absent                     |
 | `close()`                                                                                                                 | idempotent connection close (also auto-closed on GC via `weakref.finalize`)           |
 
 The table is `fact_metric`. `query()` issues an exact-match `SELECT` on
@@ -144,7 +163,7 @@ Two unique indexes coexist and encode identical finance uniqueness:
 On conflict, `upsert_facts` overwrites the overwritable columns —
 `geography, value, unit, source_doc_id, source_locator` plus all v2/provenance fields
 (`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
-valid_as_of, ingested_at`) — and stamps `ingested_at` itself. Re-ingesting the same data
+valid_as_of, ingested_at, corrected_by, corrected_audit_seq`) — and stamps `ingested_at` itself. Re-ingesting the same data
 therefore never grows the store; this is the backbone of
 [idempotent ingestion](/docs/guides/ingestion#the-batch-manifest-ledger).
 

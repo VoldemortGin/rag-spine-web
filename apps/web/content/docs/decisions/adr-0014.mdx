@@ -1,0 +1,136 @@
+---
+title: 'ADR 0014: Dify workflow as a service (analyze / compile / run) with three-layer safe execution'
+description: Extend the existing ragspine service with three Dify endpoints of increasing trust — analyze and compile always on, run disabled by default behind a static import gate, a restricted in-process sandbox, and (Linux) subprocess isolation; the provider is always decided server-side.
+---
+
+> Status: **proposed** · Date: 2026-06-24
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+Builds on [0013](/docs/decisions/adr-0013) (the Dify YAML → pure-Python compiler + static
+optimization advisor). Relates to [0009](/docs/decisions/adr-0009) (no framework lock-in +
+permissive-license-only), [0010](/docs/decisions/adr-0010) (security decoupling), and the
+spine-family boundaries ADR (family repo, `docs/adr/0001`).
+Shipped in **rag-spine 0.5.0**.
+
+## Context
+
+[ADR 0013](/docs/decisions/adr-0013) compiles a Dify `.yml` into readable pure Python
+(`compile_dify_yaml` / `analyze`). The next step is to put that capability **behind a
+service**, so consumers can reach it over HTTP: get optimization suggestions, get the
+readable code, and even **run** the compiled artifact directly. Running code someone else
+submitted is a **trust-boundary** problem — the design must find a safe default between
+"works out of the box" and "never `exec` lightly."
+
+Constraints: reuse the existing ragspine service (app factory / DI / RQ queue / deploy) —
+no second service; tests run with zero real LLM APIs (TestClient + `MockProvider`); the
+provider is decided by **server-side** env (clients cannot inject a `provider_expr` — that
+would be a code-injection surface); the family is fully synchronous; `mypy --strict`,
+`filterwarnings=error`, pydantic only at the boundary.
+
+## Decision
+
+**Extend the ragspine service with three endpoints of increasing trust; `run` is off by
+default and executes through three safety layers.**
+
+### The three endpoints (`src/ragspine/service/api/routes.py`, compiler lazy-imported)
+
+- `POST /v1/dify/analyze` — static optimization analysis only (no codegen, no exec).
+  **Always available**; absolutely safe.
+- `POST /v1/dify/compile` — compile to a pure-Python **code string** (never executed).
+  **Always available**; safe.
+- `POST /v1/dify/run` and `POST /v1/dify/run/jobs` (async) — compile + **restricted
+  execution**. This is the **trust boundary**: off by default
+  (`RAGSPINE_DIFY_RUN_ENABLED=false` → 403), only an explicit env opt-in unlocks it; the
+  provider is injected server-side.
+
+Error shaping: `DifyCompileError` (code `dify.*`) → 400; the L0 static gate's
+`DifyUnsafeError` (nothing was executed) → 422; execution / timeout
+`DifyRunError` / `DifyTimeoutError` → 400; feature not enabled → 403. Async runs reuse the
+existing `GET /v1/jobs/{id}`.
+
+### The three safety layers (`src/ragspine/service/dify/{safety,runner}.py` + `scripts/run_dify_workflow.py`)
+
+- **L0 — static gate (non-bypassable, before execution).** ① a non-empty
+  `GeneratedCode.warnings` (a `NotImplementedError` skeleton / unsupported node) → reject
+  (422); ② an AST walk over the generated source's imports — any top-level root module
+  outside the allowlist (only `__future__` / `dataclasses` / `typing` / `string` /
+  `concurrent` / `json` / `corespine` / `ragspine` / `spineagent`) → reject. The allowlist
+  deliberately contains **no** I/O / process / network module
+  (os / sys / subprocess / socket / shutil / pathlib / importlib).
+- **L1 — restricted in-process sandbox.** An explicit **allowlist dict of safe builtins**
+  (pure computation / containers / serialization + the exception types generated code uses),
+  the dunder required to execute class/module bodies (`__build_class__`), and a **restricted
+  `__import__`** (only L0-allowlisted root modules — even a dynamic `__import__('os')` is
+  blocked); `open` / `eval` / `exec` / `compile` / `input` and other escape surfaces are
+  simply never allowlisted. The generated module is registered into `sys.modules` (dataclass
+  string-annotation resolution under `from __future__ import annotations` needs it).
+  **Thread-based soft timeout** (cross-platform, no reliance on `SIGALRM`).
+- **L2 — subprocess isolation.** `isolation='subprocess'` → on Linux, a separate child
+  process (`Popen(cwd=private tmp)` + `communicate(timeout)` + `kill()` = SIGKILL for a
+  runaway process, plus `resource.setrlimit` capping CPU time / address space / file
+  creation); the child still applies the L1 restricted sandbox inside. **Non-Linux
+  (macOS / Windows) automatically falls back to L1** (rlimit is unreliable there, so hard
+  isolation buys little).
+
+### Provider safety & self-built providers in isolated processes / workers
+
+Clients **cannot** pass a `provider_expr` (the schema has no such field; extra fields are
+ignored by pydantic). Generated code pins the offline default provider; at run time the
+server overrides it via `run_workflow(provider=...)`. The subprocess / RQ worker **builds its
+own** provider from `build_provider(provider_config_dict(config))` — never a passed provider
+instance or expression — so the provider is always decided by server-side env.
+
+Landing points: `src/ragspine/service/dify/{safety,runner}.py`,
+`service/tasks/jobs.py:run_dify_workflow_job`, `scripts/run_dify_workflow.py`,
+`service/api/{routes,schemas}.py`, and `service/config.py`
+(`dify_run_enabled` / `dify_run_timeout_s` / `dify_run_isolation` + `provider_config_dict`).
+
+## Security defaults (all accepted this round, pending review)
+
+1. **All safety defaults accepted:** the L0 static gate + L1 restricted sandbox + L2
+   subprocess isolation all land; `run` is off by default and offline-mock by default.
+2. **No auth in the MVP:** the HTTP layer does no authentication (consistent with the
+   existing `/v1/ask`). Public exposure must put auth or a network allowlist in front
+   (reverse proxy / ingress) — flagged prominently across deploy
+   (README / `.env.example` / compose / helm values).
+3. **Honest sandbox boundary:** the L1 restricted builtins are **one layer of defense in
+   depth**, not a complete sandbox; hard isolation comes from the L2 subprocess + SIGKILL +
+   (Linux) rlimit. Non-Linux falls back to L1 with no hard resource caps — stated explicitly
+   in code and docs.
+
+## Alternatives considered (rejected)
+
+- **`/run` on by default.** Rejected — running someone else's compiled artifact is a trust
+  boundary; the safe default must be off. Out-of-the-box value is covered by
+  analyze / compile, which are absolutely safe.
+- **Blocklist-style restricted builtins (remove the dangerous names).** Rejected — too easy
+  to miss one (the first draft missed `__build_class__`, breaking class definitions under
+  exec). Use an **explicit allowlist dict** instead: only names known safe, everything else
+  denied by default.
+- **`signal.SIGALRM` for the L1 timeout.** Rejected — Unix-only and incompatible with
+  threads. A thread-based soft timeout (cross-platform) + the L2 subprocess SIGKILL hard
+  timeout instead.
+- **`os.chdir(tmp)` in L1.** Rejected (removed after stepping on it in implementation) —
+  `os.chdir` is a process-wide side effect; a thread soft timeout cannot kill the runaway
+  thread, which would leave the **whole process** cwd inside a deleted tmp dir and poison
+  later subprocess spawns. Inside the restricted sandbox, `open` / `os` / `pathlib` are
+  unreachable anyway, so chdir buys nothing at process-level risk. The "run inside tmp"
+  semantics move to the L2 subprocess's `Popen(cwd=private tmp)`.
+- **Let clients pass `provider_expr`.** Rejected — a direct code-injection surface. The
+  provider is decided by server-side env; isolated processes / workers self-build via
+  `build_provider`.
+
+## Consequences
+
+- The service gains three endpoints (analyze / compile safely always-on; run a trust
+  boundary, off by default); it reuses the app factory / DI / RQ queue / deploy — no new
+  service, no new configuration system.
+- The `[service]` extra adds PyYAML (the dify endpoints lazy-import the compiler; pydantic
+  comes with fastapi); core `dependencies` untouched. The deploy image installs
+  `.[service,vector,dify]`.
+- Restricted execution always passes L0 + L1 (+ L2 on Linux); the provider is always decided
+  server-side and can never be injected by a client.
+- This record is **proposed**: the security defaults (no-auth MVP / the honest sandbox
+  boundary) await review; any change follows supersede-don't-edit (a new record or a status
+  flip).

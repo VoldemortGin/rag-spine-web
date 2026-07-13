@@ -1,0 +1,126 @@
+---
+title: 'ADR 0013: Dify workflow YAML → pure-Python compiler + static optimization advisor'
+description: Compile a Dify workflow .yml into framework-free imperative Python through a de-Dify-ized IR (parse → IR → codegen), with an eight-rule static optimization advisor — PyYAML behind a new [dify] extra, fully synchronous, zero new core dependency.
+---
+
+> Status: **accepted** · Date: 2026-06-24
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+Relates to [0009](/docs/decisions/adr-0009) (no framework lock-in + permissive-license-only),
+[0011](/docs/decisions/adr-0011) (the python-project-standard), and the spine-family
+boundaries ADR (family repo, `docs/adr/0001` — family seams / LLM protocol).
+Shipped in **rag-spine 0.4.0**.
+
+## Context
+
+Dify is a popular low-code LLM application orchestration platform; its workflows export as
+`.yml` (DSL). Plenty of users have a working workflow / advanced-chat built in Dify but want
+**out of the platform lock-in**: a framework-free, readable, version-controllable,
+offline-runnable piece of pure Python. RAGSpine's identity is exactly the "framework-free
+backend" ([ADR 0009](/docs/decisions/adr-0009): no framework lock-in + permissive-license-only
+dependencies), so **compiling** a Dify workflow into imperative pure Python — and handing out
+**static optimization suggestions** along the way — is a natural fit for the product direction.
+
+Hard constraints: the family is fully synchronous; the core stays zero-SDK; LLM calls go
+through the `corespine.LLMProvider.chat` seam; the offline `MockProvider` is the default;
+the permissive-only license gate holds; `mypy --strict`; pydantic only at the boundary.
+
+## Decision
+
+**`.yml → parse → IR → codegen + optimize` — three stages decoupled by one de-Dify-ized IR.**
+
+- **parse** — `yaml.safe_load` (PyYAML, MIT, passes the license gate) reads the document into
+  a dict, validated by pydantic v2 boundary models (`extra='allow'` tolerates unknown fields,
+  so a new Dify field never breaks the parser). pydantic appears **only in this stage**.
+  PyYAML is lazy-imported behind a new `[dify]` optional extra; core `dependencies` untouched.
+- **IR** — `DifyDoc → WorkflowIR`. Nodes normalize into frozen-dataclass `IRNode` subclasses;
+  variable references (`value_selector` / `{{#nodeId.field#}}`) normalize into
+  `VarRef` / `Literal` / `TemplateValue`; edges carry `source_handle`; Kahn topological sort
+  yields `topo_order` and `parallel_layers`; a cycle raises `CyclicGraph`. Pure stdlib —
+  zero pydantic, and zero Dify concepts leak below this layer.
+- **codegen** — `WorkflowIR → GeneratedCode`. The topology flattens into an imperative script
+  `def run_workflow(inputs, *, provider=None) -> dict`; LLM nodes become
+  `provider.chat(messages)`; parallel layers use `concurrent.futures.ThreadPoolExecutor`
+  (**no async is generated** — the family is fully synchronous). Pure stdlib.
+- **optimize** — `WorkflowIR → list[Suggestion]`: **eight purely static rules** (zero API
+  calls, never touches the live environment; env ceilings are injectable) —
+  PARALLEL_001/002, BOTTLE_001/002, CACHE_001, RESOURCE_001/002, LLM_001.
+
+It lands at `src/ragspine/dify/{parse,ir,codegen,optimize}/ + api.py + errors.py`. The facade:
+`compile_dify_yaml(source, *, target='ragspine', provider_expr='MockProvider()',
+emit_trace=False, analyze=True) -> CompileResult(code, suggestions, ir)`;
+`analyze(source, *, env=None) -> list[Suggestion]`; low-level
+`parse_dify_yaml / lower_to_ir / generate_code`. CLI: `ragspine dify compile <path>`.
+
+## The six MVP defaults (§7 — open questions, resolved defaults)
+
+To move the MVP forward, six open questions took **reasonable defaults** (revisable at review):
+
+1. **Target runtime** — pure ragspine imperative script by default; a `target=` parameter is
+   reserved as the seam, with a spineagent orchestration target left for P7.
+2. **Optimization scope** — purely static rules (zero API). Dynamic profiling / real token
+   estimation deferred.
+3. **`code` nodes** — **inlined** as generated local functions, with a comment marking the
+   "source trust assumption" (a Dify code node already executes arbitrary user code; the
+   compiler keeps the same trust boundary and does not sandbox it).
+4. **Unsupported nodes** (http-request / tool / knowledge-retrieval / parameter-extractor /
+   plugins) — generate hook functions with `raise NotImplementedError` + a detailed docstring
+   (produce a **runnable skeleton**, never fail the whole compile); recorded explicitly in
+   `GeneratedCode.warnings`.
+5. **App modes** — `workflow` + `advanced-chat` (with `answer` nodes) first.
+   `conversation_variables` / memory / multi-turn conversation state left for P7.
+6. **YAML dependency** — a new `[dify]` optional extra (PyYAML, `safe_load`); core
+   `dependencies` untouched.
+
+## Alternatives considered (rejected)
+
+- **Direct `.yml → code` (no IR).** Rejected — the three stages would be tightly coupled,
+  adding a target backend (spineagent) or doing static analysis would be hard; the IR is the
+  shared fulcrum for the optimizer and for multiple targets.
+- **A runtime interpreter (execute the `.yml` on the fly).** Rejected — that is building
+  another mini Dify runtime, defeating the whole point of compiling to library-grade pure
+  Python and leaving the platform, and contradicting ADR 0009's framework-free stance.
+- **Generate async code.** Rejected — the family is fully synchronous;
+  `ThreadPoolExecutor` covers parallelism and is more readable and offline-runnable.
+- **Put PyYAML into core `dependencies`.** Rejected — only the parse stage needs it;
+  lazy import + the `[dify]` extra keep "`import ragspine` pulls zero heavy deps" true.
+
+## Consequences
+
+- A new `[dify]` extra (PyYAML); core `dependencies` and the offline core are unchanged.
+- Unsupported nodes produce a **runnable skeleton + warning** — users get scaffolding they can
+  fill in directly, not a failed compile.
+- The IR layer reserves extension points for later targets (spineagent orchestration, real
+  token estimation, dynamic optimization).
+- The record was initially **proposed**: the six defaults awaited review; any change follows
+  supersede-don't-edit (a new record or a status flip).
+
+## P7 follow-up (2026-06-24): accepted
+
+> The historical decision text above is untouched (supersede, don't edit). This section
+> converges §7 defaults **#1 / #4** from proposed to **accepted** and records the P7
+> additions; the record's status flips `proposed → accepted` with it.
+
+- **Default #1 (target runtime) → accepted & advanced.** `target='spineagent'` is implemented
+  (MVP, minimal offline-runnable path). A workflow with tool-use structure (≥ 1 tool node)
+  maps onto spineagent's `Coordinator` / `FunctionCallingAgent`, entry point
+  `run_agent(inputs, *, provider=None) -> AgentResult`; with no tool node it raises
+  `DifyCompileError(code='dify.no_agent_structure')` suggesting `target='ragspine'`.
+- **Default #4 (unsupported nodes) → refined & accepted.** Three node types —
+  knowledge-retrieval / parameter-extractor / tool — move from `NotImplementedError` hooks to
+  **real code generation**: knowledge-retrieval → `build_narrative_retriever + retrieve`
+  (`KNOWLEDGE_CHUNK_DB` defaults to `':memory:'`, an offline empty store);
+  parameter-extractor → `provider.chat(tools=[function-tool schema])` parsing `tool_calls`;
+  tool → a spineagent `@function_tool` placeholder + its invocation site. **Only nodes that
+  genuinely need external side effects** (http-request, …) remain hooks — a compiler cannot
+  conjure external side effects, and leaving a fillable skeleton is the honest behavior.
+- **New: the `answer_question` fold pass** (`codegen/fold.py`, on by default, switched by
+  `fold_answer_question`): when the IR structurally matches the
+  `start → knowledge-retrieval → llm(context points at that retrieval) → answer/end` Q&A
+  skeleton, it folds into a single `ragspine.answer_question(...)` call — shorter and more
+  correct than hand-wiring retrieve + chat (built-in anti-fabrication "not found" rewrite +
+  provenance).
+- **Reaffirmed:** the compiler itself adds **no runtime dependency** — generated code imports
+  ragspine retrieval primitives / spineagent, but `ragspine.dify`'s own imports stay clean;
+  `mypy --strict` / ruff / `filterwarnings=error` all green.
