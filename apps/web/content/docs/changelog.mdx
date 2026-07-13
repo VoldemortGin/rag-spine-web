@@ -7,37 +7,10 @@ This page tracks **user-facing** changes per release: API shapes, configuration 
 packaging, and dependencies. For the reasoning behind a change, follow the linked
 [ADR](/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
 
-## 0.8.1
+## 0.9.0
 
-**Extension-seam hardening.** Three governance seams from the breadth backlog are formalized
-so third-party backends can plug in *through* the invariant conformance packs, never around
-them. Pure structural work — every default path stays **byte-identical**, and the anti-fabrication
-ratchet holds at zero.
-
-### Added
-
-- **`TraceSink` seam + privacy-trace conformance.** The privacy-aware trace sink is a
-  registrable seam (`make_trace_sink` / `RAGSPINE_TRACE_SINK`), so observability can fan out to
-  OpenTelemetry / files *through* a conformance pack that rejects or scrubs any payload carrying
-  an answer / fact value / chunk text. A real `OtelTraceSink` ships behind the optional `[otel]`
-  extra; a lineage-leaking sink **fails** the pack.
-- **`FactStore` Protocol.** The structured store is now a `@runtime_checkable` Protocol with the
-  stdlib-sqlite `SqliteFactStore` as the default (`make_fact_store` / `RAGSPINE_FACT_STORE`),
-  opening DuckDB / Postgres adapters as a follow-up. Its conformance pack binds the two
-  storage-side invariants — **found-determinism** (a miss returns empty, never a fabricated
-  value) and **provenance survival** (`source_doc_id` + locator persist through upsert/query) —
-  with reverse-proof stubs that must fail.
-- **`Extractor` provenance conformance pack.** Every registered extractor (xlsx · pptx · pdf ·
-  docx · pptx-rich) is asserted over real fixtures to carry non-null `source_doc_id` + cell
-  locators; a lineage-dropping stub fails on both dimensions.
-
-### Dependencies
-
-- One new **optional, permissive-license, lazy-imported** extra: `[otel]` (OpenTelemetry,
-  Apache-2.0). No new non-optional runtime dependency.
-
-**Source connectors, relation-graph provenance, domain chunking & streaming.** The same
-release opens three more opt-in seams, a streaming answer endpoint, `.txt` ingestion, and two
+**Source connectors, relation-graph provenance, domain chunking & streaming.** This release
+opens three more opt-in seams, a streaming answer endpoint, `.txt` ingestion, and two
 ergonomics helpers — all default-off and **byte-identical** when unselected.
 
 ### Added
@@ -77,6 +50,35 @@ ergonomics helpers — all default-off and **byte-identical** when unselected.
 - One new **optional, permissive-license, lazy-imported** extra: `[connectors]` (`httpx`,
   needed only by the `http` / `notion` connectors). No new non-optional runtime dependency; the
   offline default path is unchanged.
+
+## 0.8.1
+
+**Extension-seam hardening.** Three governance seams from the breadth backlog are formalized
+so third-party backends can plug in *through* the invariant conformance packs, never around
+them. Pure structural work — every default path stays **byte-identical**, and the anti-fabrication
+ratchet holds at zero.
+
+### Added
+
+- **`TraceSink` seam + privacy-trace conformance.** The privacy-aware trace sink is a
+  registrable seam (`make_trace_sink` / `RAGSPINE_TRACE_SINK`), so observability can fan out to
+  OpenTelemetry / files *through* a conformance pack that rejects or scrubs any payload carrying
+  an answer / fact value / chunk text. A real `OtelTraceSink` ships behind the optional `[otel]`
+  extra; a lineage-leaking sink **fails** the pack.
+- **`FactStore` Protocol.** The structured store is now a `@runtime_checkable` Protocol with the
+  stdlib-sqlite `SqliteFactStore` as the default (`make_fact_store` / `RAGSPINE_FACT_STORE`),
+  opening DuckDB / Postgres adapters as a follow-up. Its conformance pack binds the two
+  storage-side invariants — **found-determinism** (a miss returns empty, never a fabricated
+  value) and **provenance survival** (`source_doc_id` + locator persist through upsert/query) —
+  with reverse-proof stubs that must fail.
+- **`Extractor` provenance conformance pack.** Every registered extractor (xlsx · pptx · pdf ·
+  docx · pptx-rich) is asserted over real fixtures to carry non-null `source_doc_id` + cell
+  locators; a lineage-dropping stub fails on both dimensions.
+
+### Dependencies
+
+- One new **optional, permissive-license, lazy-imported** extra: `[otel]` (OpenTelemetry,
+  Apache-2.0). No new non-optional runtime dependency.
 
 ## 0.8.0
 
