@@ -181,6 +181,7 @@ function Footer() {
 
         <div className="grid grid-cols-2 gap-x-12 gap-y-2 text-sm sm:grid-cols-3">
           <FooterLink href="/docs">Docs</FooterLink>
+          <FooterLink href="/workflows">Workflows</FooterLink>
           <FooterLink href="/docs/getting-started">Getting Started</FooterLink>
           <FooterLink href="/docs/concepts">Concepts</FooterLink>
           <FooterLink href="/docs/architecture">Architecture</FooterLink>

@@ -38,6 +38,11 @@ export function baseOptions(): BaseLayoutProps {
         url: docsRoute,
         active: 'nested-url',
       },
+      {
+        text: 'Workflows',
+        url: '/workflows',
+        active: 'url',
+      },
       familyMenu,
     ],
     githubUrl: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
