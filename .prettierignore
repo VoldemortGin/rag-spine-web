@@ -12,3 +12,4 @@ apps/*/content/**/*.mdx
 # Release-validated workflow artifacts are byte-for-byte snapshots whose SHA-256
 # values are checked by tests; formatting them would invalidate catalog integrity.
 apps/web/public/workflows/*.yml
+apps/web/src/data/workflow-catalog.json

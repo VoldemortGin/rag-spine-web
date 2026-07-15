@@ -1,0 +1,128 @@
+app:
+  description: "Spine-authored workflow generated from a natural-language request."
+  icon: "🧩"
+  icon_background: "#E4FBCC"
+  mode: workflow
+  name: "Entertainment Document Processing: Short Form Health"
+  use_icon_as_answer_icon: false
+dependencies:
+  - type: marketplace
+    current_identifier: null
+    value:
+      marketplace_plugin_unique_identifier: langgenius/openai:0.3.8@592c8252795b5f75807de2d609a03196ed02596b409f7642b4a07548c7ff57ef
+kind: app
+version: "0.6.0"
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features: {}
+  graph:
+    nodes:
+      - id: start_1
+        data:
+          desc: ""
+          selected: false
+          type: start
+          title: Start
+          variables:
+            - variable: "document_text"
+              label: "Document text"
+              max_length: null
+              options: []
+              type: paragraph
+              required: true
+            - variable: "processing_requirements"
+              label: "Processing requirements"
+              max_length: null
+              options: []
+              type: paragraph
+              required: true
+        height: 90
+        position: {x: 30, y: 220}
+        positionAbsolute: {x: 30, y: 220}
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - id: llm_1
+        data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: ""
+          type: llm
+          title: Generate result
+          model:
+            provider: langgenius/openai/openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              max_tokens: 2048
+          prompt_template:
+            - id: generated-system
+              role: system
+              text: "You are the specialist for this workflow. Goal: Use-case contract: document-processing. Organize explicit document content according to the processing requirements while preserving provenance cues such as headings or page labels when supplied. Output requirement: Return one valid JSON object with requested fields, source_cues, missing_fields, and processing_warnings. Specific use case: Help entertainment teams extract and organize supported document information for supplied material centered on short, form, health, video; preserve evidence and mark missing information.\nFollow the goal precisely, state material uncertainty, and return a focused result."
+            - id: generated-user
+              role: user
+              text: "Document text:\n{{#start_1.document_text#}}\n\nProcessing requirements:\n{{#start_1.processing_requirements#}}"
+          selected: false
+          vision:
+            enabled: false
+            configs:
+              variable_selector: []
+        height: 120
+        position: {x: 334, y: 220}
+        positionAbsolute: {x: 334, y: 220}
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - id: end_1
+        data:
+          desc: ""
+          type: end
+          title: End
+          outputs:
+            - variable: "document_record"
+              value_selector: [llm_1, text]
+              value_type: string
+          selected: false
+        height: 90
+        position: {x: 638, y: 220}
+        positionAbsolute: {x: 638, y: 220}
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+    edges:
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: start
+          targetType: llm
+        id: start_1-source-llm_1-target
+        source: start_1
+        target: llm_1
+        sourceHandle: source
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: llm
+          targetType: end
+        id: llm_1-source-end_1-target
+        source: llm_1
+        target: end_1
+        sourceHandle: source
+        targetHandle: target
+        type: custom
+        zIndex: 0
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.7

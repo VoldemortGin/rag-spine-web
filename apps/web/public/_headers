@@ -7,31 +7,7 @@
   Content-Type: image/png
 /apple-icon
   Content-Type: image/png
-/workflows/batch-content-processing.yml
+/workflows/*
   Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="batch-content-processing.yml"
-  X-Content-Type-Options: nosniff
-/workflows/conditional-response-routing.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="conditional-response-routing.yml"
-  X-Content-Type-Options: nosniff
-/workflows/executive-summary.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="executive-summary.yml"
-  X-Content-Type-Options: nosniff
-/workflows/multilingual-translation.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="multilingual-translation.yml"
-  X-Content-Type-Options: nosniff
-/workflows/parallel-perspective-analysis.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="parallel-perspective-analysis.yml"
-  X-Content-Type-Options: nosniff
-/workflows/rag-paper-qa.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="rag-paper-qa.yml"
-  X-Content-Type-Options: nosniff
-/workflows/structured-information-extraction.yml
-  Content-Type: application/yaml; charset=utf-8
-  Content-Disposition: attachment; filename="structured-information-extraction.yml"
+  Content-Disposition: attachment
   X-Content-Type-Options: nosniff
