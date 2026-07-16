@@ -1,0 +1,111 @@
+---
+title: ADR 0016 — 检索产品化配置
+description: 元数据过滤、多索引路由、父子分块预设与经济模式，同时保全每一条检索不变量。
+---
+
+**状态：** accepted
+
+**日期：** 2026-07-14
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
+
+属于 [ADR 0002 产品方向](/zh/docs/decisions/adr-0002)。受
+[ADR 0005](/zh/docs/decisions/adr-0005)（新能力与逐字节一致的默认路径隔离）
+与 [ADR 0010](/zh/docs/decisions/adr-0010)（独立于模型输出的确定性安全/隔离）
+约束。它沿用了 [ADR 0015](/zh/docs/decisions/adr-0015) 的缝元模式。
+
+## 背景
+
+我们希望对齐 Dify 数据集检索的产品化界面——元数据过滤、
+多知识库路由、父子分段，以及经济模式与高质量模式——同时
+让 RAGSpine 的三条代码级不变量在每一种新模式下都保持完好：防编造机制、来源
+溯源，以及 RESTRICTED 双出口（`link/` + `rerank/`）隔离。默认的离线、
+零网络路径必须保持逐字节一致，并且参数化 conformance 必须绑定每一种模式，使其
+无法悄悄地让某条不变量回退。
+
+## 决策
+
+四项新增，全部离线确定、可选加入，且默认逐字节一致。每一项都遵循
+家族缝模式：Protocol + 零依赖确定性默认实现 + `make_*` 工厂 +
+环境变量选择器 + 参数化 conformance。
+
+### 1. 元数据过滤
+
+`retrieval/filtering/` 新增 `MetadataFilter`/`FilterCondition`：一个位于打分之前的确定性
+阶段，支持 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte` 和 `between`。字符串按
+字典序比较，字段缺失视为不匹配。`apply` 始终返回保持顺序的
+子序列，因此它只能收窄。由于两个出口仍会剥离 RESTRICTED，即使某个过滤器
+选中了受限内容，也无法将其暴露出来。
+
+它通过 `HybridRetriever.search(metadata_filter=)` 与
+`NarrativeIndex.retrieve(metadata_filter=)` 接入；默认 `None` 时逐字节一致。`automatic.py` 是一条
+可选加入的缝：`FilterExtractor` Protocol 加 `make_filter_extractor`（默认 `none` → `None`，
+离线的 `ControlledVocabFilterExtractor` 可选加入，LLM 抽取器作为可选适配器）。它的输出
+只能是一个 `MetadataFilter`，在结构上无法触及答案通道，并且只能收窄。
+
+### 2. 多索引与多路路由
+
+`retrieval/routing/multi_index.py` 中的 `MultiIndexRetriever` 实现了 A 线的
+`NarrativeRetriever` Protocol。它可以向多个库扇出，并使用 `lexical.rrf_fuse` 做跨库 RRF 融合；
+每条结果都会带上 `library_id`，使溯源保留来源库信息。
+
+路由模式使用 `LibraryRouter` 缝与 `make_library_router`。默认 `none` 扇出到全部库；
+确定性的 `KeywordLibraryRouter` 将查询与库描述做匹配；LLM 路由器
+为可选加入。零重叠时回退到全部库，因此路由绝不会让召回饿死。隔离性
+是继承来的：每个库的基础检索器已经移除了 RESTRICTED 内容，融合只能
+把其子集继续传递。
+
+### 3. 父子分块预设
+
+`chunking/domain_presets.py` 中的 `ParentChildChunker`（别名 `parent_child` 与
+`small_to_big`）是 `LayoutAwareChunker` 的一个薄子类。它只重写 `_child_extra`，附加
+`window_text`（父章节的完整文本）与 `parent_locator`（该章节真实的段落
+跨度）。因此一次精确的子块命中可以确定性地扩展到父级上下文，且溯源
+指向一个真实的定位符。
+
+基础 `Chunk` 新增增量式的 `parent_locator`（默认空值）以及一个可重写的钩子。
+默认分块器不设置这两个值，保持逐字节一致。此处复用现有的
+`CHUNKER_IMPLS` 溯源 conformance。
+
+### 4. 经济模式
+
+`retrieval/mode.py` 新增 `RetrievalMode` 与 `make_retrieval_mode`，由
+`ServiceConfig.retrieval_mode` 选择。现有的纯 BM25 路径（`embedding_backend=None`）成为
+显式的 `economy` 预设。装配阶段不构造 embedding 后端或向量存储，因此 embedding
+成本为零。`hybrid`/`vector` 选择另一套界面。默认 `auto` 表示 hybrid，其
+embedding 按 `ServiceConfig.embedding` 装配，保持之前的行为。
+
+每一种模式都由参数化 conformance 绑定，并附带非空洞的反向证明：
+
+- `tests/conformance/test_metadata_filter_invariants.py`：逐操作符的收窄/确定性，以及一个
+  必须失败的放宽桩。
+- `test_multi_index_isolation.py`：逐路由器的隔离/溯源，以及一个必须失败的泄漏基座。
+- `test_retrieval_mode_invariants.py`：逐模式的隔离/溯源，以及经济模式的零 embedding。
+
+原则：**把面向产品的能力放进默认路径旁的可选缝中，绝不放进其内部；
+让每一种模式继承并确定性地证明全部三条检索不变量。**
+
+## 已考虑并否决的备选方案
+
+- 让自动过滤抽取产出过滤条件之外的东西，比如答案改写：
+  这会打开一条编造通道。其返回类型被限定为 `MetadataFilter`。
+- 让过滤新增或重排候选：放宽/重排可能走私 RESTRICTED 内容，或
+  扰动逐字节一致的默认路径。`apply` 严格收窄且保持顺序。
+- 在 `MultiIndexRetriever` 内部剥离 RESTRICTED：这会复制出口并带来分歧风险。
+  每个库现有的出口负责隔离；融合从不读取 chunk。
+- 立即把父子模式改指向检索时的存储扩展：在做此决策时，该
+  分块器尚未接入叙事摄取，层级/窗口数据也未持久化。该预设先落地了
+  父级上下文加真实定位符。[ADR 0018](/zh/docs/decisions/adr-0018)
+  随后补全了这项被推迟的存储级扩展。
+- 用一个布尔 `economy` 开关：命名模式加工厂更契合家族缝模式，并把这个
+  选择暴露为一等配置。
+
+## 后果
+
+- 检索获得元数据过滤、多库路由、父子分段以及
+  经济/向量预设，同时默认离线路径保持逐字节一致与零网络。
+- 防编造机制、溯源（含来源库信息）以及 RESTRICTED 双出口隔离在
+  所有新模式下成立，并由 conformance 而非信任来强制执行。
+- 新增产物为 `retrieval/filtering/`、`retrieval/routing/`、`ParentChildChunker`、增量式的
+  `Chunk.parent_locator` 与 `_child_extra`、`retrieval/mode.py`、
+  `ServiceConfig.retrieval_mode`，以及三个 conformance 包。

@@ -1,0 +1,107 @@
+---
+title: Panoramica
+description: RAG a doppio canale in Python puro, interoperabilità dei flussi di lavoro, anteprima sicura e confini opzionali di esecuzione del servizio.
+---
+
+Il motore di RAGSpine è Python ordinario: interfacce tipizzate, dataclass, store espliciti e un
+flusso di controllo leggibile. `answer_question(...)` è il punto di ingresso per la composizione delle Q&A. Un dominio
+separato dedicato ai flussi di lavoro esegue il parsing, lo scaffolding, l'anteprima, la conversione e la compilazione di configurazioni compatibili con Dify; un
+servizio FastAPI opzionale espone tali operazioni e un executor deliberatamente disattivato per impostazione predefinita.
+
+Questa distinzione è importante. RAGSpine dispone di **superfici di interscambio** con Dify e n8n, ma non incorpora
+il runtime di nessuna delle due piattaforme, non scarica i loro marketplace a runtime e non richiede un framework a grafo per
+rispondere a una domanda.
+
+## Impegni architetturali
+
+<Cards>
+  <Card
+    title="Evidenze imposte dal codice"
+    description="I valori strutturati provengono dal fact store; un mancato riscontro diventa un rifiuto esplicito. Le risposte narrative conservano i localizzatori delle fonti."
+  />
+  <Card
+    title="Pacchetti di dominio"
+    description="Quindici domini di primo livello mantengono visibili le responsabilità di orchestrazione, archiviazione, recupero, interoperabilità, servizio e CLI."
+  />
+  <Card
+    title="Confini tipizzati"
+    description="Provider, embedding, store, chunker, reranker, code, connettori e matcher sono iniettati dietro Protocol."
+  />
+  <Card
+    title="Non esecutivo per impostazione predefinita"
+    description="Le operazioni di catalogo, scaffolding, parsing, conversione, compilazione, topologia e anteprima non eseguono flussi di lavoro. Le route di esecuzione sono disabilitate per impostazione predefinita."
+  />
+</Cards>
+
+## Ciclo di vita di una richiesta Q&A
+
+```text
+question
+  → deterministic security/intent screening
+  → clarification gateway
+  → optional service-edge FAQ short-circuit
+  → structured | narrative | composite route
+       structured: normalize → query fact store → found/not_found/unrecognized
+       narrative: filter → retrieve/fuse → rerank/postprocess → cited generation
+       composite: execute both evidence paths and merge
+  → anti-fabrication/provenance checks
+  → answer + sources
+```
+
+L'eventuale `history` viene inserito solo nella sequenza finale dei messaggi di generazione. Non modifica mai
+la decisione deterministica di intento/sicurezza, la query di recupero o ciò che conta come evidenza.
+
+Il percorso narrativo può utilizzare filtri sui metadati, instradamento per libreria con fusione RRF ed
+espansione parent/window a livello di store. I campi di citazione restano quelli dell'hit figlio; il testo espanso è
+contesto di generazione separato. Un figlio con restrizioni viene rimosso prima dell'espansione.
+
+## Ciclo di vita del flusso di lavoro
+
+```text
+description or JSON/YAML/TOML
+  → normalize to JSON-compatible mapping
+  → explicit template or catalog match
+  → reuse safe Dify workflow | generate fixed start→llm→end graph
+  → deterministic YAML/JSON + preview schema v1
+  → optional analyze / convert / compile
+  → explicit server-controlled execution gate (off by default)
+```
+
+Il catalogo è costituito da dati di pacchetto: 7 template curati più 993 descrittori generati. Gli URL upstream di Dify/n8n
+sono soltanto metadati di ricerca; nessun testo di flussi di lavoro upstream né alcuna credenziale viene ridistribuito.
+
+## Confini di fiducia
+
+- La libreria di base e il catalogo non richiedono alcuna chiave API.
+- Le route ordinarie del servizio per motore/catalogo/compilatore non hanno autenticazione applicativa integrata e devono
+  essere protette dall'infrastruttura di deployment.
+- Gli endpoint pubblici compatibili con Dify richiedono una app key Bearer; le operazioni CRUD pubbliche compatibili con n8n richiedono
+  `X-N8N-API-KEY`.
+- I webhook sono intenzionalmente privi di autenticazione e necessitano di controlli in ingresso.
+- L'esecuzione dei flussi di lavoro è inoltre vincolata da `RAGSPINE_DIFY_RUN_ENABLED=false` per impostazione predefinita.
+- Il livello di restrizione in-process non è una sandbox a livello di sistema operativo; i limiti di risorse dei sottoprocessi sono disponibili solo su Linux.
+
+## Come proseguire
+
+<Cards>
+  <Card
+    title="Canali"
+    href="/it/docs/architecture/channels"
+    description="Percorsi delle evidenze strutturato, narrativo, composito e a grafo."
+  />
+  <Card
+    title="Struttura dei pacchetti"
+    href="/it/docs/architecture/package-layout"
+    description="I quindici domini sorgente di primo livello."
+  />
+  <Card
+    title="Flussi di lavoro"
+    href="/it/docs/guides/workflows"
+    description="Catalogo, formati, anteprima, conversione e confine di esecuzione."
+  />
+  <Card
+    title="Flusso delle richieste"
+    href="/it/docs/architecture/request-flow"
+    description="Flusso di controllo dettagliato dell'agente."
+  />
+</Cards>

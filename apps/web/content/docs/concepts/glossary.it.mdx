@@ -1,0 +1,201 @@
+---
+title: Glossario
+description: Terminologia di RAGSpine — una definizione precisa per ogni termine, basata sul codebase.
+---
+
+Terminologia del progetto, in ordine alfabetico. Ogni termine è definito così come viene
+effettivamente usato nel codebase; per approfondimenti, consultare le pagine dei concetti collegate.
+
+### Guardia di prevenzione delle risposte inventate
+
+Il passaggio dell'orchestratore che riscrive una risposta in "non trovato" quando il canale strutturato
+non restituisce alcun fatto `found`. Applicato nel flusso di controllo (`agent/agent.py`), non in un prompt.
+Vedere [Prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication).
+
+### Chunk store
+
+Lo store basato su sqlite per i chunk dei documenti narrativi
+(`retrieval/chunking/chunk_store.py`). Ogni chunk contiene `doc_id` + `source_locator`
+(NOT NULL) più i metadati (`title`, `entity`, `period`, `sensitivity`, …).
+Le righe attuali persistono inoltre `parent_id`, `heading`, `window_text` e `parent_locator` per
+l'espansione small-to-big/window riservata alla sola generazione.
+
+### Modalità di recupero economy
+
+Il preset di servizio `economy` / `bm25` / `lexical`. Non costruisce né un backend di embedding né
+un vector store ed esegue esclusivamente il recupero lessicale.
+
+### Gateway di chiarimento
+
+Il passaggio (`clarify_scope`, `agent/intent.py`) che decide — mediante una deliberata asimmetria —
+se _chiedere prima_ (metrica mancante), _rispondere esplicitando le assunzioni_ (entità/periodo
+mancante) o _rifiutare_ (entità fuori ambito).
+
+### Composita (route)
+
+Una domanda che è al tempo stesso numerica e narrativa (una metrica riconosciuta + un indizio narrativo).
+L'agente esegue il percorso strutturato, quindi aggiunge una sezione di attribuzione narrativa.
+
+### Doppio canale
+
+Il percorso numerico strutturato + il percorso RAG narrativo, eseguiti in modo deterministico e — per
+le domande composite — confrontati e uniti. Vedere [Doppio canale](/it/docs/concepts/dual-channel).
+
+### `dim_key`
+
+La chiave naturale canonica in JSON ordinato sulle dimensioni di _identità_ di un fatto (`metric`,
+`entity`, `channel`, `period`). La chiave di conflitto per l'upsert `UNIQUE` nel fact store;
+riservata alla sola persistenza, ricalcolata in scrittura — mai un campo `Fact`.
+
+### `fact_metric`
+
+La tabella sqlite che contiene ogni fatto numerico strutturato, una riga per
+metrica × entità × periodo × canale, con la genealogia completa (`source_doc_id`,
+`source_locator`). Supportata da `storage/fact_store.py`.
+
+### Corto circuito FAQ
+
+Una cache di coppie domanda→risposta approvate da esperti di dominio (`service/faq/`) che bypassa l'LLM, posizionata
+davanti alla guardia di prevenzione delle risposte inventate, dietro esclusioni conservative. Vedere
+[Corto circuito FAQ](/it/docs/concepts/faq-short-circuit).
+
+### `found` / `not_found` / `unrecognized_param`
+
+Lo stato ternario restituito dal tool `query_metric`: esiste un valore (`found`), nessuna riga
+corrispondente (`not_found`), oppure un parametro non è stato normalizzabile in un codice controllato
+(`unrecognized_param`). Il canale strutturato non restituisce mai un'ipotesi.
+
+### Glossario (normalizzazione dei sinonimi)
+
+Il livello di mappatura (`common/glossary.py`) che normalizza i sinonimi ZH/EN/abbreviazioni in
+codici controllati di metrica / entità / periodo. Restituisce `None` per qualsiasi elemento non riconosciuto invece
+di tirare a indovinare — il punto di ingresso del canale strutturato.
+
+### Azienda principale / `CompanyProfile`
+
+L'identità aziendale propria del deployment, con le sue metriche, entità ed elenco di concorrenti, caricata
+dalla configurazione (`config/company.example.toml`). Nessuna azienda è codificata staticamente da nessuna parte; "ACME" è
+soltanto il profilo dimostrativo fittizio.
+
+### Slot di intento
+
+I quattro slot analizzati — `metric`, `entity`, `period`, `channel` — estratti da una
+domanda dal parser di intenti e usati per il routing e le query (`agent/intent.py`).
+
+### Turno di cronologia
+
+Una tupla `(role, text)` fornita a `answer_question(history=...)` o `/v1/ask`. La cronologia è esclusivamente contesto di
+generazione per l'LLM; è esclusa dalle decisioni di intento/sicurezza, dalle query di recupero e
+dalle evidenze.
+
+### IR / StyledGrid
+
+La rappresentazione intermedia congelata in cui i documenti vengono estratti (consapevole di stili e
+colori) prima dell'ingestione nel fact store e nel chunk store.
+
+### `IntentParser` (Protocollo)
+
+La giunzione componibile per l'estrazione degli intenti (ADR 0010). L'impostazione predefinita è
+`RuleIntentParser`, senza LLM e guidata dalla configurazione. **La sicurezza non è componibile** — il gate di sicurezza
+rideriva l'ambito dalla domanda grezza indipendentemente dal parser.
+
+### Reranking listwise
+
+Un reranker opzionale di seconda passata (`retrieval/rerank/listwise_rerank.py`) che invia i
+candidati migliori a un giudice LLM per l'ordinamento per rilevanza, con fallback all'ordine RRF in caso di
+qualsiasi errore. I candidati `RESTRICTED` non entrano mai nel prompt del giudice.
+
+### MockProvider
+
+L'implementazione deterministica e offline di `LLMProvider` (`agent/llm_provider.py`). Consente
+al core di funzionare completamente offline senza chiave API — l'impostazione predefinita per demo e test.
+
+### Canale narrativo
+
+Il percorso RAG per le domande di tipo "perché / cosa è successo": recupero ibrido → reranking opzionale →
+sintesi con citazioni. La catena predefinita è puro BM25 + RRF (nessun backend vettoriale collegato).
+
+### Filtro sui metadati
+
+Un predicato di restringimento validato sui metadati dei chunk. Gli operatori supportati sono `eq`, `ne`, `in`,
+`nin`, `gt`, `gte`, `lt`, `lte` e `between`; il filtraggio preserva l'ordine dei risultati in ingresso.
+
+### Recupero multi-indice
+
+Recupero per singola libreria seguito da fusione RRF. Ogni risultato conserva la provenienza `library_id`; in caso di
+errore di routing si ricade su tutte le librerie configurate.
+
+### Espansione parent-child
+
+Recupero small-to-big in cui il figlio determina il rank e la citazione, mentre il testo persistito del genitore/della finestra
+diventa `prompt_text` separati riservati alla sola generazione. I figli con restrizioni e le loro finestre vengono
+scartati insieme.
+
+### Provenienza
+
+Il `source_doc_id` (o `doc_id`) + `source_locator` trasportati da ogni fatto, chunk e
+risposta. Trasportata end-to-end, mai eliminata. Vedere [Provenienza](/it/docs/concepts/provenance).
+
+### Giunzione `Protocol`
+
+Un confine `Protocol` tipizzato in corrispondenza del quale viene iniettata una dipendenza esterna (provider LLM,
+backend di embedding, giudice listwise, backend OCR, retriever narrativo, coda di task). Il
+core non importa alcun SDK e dipende solo da queste astrazioni.
+
+### Protocollo di anteprima v1
+
+Una proiezione del flusso di lavoro esclusivamente per la visualizzazione, contenente versione, nodi/archi redatti e geometria
+deterministica. Non contiene prompt, variabili, provider, credenziali né configurazione eseguibile.
+
+### `query_metric`
+
+Il tool di function-calling del canale strutturato (`agent/query_tools.py`). Normalizza
+i propri parametri tramite il glossario, interroga `fact_metric` e restituisce il risultato ternario
+con la genealogia — mai un numero inventato.
+
+### Reciprocal Rank Fusion (RRF)
+
+Il metodo di fusione dei ranking che combina le classifiche BM25 e vettoriali nel recupero ibrido
+(`rrf_fuse`, `k=60`); ogni classifica contribuisce con `1 / (k + rank)` al punteggio fuso di un elemento.
+
+### Isolamento RESTRICTED
+
+L'invariante per cui il contenuto di livello `RESTRICTED` viene rimosso in due punti di uscita (`retrieval/link`
+e `retrieval/rerank`) prima che possa raggiungere un prompt. Vedere
+[Isolamento RESTRICTED](/it/docs/concepts/restricted-isolation).
+
+### Coda di revisione
+
+La macchina a stati della coda di revisione umana (esperti di dominio) per gli elementi ingeriti con bassa confidenza o in
+conflitto (`ingestion/review/`). Distinta dalla coda di job asincroni; lo `review_status` di un fatto
+(es. `pending`, `approved`, `rejected`, `blocked`) regola la visibilità nelle query.
+
+### Gate di sicurezza
+
+La porta d'ingresso deterministica e mai componibile (`agent/security_gate.py`, ADR 0010) che
+rileva le entità esterne/concorrenti tramite corrispondenza più lunga, le maschera con spazi
+di uguale lunghezza e rifiuta le domande fuori ambito prima di qualsiasi chiamata a tool / retriever / LLM.
+
+### Livello di sensibilità
+
+La classificazione per singolo chunk (`common/sensitivity.py`): `INTERNAL` per impostazione predefinita, elevata
+a `RESTRICTED` tramite segnali deterministici, guidati dalla configurazione e fail-safe.
+
+### Canale strutturato
+
+Il percorso numerico deterministico: normalizzazione tramite glossario → `query_metric` sullo
+store `fact_metric` → risposta generata dal valore del fatto, con genealogia. Non inventa mai un
+numero.
+
+### Catalogo dei flussi di lavoro
+
+Template di proprietà del pacchetto usati dal comando di scaffolding e dal sito web. Contiene 7 flussi di lavoro curati
+e 993 descrittori generati in 39 settori, 27 casi d'uso e cinque archetipi. Le pagine upstream
+di Dify/n8n sono solo metadati di origine; la loro configurazione dei flussi di lavoro non viene ridistribuita né
+scaricata a runtime.
+
+### Scaffolding del flusso di lavoro
+
+Un'operazione di pura configurazione che seleziona esplicitamente o trova per corrispondenza un template del catalogo, generando altrimenti
+un grafo `start → llm → end` Dify 0.6 fisso. Restituisce la configurazione ma non la scrive
+né la esegue; la CLI effettua separatamente l'output sicuro su file.

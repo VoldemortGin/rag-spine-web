@@ -1,0 +1,125 @@
+---
+title: Servizio
+description: Composizione FastAPI, ingestion asincrona, API del catalogo e di compatibilità dei flussi di lavoro, confini di autenticazione ed esecuzione disattivata per impostazione predefinita.
+---
+
+`ragspine.service` è una radice di composizione opzionale sopra il motore. Installa `[service]` per ottenere
+il supporto per FastAPI, uvicorn, RQ e Redis. Il servizio apre store di proprietà della richiesta/del job, inietta
+provider e matcher attraverso interfacce tipizzate e restituisce errori opachi senza traceback.
+
+## App factory
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config=None,
+    provider=None,
+    queue=None,
+    faq_cache=None,
+    workflow_matcher=None,
+)
+```
+
+Le dipendenze omesse vengono assemblate a partire da `ServiceConfig.from_env()`. Le istanze sono mantenute su
+`app.state`, il che le rende anche semplici da sostituire nei test. Quando `studio_dir` punta
+a una directory esistente, la sua build statica viene montata su `/studio`; una directory vuota o mancante
+non aggiunge quella route.
+
+## Gruppi di endpoint
+
+| Gruppo                     | Percorsi                                                          | Esegue lavoro?                         | Autenticazione                              |
+| -------------------------- | ----------------------------------------------------------------- | -------------------------------------- | ------------------------------------------- |
+| motore                     | `/healthz`, `/readyz`, `/v1/ask*`, ingestion/jobs                 | operazioni di ask e di coda            | nessuna integrata                           |
+| catalogo                   | `/v1/workflow-templates*`, `/v1/workflow-scaffold`                | no                                     | nessuna integrata                           |
+| compilatore/convertitore   | `/v1/dify/analyze`, `/compile`, `/v1/n8n/convert`, `/v1/topology` | no                                     | nessuna integrata                           |
+| esecuzione interna         | `/v1/dify/run*`, `/v1/n8n/run`                                    | sì, quando abilitata                   | flag di esecuzione; distribuire dietro la propria autenticazione |
+| API pubblica compatibile con Dify | `/v1/workflows/run*`, `/v1/info`, `/v1/parameters`                | route di esecuzione quando abilitata   | chiave app Bearer                           |
+| API pubblica compatibile con n8n  | `/api/v1/*`                                                       | CRUD; il webhook può eseguire quando abilitato | `X-N8N-API-KEY`                             |
+| webhook n8n                | `/webhook/{path}`                                                 | flusso di lavoro attivo corrispondente, quando abilitato | intenzionalmente nessuna                    |
+
+Le route generali del motore e quelle interne di `/v1/dify/*` non forniscono autenticazione utente. Effettua il binding su
+localhost/reti private oppure aggiungi un reverse proxy autenticato prima dell'esposizione pubblica.
+
+## Motore e ingestion
+
+`POST /v1/ask` e `/v1/ask/stream` eseguono il gate FAQ, le decisioni di intento/sicurezza, il recupero,
+la riscrittura di prevenzione delle risposte inventate e l'assemblaggio della provenienza. L'endpoint SSE completa tutte le protezioni prima di
+aprire lo stream. `AskRequest.history` è esclusivamente contesto di generazione opzionale e non può diventare
+evidenza di recupero.
+
+L'ingestion strutturata accetta `.xlsx`, `.xlsm`, `.pptx` e `.pdf`; i job narrativi accettano
+`.pptx` e `.pdf`. `RAGSPINE_ALLOWED_UPLOAD_ROOT` vincola i percorsi risolti. L'API accoda un
+riferimento al job in notazione puntata; il worker rivalida i percorsi e possiede le proprie connessioni SQLite.
+
+`FakeQueue` è sincrono/in memoria per i test. `RQQueue` è l'adattatore di produzione basato su Redis.
+Gli stati della coda sono `queued`, `started`, `finished` e `failed`; i report contengono conteggi/stati,
+non valori grezzi dei fatti né testo dei chunk.
+
+## Catalogo dei flussi di lavoro e compilatore
+
+Le pagine di elenco del catalogo contengono solo metadati. Le risposte di dettaglio e di scaffolding aggiungono il flusso di lavoro canonico,
+lo YAML Dify e la preview v1. Lo scaffolding può effettuare la corrispondenza semantica, ripiegare sulla corrispondenza lessicale oppure
+generare un grafo fisso; non esegue mai l'output.
+
+I corpi delle richieste analyze/compile di Dify contengono esattamente uno tra un oggetto canonico `workflow` e una stringa legacy `yaml`;
+i campi sconosciuti vengono rifiutati. L'analisi è esclusivamente statica. La compilazione restituisce una stringa di codice Python
+e non la esegue mai. Anche la conversione n8n è pura e restituisce avvisi di compatibilità espliciti.
+
+I corpi delle richieste POST dei flussi di lavoro selezionati sono limitati a 2 MiB prima che FastAPI li bufferizzi:
+`/v1/workflow-scaffold` e `/v1/dify/{analyze,compile,run,run/jobs}`. Il documento di flusso di lavoro decodificato
+è soggetto al limite del parser più stringente di 1 MiB. Le risposte di errore di validazione rimuovono i campi `input` e
+`ctx` riecheggiati da Pydantic, in modo che un segreto rifiutato non venga riflesso.
+
+## Esecuzione disattivata per impostazione predefinita
+
+`RAGSPINE_DIFY_RUN_ENABLED` ha come valore predefinito `false`. Finché non viene abilitata esplicitamente,
+`/v1/dify/run`, `/v1/dify/run/jobs`, `/v1/n8n/run`, l'esecuzione dei flussi di lavoro compatibile con Dify e l'esecuzione dei
+webhook n8n falliscono in modo sicuro (fail closed). Il provider, il modello, l'URL di base e i file dei flussi di lavoro delle app Dify provengono dalla
+configurazione del server; i client non possono iniettare un'espressione o una chiave di provider.
+
+L'esecuzione viene compilata e verificata dal gate statico L0. L'isolamento predefinito `inprocess` applica
+builtin/import ristretti e un timeout, ma non è una sandbox a livello di sistema operativo. `subprocess` aggiunge limiti di risorse
+Linux; su macOS e Windows ripiega sulle restrizioni in-process. Considera l'esecuzione di flussi di lavoro
+non attendibili come un confine di servizio separato e opportunamente indurito.
+
+## API pubblica compatibile con Dify
+
+`RAGSPINE_DIFY_PUBLIC_APPS` è un registro separato da punti e virgola come
+`app-key=/srv/workflows/support.yml;other-key=/srv/workflows/report.yml`. Le richieste usano
+`Authorization: Bearer app-key`. Se il registro è assente, non valido, o la chiave è sconosciuta, queste
+route restituiscono `401`.
+
+L'API supporta `POST /v1/workflows/run`, `GET /v1/workflows/run/{id}`, `GET /v1/info` e
+`GET /v1/parameters`. Le richieste di esecuzione forniscono `inputs`, `user` e `response_mode`; non forniscono
+il flusso di lavoro. Lo streaming usa SSE dopo l'esecuzione e riproduce gli eventi di trace. I dati di dettaglio delle esecuzioni sono una
+LRU locale al processo delle ultime 100 esecuzioni, isolata per chiave app; non costituiscono uno storico durevole.
+
+## API pubblica compatibile con n8n e webhook
+
+Imposta `RAGSPINE_N8N_API_KEY`; i client inviano `X-N8N-API-KEY`. Se nessuna chiave è configurata, ogni
+richiesta a `/api/v1/*` restituisce `401`. Il CRUD e l'attivazione dei flussi di lavoro, oltre a elenco/lettura/eliminazione delle esecuzioni,
+sono supportati dalla radice del filesystem `RAGSPINE_N8N_STORE_PATH` (predefinita `data/n8n_store`). I limiti degli elenchi
+hanno come valore predefinito 100, sono vincolati all'intervallo 1–250 e usano cursori.
+
+`GET|POST /webhook/{path}` non ha deliberatamente alcuna verifica della chiave API, in linea con il comportamento dei webhook. Effettua la corrispondenza
+solo con il nodo webhook di un flusso di lavoro attivo e richiede comunque che l'esecuzione sia abilitata. I parametri di query
+e un corpo JSON di tipo oggetto formano gli input, con precedenza alle chiavi del corpo. Metti controlli di ingresso, TLS, rate limiting
+e policy sulla dimensione delle richieste davanti a questa route.
+
+## Eseguire il servizio
+
+Dalla radice del repository:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+
+# separate process; Redis required
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```
+
+Consulta [API HTTP](/it/docs/reference/http-api) per le route esatte e [Configurazione](/it/docs/reference/configuration)
+per la superficie delle variabili d'ambiente.

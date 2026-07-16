@@ -1,0 +1,95 @@
+---
+title: FAQ 短路
+description: 一个经领域专家审核的"问题到回答"缓存，绕过 LLM——由保守的排除规则把关，因为它位于防编造机制守卫的前面。
+---
+
+FAQ 缓存对已知问题返回经领域专家（SME）审核的回答，完全绕过 LLM、
+事实存储和检索器。它是一项延迟与成本优化——同时也是一个
+**高风险层**，因为它位于防编造机制守卫的_前面_。一次错误的
+短路会跳过下游全部安全检查。
+
+<Callout type="warn">
+  正因为 FAQ 层位于[防编造机制](/zh/docs/concepts/anti-fabrication)之前，它的
+  排除规则刻意保守：结构化数值类、竞争对手、实时、已过期、
+  已禁用和 `RESTRICTED` 条目**绝不**短路。
+</Callout>
+
+## 它的位置
+
+在 `/v1/ask` 路由（`service/api/routes.py`）中，FAQ 查询最先运行：
+
+```python
+# 1) FAQ short-circuit — on hit, never touches provider / fact store / retriever
+hit = faq_cache.lookup(req.question, reference_date=ref)
+if hit is not None:
+    return AskResponse(..., route="faq", answer=hit.answer, sources=[...])
+
+# 2) miss -> normal workflow (anti-fabrication guard, dual channel, ...)
+result = answer_question(req.question, store, provider, ...)
+```
+
+`lookup` 是一个纯函数（`service/faq/faq_cache.py`）：它咨询 `parse_intent` /
+`clarify_scope` 做边界判定，但绝不触达 LLM、事实存储或
+检索器。匹配只做归一化后的精确/别名匹配（NFKC + casefold + 空白
+折叠 + 去尾部标点）——没有模糊匹配或 embedding 匹配。
+
+## 保守的排除规则
+
+只要下列任一条成立，`lookup` 就返回**未命中**（`None`）——这些排除规则在
+查询缓存索引_之前_检查：
+
+<Accordions>
+  <Accordion title="超出作用域/竞争对手实体">
+    若 `clarify_scope` 返回 `CLARIFY_OUT_OF_SCOPE_ENTITY`，或解析出的 `external_entity`
+    已设置，则问题涉及外部/竞争对手实体——绝不短路，以保留安全
+    拒答路径。
+  </Accordion>
+  <Accordion title="结构化数值类问题">
+    若路由为 `ROUTE_STRUCTURED`，或任一结构化槽位被填充（`metric` / `entity` /
+    `period` 或它们的多值形式），则问题想要一个实时数字——它必须走
+    结构化通道及其溯源，而不是一个缓存字符串。
+  </Accordion>
+  <Accordion title="实时/时效性线索">
+    若（归一化后的）问题含有实时线索——"今天"、"现在"、"最新"、"current"、
+    "latest"、"股价"等——固定的缓存回答会过时，因此排除。线索扫描
+    使用与索引相同的 NFKC/casefold 归一化，全角变体无法蒙混过关。
+  </Accordion>
+  <Accordion title="已过期（超出有效期窗口）">
+    每个条目可携带 `valid_from` / `valid_until`。若参考日期落在闭
+    区间之外——或日期解析失败——则视为超出窗口并排除。
+  </Accordion>
+  <Accordion title="已禁用">
+    `enabled = false` 的条目在索引构建时被过滤，并在查询时再做一次防御性
+    复查。
+  </Accordion>
+  <Accordion title="RESTRICTED 敏感级">
+    任何 `sensitivity` 为 `RESTRICTED`（不区分大小写、去除首尾空白）的条目绝不
+    短路——与 [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)保持一致。
+  </Accordion>
+</Accordions>
+
+## 一个 FAQ 条目
+
+条目经领域专家审核并做版本跟踪；命中会携带自己的溯源信息
+（`FAQHit.source`）：
+
+```json
+{
+  "id": "what-is-ragspine",
+  "question": "RAGSpine 是什么？",
+  "aliases": ["What is RAGSpine?"],
+  "answer": "RAGSpine 是一个无框架的后端 RAG 引擎……",
+  "source": "internal/faq-handbook.md",
+  "version": 3,
+  "enabled": true,
+  "valid_from": "2026-01-01",
+  "valid_until": null,
+  "sensitivity": "INTERNAL"
+}
+```
+
+<Callout type="info">
+  命中返回 `route: "faq"`，附带 `cache` 块（`hit`、`type`、`faq_id`、`version`、`source`）。
+  trace 只记录 `cache_hit`、`faq_id` 和 `faq_version`——绝不记录回答文本。通过
+  `RAGSPINE_FAQ_SOURCE` 环境变量加载 FAQ JSON。
+</Callout>

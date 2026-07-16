@@ -1,0 +1,235 @@
+---
+title: Flusso delle richieste
+description: Il flusso di controllo dettagliato — dalla domanda al parsing dell'intento, il gate di chiarimento, il cortocircuito FAQ, il routing e la guardia di prevenzione delle risposte inventate — ancorato passo dopo passo al codice.
+---
+
+Questa pagina è l'espansione autorevole del flusso in una riga presente nella
+[panoramica](/it/docs/architecture/overview). Ogni passo qui sotto è riconducibile all'orchestratore
+`answer_question(...)` in `agent/agent.py`, al parser a regole e al gateway in `agent/intent.py`,
+e alla cache al bordo del servizio in `service/faq/faq_cache.py`.
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`AgentResult` trasporta `answer`, `route`, `clarification`, `tool_results` e `sources`. Con il valore
+predefinito `decomposer=None`, il normale percorso a domanda singola è rigorosamente ordinato: le
+decisioni di chiarimento e rifiuto precedono le chiamate a tool, recupero o generazione di quel
+percorso. Il pre-passaggio opzionale di decomposizione e quello HTTP per le FAQ restano all'esterno
+del percorso normale e sono descritti separatamente qui sotto.
+
+`history` è soltanto contesto di generazione. Viene normalizzato in messaggi per il provider dopo
+il parsing dell'intento e il chiarimento, tra il messaggio system e la domanda corrente. Non prende
+mai parte al parsing dell'intento, alle decisioni di sicurezza, alle query di recupero o
+all'assemblaggio di prove e citazioni. Una richiesta decomposta passa la stessa cronologia a ogni
+sotto-domanda protetta dall'intera catena di guardie.
+
+<Steps>
+
+<Step>
+### Decomposizione opzionale — pre-passaggio opt-in
+
+Quando viene iniettato un `decomposer`, `answer_question` lo chiama prima di entrare nel normale
+percorso di intento e chiarimento per una singola domanda. Il componente incluso
+`LLMQueryDecomposer` può quindi effettuare una chiamata al provider in questo punto. È opt-in; il
+valore predefinito `None` non effettua tale chiamata.
+
+Se il decompositore restituisce più di una sotto-domanda, ciascuna esegue ricorsivamente l'intero
+percorso `answer_question` con la decomposizione disabilitata, applicando in modo indipendente
+parsing dell'intento, chiarimento, guardia di sicurezza, recupero e riscrittura anti-invenzione. Il
+risultato finale `route="decomposed"` è una concatenazione deterministica con fonti deduplicate; la
+sintesi non chiama il modello. Un solo risultato, una risposta non valida o un errore del provider
+fanno ripiegare sul percorso normale originale.
+
+</Step>
+
+<Step>
+### Parsing dell'intento — quattro slot
+
+`RuleIntentParser` (sostituibile dietro il Protocol `IntentParser`, l'implementazione predefinita delega a
+`parse_intent`) trasforma la domanda grezza in un `ParsedIntent` con **quattro slot**, più una
+route scelta. Il parsing è basato su regole e **non usa alcun LLM** — è deterministico e offline.
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'str | None',
+      description: 'Codice metrica normalizzato (es. REVENUE) tramite il glossario; None se assente.',
+    },
+    entity: {
+      type: 'str | None',
+      description:
+        'Codice entità normalizzato (es. ACME_CN), abbinato sul testo mascherato per sicurezza; None se assente.',
+    },
+    period: {
+      type: '(str, str) | None',
+      description:
+        '(period_type, value), es. ("FY", "2024"), ("HY", "2024H1"), ("QUARTER", "2025Q1").',
+    },
+    channel: {
+      type: 'str',
+      description: 'Canale di distribuzione; il valore predefinito è "TOTAL" e non è mai None.',
+    },
+  }}
+/>
+
+Prima della corrispondenza, `parse_intent` esegue il `detect(...)` del gate di sicurezza per mascherare qualsiasi
+menzione di un concorrente, così un'entità esterna mascherata non può mai trapelare in una corrispondenza con l'entità principale. La route viene
+scelta a partire dagli slot e da indizi lessicali tra tre costanti: `ROUTE_STRUCTURED`,
+`ROUTE_NARRATIVE` o `ROUTE_COMPOSITE` (una metrica riconosciuta **e** un indizio narrativo).
+
+</Step>
+
+<Step>
+### Gate di chiarimento — chiedere, rifiutare o assumere
+
+`clarify_scope(intent, ...)` restituisce un `ClarificationResult` il cui `mode` è una di quattro
+costanti. I rami vengono verificati esattamente in questo ordine:
+
+<Tabs items={['out_of_scope_entity', 'ask_first', 'answer_with_assumptions', 'none']}>
+  <Tab value="out_of_scope_entity">
+    **Rifiuto — verificato per primo nel normale percorso a domanda singola.** Il gate invoca un
+    `SecurityGate.screen(...)` deterministico sulla **domanda grezza** (non sul campo `external_entity` parsato), così
+    sostituire il parser con un LLM non può eludere il rifiuto. Se il verdetto è fuori ambito/concorrente,
+    `answer_question` restituisce immediatamente il messaggio di rifiuto da questo percorso — nessun tool,
+    nessun recupero e nessun'altra chiamata LLM.
+    Questo è il return anticipato `CLARIFY_OUT_OF_SCOPE_ENTITY`.
+  </Tab>
+  <Tab value="ask_first">
+    **Ambiguo → chiedere.** Se `intent.metric is None` (e la route non è narrativa), il gate
+    restituisce `CLARIFY_ASK_FIRST` con una domanda che elenca le metriche supportate. Indovinare la metrica
+    sarebbe un errore sostanziale, quindi l'agente chiede invece di assumere — e restituisce la domanda
+    di chiarimento senza ulteriori chiamate LLM.
+  </Tab>
+  <Tab value="answer_with_assumptions">
+    **Entità / periodo mancante → assumere ed esplicitarlo.** Un `entity` mancante assume come valore predefinito l'entità
+    principale dal `CompanyProfile`; un `period` mancante assume come valore predefinito l'ultimo anno fiscale completo
+    (`("FY", str(year - 1))`). L'assunzione viene esposta come banner `【假设】…（如需收窄：…）`
+    con opzioni di restringimento in un clic. La risposta prosegue comunque.
+  </Tab>
+  <Tab value="none">
+    **Completamente specificato.** Tutti gli slot richiesti sono presenti (oppure la route è narrativa, che non richiede
+    chiarimenti sugli slot) — si procede direttamente al routing.
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  L'asimmetria è deliberata: una **metrica** mancante ferma il flusso per chiedere, mentre
+  un'**entità o un periodo** mancante prosegue con un'assunzione esplicitata. Indovinare *quale numero* è un
+  errore grave; indovinare *di chi* / *quando* è recuperabile e reversibile dall'utente.
+</Callout>
+</Step>
+
+<Step>
+### Cortocircuito FAQ — il bordo del servizio
+
+Questo passo esiste solo quando il servizio HTTP fa da frontend al motore (`POST /v1/ask`). È un
+pre-passaggio esterno: prima che il gestore della route chiami `answer_question` o apra il fact
+store o il retriever, chiama `faq_cache.lookup(question, ...)`.
+Un hit approvato restituisce un `AskResponse(route="faq", ...)` con la risposta in cache e la provenienza
+— **non raggiunge mai il provider, il fact store o il retriever**.
+
+Aspetto cruciale: il livello FAQ riutilizza le stesse decisioni `parse_intent` / `clarify_scope` per applicare
+**esclusioni conservative** — una qualsiasi di queste lo rende un miss deliberato, così la domanda passa
+all'agente completo:
+
+- strutturata-numerica (la route è `structured`, oppure uno qualsiasi degli slot metrica/entità/periodo è valorizzato),
+- entità concorrente / fuori ambito,
+- indizi in tempo reale / sensibili al tempo (今天, 现在, 最新, latest, current, 股价 …),
+- scaduta (fuori dalla finestra `valid_from`/`valid_until` dell'elemento),
+- disabilitata (`enabled` è false),
+- sensibilità `RESTRICTED`.
+
+<Callout type="info">
+  La cache FAQ si trova **davanti** alla guardia di prevenzione delle risposte inventate. Le sue esclusioni esistono
+  precisamente perché non possa mai cortocircuitare una domanda che ha bisogno della guardia — vedi
+  [Cortocircuito FAQ](/it/docs/concepts/faq-short-circuit).
+</Callout>
+</Step>
+
+<Step>
+### Route — strutturata / narrativa / composita
+
+Su un miss FAQ (o nel percorso puro Python), l'agente smista in base a `intent.route`:
+
+- **`narrative`** → `_run_narrative(...)` contro il `NarrativeRetriever` iniettato.
+- **`structured`** → espansione in sotto-task. Un singolo sotto-task esegue il ciclo di uso dei tool
+  `query_metric` (`_run_tool_loop`, limitato a `MAX_TOOL_ITERATIONS = 5`); più sotto-task
+  (l'utente ha elencato esplicitamente diverse metriche/entità/periodi) vengono eseguiti **deterministicamente
+  senza LLM** (`_run_subtasks` → `_multi_subtask_answer`).
+- **`composite`** → esegue il percorso strutturato, poi anche `_run_narrative(...)`, aggiungendo
+  l'attribuzione sotto un'intestazione `归因分析：` e concatenando le fonti.
+
+Vedi [Canali](/it/docs/architecture/channels) per ciò che ogni route esegue internamente.
+
+</Step>
+
+<Step>
+### Guardia di prevenzione delle risposte inventate — riscrittura in "non trovato"
+
+Per il percorso strutturato, il modello non ha mai l'ultima parola su un numero. `_structured_answer`
+ispeziona i risultati dei tool, non la prosa del modello:
+
+- **Qualsiasi `found`** → il testo del modello viene **scartato interamente** e ogni riga di risposta viene ricostruita
+  deterministicamente dal valore del fatto più la sua discendenza (`实体 期间 指标（渠道）：值 单位（来源…）`).
+  Un LLM in produzione potrebbe insinuare un numero inventato aggiuntivo nella sua prosa, quindi la prosa viene eliminata.
+- **`not_found`** → riscritto in un rifiuto onesto (`查不到 … 为避免误导，不提供任何推测数字`).
+- **`unrecognized_param`** → indica per nome il parametro che non è riuscito a normalizzare.
+
+Il percorso narrativo è l'eccezione deliberata: si fida della prosa del modello ma **impone
+la citazione delle fonti**, aggiungendo qualsiasi documento sorgente che la risposta ha omesso di nominare. Quando il provider
+fallisce, entrambi i percorsi degradano onestamente (un messaggio "servizio AI temporaneamente non disponibile"), mai un
+numero. Vedi [Prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication) per l'invariante completo.
+
+</Step>
+
+<Step>
+### Risposta + fonti
+
+L'orchestratore restituisce un `AgentResult` con la `answer` (eventualmente riscritta), la
+`route` scelta, il `tool_results` e `sources` — ogni fatto e citazione porta con sé
+`source_doc_id` + locator. Una traccia rispettosa della privacy registra solo codici, conteggi e tempistiche —
+mai la risposta, il valore del fatto o il testo del chunk.
+
+</Step>
+
+</Steps>
+
+## Il percorso completo a colpo d'occhio
+
+```text
+HTTP service outer pre-step (before answer_question):
+  faq_cache.lookup → vetted hit returns; else call answer_question
+
+answer_question(question, store, provider, …)
+  0. optional decomposer:
+       >1 subquestions → answer each with full guards, then deterministic route="decomposed"
+       one/failure     → continue through the normal single-question path
+  1. parse → ParsedIntent { metric, entity, period, channel, route }   # no LLM
+  2. clarify_scope(intent):
+       out_of_scope_entity      → return refusal            (no further tool / retrieval / LLM)
+       ask_first (no metric)    → return clarifying question (no further LLM)
+       answer_with_assumptions  → set defaults + banner, continue
+     history → provider generation messages only; never intent/security/retrieval/evidence
+  3. route on intent.route:
+       narrative  → _run_narrative
+       structured → single: _run_tool_loop (query_metric, ≤5 iters)
+                     multi : _run_subtasks (deterministic, no LLM)
+       composite  → structured, then append _run_narrative under 归因分析
+  4. anti-fabrication guard (_structured_answer):
+       found              → discard model text, rebuild from fact value + lineage
+       not_found          → rewrite to honest refusal
+       unrecognized_param → name the bad parameter
+       (narrative path: trust prose, force citations)
+  5. return AgentResult { answer, route, tool_results, sources }
+```

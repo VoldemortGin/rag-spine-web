@@ -1,0 +1,109 @@
+---
+title: Python API
+description: コアオーケストレーション、ストア、検索、ワークフローのフォーマット/ひな形生成/プレビュー、および Dify/n8n 変換のエントリポイント。
+---
+
+このページでは、安定した合成サーフェスを紹介します。シンボルレベルの pdoc サイトが必要な場合は、ソースのチェックアウトで `make docs` を実行してください。
+
+## エージェントオーケストレーション
+
+```python
+from collections.abc import Sequence
+from datetime import date
+
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` は `tuple[str, str]` です。アシスタントロールとして認識されるのは `assistant` のみで、それ以外のロールはユーザーとして正規化されます。履歴はシステムメッセージと現在の質問の間に挿入され、生成にのみ使用されます。意図解析、セキュリティ判断、検索クエリ、エビデンス/引用の組み立てに送られることは決してありません。
+
+`AgentResult` は `answer`、`answer_plain`、`route`、省略可能な `clarification`、`tool_results`、および `sources` を公開します。`answer_plain` は、`sources` を別途レンダリングする UI のために、インライン引用のサフィックスを省いたものです。
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+```
+
+`FactStore` は実行時チェック可能な `Protocol` です。Protocol ではなく `SqliteFactStore` をインスタンス化してください。`Fact.metric(...)` は、凍結された識別フィールドを取り違えることなくファクトを構築するためのキーワード専用ヘルパーです。保存されるすべてのファクトは `source_doc_id` と `source_locator` を保持します。
+
+## ナラティブストレージと検索
+
+ナラティブの `Chunk`/`StoredChunk` レコードには、追加的な `parent_id`、`heading`、`window_text`、`parent_locator` フィールドが含まれます。既存の SQLite データベースは追加的にマイグレーションされます。親子展開とセンテンスウィンドウ展開はストア/検索レイヤーで行われます。子ヒットは引用のために自身のテキスト、チャンク ID、ロケータを保持したまま、`window_text` は生成専用の別個の `prompt_text` になり得ます。制限付き（restricted）の子は展開前に除外され、親/ウィンドウを通じて漏洩することはありません。
+
+検索は、メタデータフィルタ演算子 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte`、`between` をサポートします。フィルタは絞り込みのみを行い、結果の順序を保持します。`MultiIndexRetriever` は選択された各ライブラリを個別にクエリし、RRF でランキングを融合し、`library_id` の出典情報を付与します。ルーターが失敗した場合は、設定済みのすべてのライブラリを検索します。エコノミーモードでは、埋め込みバックエンドもベクトルストアも構築されません。
+
+## ワークフロードキュメント
+
+```python
+from ragspine.workflows.formats import (
+    dump_dify_yaml,
+    dump_json,
+    load_workflow,
+    parse_workflow,
+)
+
+workflow = load_workflow("workflow.toml")
+same_shape = parse_workflow('{"app":{"mode":"workflow"}}', format="json")
+json_text = dump_json(workflow)
+yaml_text = dump_dify_yaml(workflow)
+```
+
+受け付けられるすべての JSON/YAML/TOML 入力は、JSON 互換のマッピングに正規化されます。TOML テキストは、`.toml` パスから読み込まれる場合を除き、明示的なフォーマット指定が必要です。フォーマットパーサーは、重複キー、非有限数、安全でない YAML、サイズ過大またはネストが深すぎるドキュメントを拒否します。ファイルローダーはリンクと通常ファイル以外も拒否します。
+
+## カタログとひな形生成
+
+```python
+from ragspine.workflows import scaffold_workflow
+
+result = scaffold_workflow(
+    "invoice extraction and approval",
+    template_id=None,
+    reuse=True,
+)
+print(result.workflow)
+print(result.yaml)
+```
+
+ひな形生成はファイルシステムに対して純粋です。設定を返すだけで、書き込みも実行も一切行いません。カタログ API の list/get は防御的コピーを返します。テンプレートを明示的に指定した場合は信頼度 `1` が返されます。それ以外の場合、マッチングは設定されたスコア/マージンのしきい値を使用し、固定生成にフォールバックします。
+
+CLI はこれに加えて、安全なアトミック/排他的ファイル作成を担当します。
+
+## プレビュー v1
+
+ワークフロープレビュービルダーは、`preview_schema_version: 1`、`nodes`、`edges` を持つ表示専用の JSON 互換オブジェクトを返します。そこに含まれるのはジオメトリとラベルであり、プロンプト、変数、認証情報、プロバイダー設定、実行可能コードは含まれません。レンダリングの前にバージョンを検証してください。プレビュー JSON を実行系に戻して入力してはいけません。
+
+## Dify と n8n
+
+`ragspine.dify` は Dify YAML を中間表現に解析し、それを分析して、`ragspine` または `spineagent` ターゲット向けの命令型 Python を生成します。コード生成は実行ではありません。
+
+`ragspine.n8n.n8n_to_dify` と `ragspine.n8n.dify_to_n8n` は純粋な変換を行い、ターゲットのマッピングと警告を返します。サポートされないセマンティクスは、暗黙のうちに等価であると見なされるのではなく、明示的に報告されます。可能な場合、ラウンドトリップのために元の n8n メタデータが保持されます。
+
+## アプリファクトリ
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config,
+    provider=provider,
+    queue=queue,
+    faq_cache=faq_cache,
+    workflow_matcher=workflow_matcher,
+)
+```
+
+サービスパッケージはオプションです。そのワークフロー実行サーフェスはデフォルトで無効化されており、クライアントから提供されたプロバイダー式を受け付けることはできません。

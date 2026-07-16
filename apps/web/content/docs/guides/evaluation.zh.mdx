@@ -1,0 +1,265 @@
+---
+title: 评估
+description: QA 与抽取评估工具链——四门 QA 指标、按通道的抽取准确率，以及只升不降、绝不静默下调的基线回归门。
+---
+
+`eval` 领域（`src/ragspine/eval/`）是 RAGSpine 的评估闭环：两套工具链
+（QA 与抽取）以版本控制的黄金集为准给引擎打分，外加一个
+在回归时让 CI 失败的**基线门**。它的指导性不变量：
+
+> 基线门**只升不降**——回归必须让门失败，绝不能
+> 静默地调低它。绝不为了让某个用例通过而弱化黄金数据或基线。
+
+## 目录结构
+
+<Files>
+  <Folder name="eval" defaultOpen>
+    <File name="qa_eval.py" />
+    <File name="extraction_eval.py" />
+  </Folder>
+</Files>
+
+黄金数据与基线数据位于 `data/golden/`（强制纳入版本控制），
+抽取的 ground-truth fixture 位于 `data/fixtures/`。
+
+## QA 评估——四道门
+
+`qa_eval.py` 是问答闭环工具链。入口：
+
+```python
+def run_qa_eval(
+    golden_path: str | Path,
+    mode: str = "tool",
+    kb_dir: str | Path | None = None,
+) -> QAEvalReport: ...
+```
+
+它加载并校验黄金集，构建一个确定性的合成知识库
+（`build_eval_kb`，来自模块内的 `_EVAL_FACT_ROWS` + `_EVAL_NARRATIVE_DOCS`），以两种模式之一
+（`EVAL_MODES = ("tool", "agent")`）运行每个用例，并返回一份四门报告。
+
+<Cards>
+  <Card
+    title="tool 模式"
+    description="零 LLM、直连工具：parse_intent → clarify_scope → execute_query_metric / 叙事检索。确定性。"
+  ></Card>
+  <Card
+    title="agent 模式"
+    description="完整编排器：使用确定性的 MockProvider(reference_date=...) 运行 answer_question。"
+  ></Card>
+</Cards>
+
+每个用例（`GoldenCase`：`id`、`question`、`case_type`、`expected`、`tags`、
+`reference_date`）都被运行为一个归一化的 `CaseOutcome`（路由、澄清模式、found
+值/单位/来源、拒答标志、来源列表、工具状态），然后按**四道
+门**打分——保持为四个独立的通过率，绝不合并成一个数字：
+
+<TypeTable
+  type={{
+    NUMERIC_ACCURACY: {
+      type: '"numeric_accuracy"',
+      description:
+        '精确匹配：found_value == expected.value 且 found_unit == expected.unit（结构化路径）。',
+    },
+    CITATION_VALIDITY: {
+      type: '"citation_validity"',
+      description:
+        '答案正确 + 来源错误 = 失败。期望来源必须匹配，且文档必须出现在回答文本中。',
+    },
+    REFUSAL_APPROPRIATENESS: {
+      type: '"refusal_appropriateness"',
+      description:
+        '双向判定：若 expected.refuse，则必须已拒答且 found_value 为 None；否则必须未拒答。',
+    },
+    CLARIFICATION_APPROPRIATENESS: {
+      type: '"clarification_appropriateness"',
+      description:
+        '双向判定：clarification_mode == expected.clarification（信息完整的问题不得触发澄清提问）。',
+    },
+  }}
+/>
+
+`GATE_METRICS` 是这四项的元组。第五个独立指标跟踪拒答用例上的
+编造情况：
+
+<Callout type="warn">
+  `FABRICATION = "fabrication"` 仅在拒答用例上通过
+  `detect_fabricated_numbers(answer)` 计算：它剥离期间 token（从当前
+  profile 的时间维度加入白名单），并把剩余的任何数字都视为编造。目标是 **0**。
+  它被刻意*不*并入四道门。
+</Callout>
+
+报告类型：
+
+- `GateMetric` — `name`、`total`、`passed`、`pass_rate`（`total == 0` 时为 `1.0`，否则为
+  `passed / total`）、`failures`、`by_tag`。
+- `QAEvalReport` — `mode`、`n_cases`、`metrics: dict[str, GateMetric]`，以及独立的
+  `fabrication: GateMetric`（带 `fabrication_count` 属性）。`evaluate(cases, outcomes, mode)` 对每个用例应用全部四条门规则。
+
+## 忠实度与有据性门（0.7.0+）
+
+上面的四道门对引用匹配、拒答和澄清打分——但它们从未检查
+**叙事**回答是否真的_被其检索片段所蕴含_，而这恰恰是
+幻觉发生之处。`eval/groundedness.py` 用**两道新的棘轮
+门**补上了这个缺口：
+
+<TypeTable
+  type={{
+    FAITHFULNESS: {
+      type: '"faithfulness"',
+      description:
+        '叙事回答中的每条断言都必须被检索上下文所蕴含。捕捉最常见的编造形态：引入片段中不存在的实体 / 数字 / 论断的断言。',
+    },
+    ANSWER_ACCURACY: {
+      type: '"answer_accuracy"',
+      description:
+        '自由文本的叙事回答必须覆盖期望文档的实质内容。此前叙事用例没有内容正确性评分——只有引用 / 拒答 / 澄清。',
+    },
+  }}
+/>
+
+`GROUNDEDNESS_METRICS = (faithfulness, answer_accuracy)` 是**同一个
+`report.metrics` 中的新键**，因此它们并入与四道门**相同的基线棘轮**（见下文）——
+以 `1.0` 重新设定基线，并在 `--mode tool` 和 `--mode agent` 两种模式下都参与把关。四个
+`GATE_METRICS` 保持其**完全一致**的语义；没有任何合并。
+
+默认方法是**离线确定性的词法重叠蕴含判定**
+（`LexicalOverlapJudge`：当且仅当断言的内容 token 被上下文覆盖的比例超过
+阈值时视为被蕴含）——无模型、无网络，因此 `make ci` 可以完全离线把关。上下文只在
+**评估侧**被观测；默认的 `answer_question` 循环逐字节不变。
+
+<Callout type="warn">
+  默认判定器是**词法代理，不是真正的 NLI**——对改写、否定和
+  数值反转都是盲的；它捕捉最常见的编造形态（上下文中不存在的
+  新 token），并通过一个反向测试得到验证：无蕴含的断言会**未通过**该门，而
+  忠实的复述则通过。真正的 ONNX-NLI 判定器（`[eval]`）和位于
+  `EntailmentJudge` 缝（`make_entailment_judge`）之后的 LLM 判定器（`[llm]`），以及上下文精确率 / 召回率 /
+  答案相关性，都是诚实的后续计划。
+</Callout>
+
+这使防编造机制成为叙事通道上**被度量的**回归锁，而不只是
+被声称的——该不变量如今在它真正失效的地方得到检查。
+
+## QA 基线回归把关
+
+`qa_eval.py` 还负责基线比较：
+
+- `make_baseline_entry(report) -> dict` → `{"metrics": {name: pass_rate}, "fabrication_count": int, "n_cases": int}`。
+- `compare_to_baseline(report, baseline) -> BaselineComparison` — **当任何一道
+  门的 `pass_rate` 低于其基线阈值，或 `fabrication_count` 高于
+  基线时，门失败。** 只检查基线中列出的指标；恰好相等则通过。每条
+  回归记录 `metric`、`baseline`、`current`、`delta`。
+
+**没有硬编码阈值**——阈值就是先前存储在
+`data/golden/qa_baseline.json` 中的按模式通过率。基线通过实际观测到的
+运行结果棘轮式上升。
+
+## QA 工具链——CLI
+
+`scripts/run_qa_eval.py` 从项目根目录驱动工具链：
+
+<Tabs items={['run', 'save a report', 'update baseline']}>
+  <Tab value="run">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool
+    ```
+  </Tab>
+  <Tab value="save a report">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode agent --report out/qa_report.json
+    ```
+  </Tab>
+  <Tab value="update baseline">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool --update-baseline
+    ```
+  </Tab>
+</Tabs>
+
+参数：`--mode {tool,agent}`（默认 `tool`）、`--golden`（默认
+`data/golden/qa_golden_set.jsonl`）、`--report`、`--baseline`（默认
+`data/golden/qa_baseline.json`）、`--update-baseline`。门按模式分别设键：没有基线的
+模式在首次运行时自动生成基线并通过（exit 0）；有基线时，任何一道
+门回归或编造计数上升都会以 exit 1 退出。
+
+## 黄金数据格式
+
+`data/golden/qa_golden_set.jsonl` 每行一个 JSON 对象。每个用例携带 `id`、
+`question`、`case_type`（`numeric` / `clarification` / `refusal` / `narrative` /
+`composite` 之一）、`expected`（总是包含 `clarification` ∈ `{none, ask_first, answer_with_assumptions}`
+和 `refuse: bool`；numeric/composite 额外有 `value` + `unit` +
+`source`；narrative/composite 额外有 `narrative_doc`）、`tags` 和一个 `reference_date`。
+
+```json
+{
+  "id": "num-001",
+  "question": "香港FY2025的REVENUE是多少",
+  "case_type": "numeric",
+  "expected": {
+    "clarification": "none",
+    "refuse": false,
+    "value": 1702.0,
+    "unit": "USD_M",
+    "source": { "doc": "ACME_FY2025_Results.pptx", "locator": "slide=5,table=1,row=2,col=3" }
+  },
+  "tags": { "topic": "FIN", "scope": "ACME_HK", "qtype": "must_not_clarify" },
+  "reference_date": "2026-06-12"
+}
+```
+
+<Callout type="info">
+  黄金集使用虚构的 ACME 公司与合成数字。`data/golden/`
+  被强制跟踪，以确保基线不会漂移出版本控制。
+</Callout>
+
+## 抽取评估
+
+`extraction_eval.py` 按通道给办公文档抽取打分：
+
+```python
+def run_eval(
+    facts: list[dict[str, object]],
+    ground_truth: dict[str, object] | list[dict[str, object]],
+) -> EvalReport: ...
+```
+
+它按 `sheet!cell_ref` 将抽取出的 `facts` 与 ground truth 对齐，只评估
+双方都存在的单元格，并在**三个通道**上计算准确率：
+
+| 通道               | 常量                                        | 比较的事实字段      |
+| ------------------ | ------------------------------------------- | ------------------- |
+| 单元格值           | `CELL_VALUE = "cell_value"`                 | `value`             |
+| 颜色映射           | `COLOR_MAPPING = "color_mapping"`           | `tags`              |
+| 表头归属           | `HEADER_ATTRIBUTION = "header_attribution"` | `merge_span`        |
+
+类型：`ChannelMetric`（`name`、`total`、`correct`、`accuracy`、`mismatches`）、`EvalReport`
+（`channels: dict[str, ChannelMetric]`、`n_facts`）。回归门是
+`compare_to_baseline(metrics, baseline) -> BaselineComparison`：任何 `accuracy`
+低于其阈值的通道都失败（`passed=False`）；只检查基线中列出的
+通道；恰好相等则通过。Ground-truth fixture 位于 `data/fixtures/`（如
+`fixtures_ground_truth.json`、`pdf/pdf_ground_truth.json`、`pptx/pptx_ground_truth.json`）。
+
+## 相关阅读
+
+<Cards>
+  <Card
+    title="防编造机制"
+    href="/zh/docs/concepts/anti-fabrication"
+    description="拒答与编造指标所保护的行为。"
+  />
+  <Card
+    title="溯源"
+    href="/zh/docs/concepts/provenance"
+    description="引用有效性门所检查的链路。"
+  />
+  <Card
+    title="Agent"
+    href="/zh/docs/guides/agent"
+    description="agent 模式评估所驱动的编排器。"
+  />
+  <Card
+    title="CLI 与脚本"
+    href="/zh/docs/getting-started/cli-and-scripts"
+    description="run_qa_eval.py 与其他仓库根目录脚本。"
+  />
+</Cards>

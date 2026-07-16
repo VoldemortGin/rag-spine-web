@@ -1,0 +1,51 @@
+---
+title: 'ADR 0006: Asticella di qualità — invarianti come property test, più un benchmark reale di recupero'
+description: Definisce la qualità come garanzie dimostrate da property test, più un benchmark reale ed etichettato di recupero; l'accuratezza di dominio è rimandata ai dati dell'utente.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002).
+
+## Contesto
+
+Tutta la valutazione è attualmente auto-consistenza sintetica: il golden set di QA (41 casi)
+ottiene un punteggio di 1.0 rispetto a una KB sintetica allineata a mano; l'harness A/B di recupero usa
+un gold basato su hash lessicale che, come dichiara la sua stessa docstring, dimostra solo "la matematica
+dell'harness, non il recall reale"; nessun LLM reale, corpus reale o modello di embedding reale viene eseguito in CI. Per una
+libreria general-purpose, l'accuratezza dipende intrinsecamente dai dati dell'utente — un punteggio
+da leaderboard non spetta a RAGSpine.
+
+## Decisione
+
+Definire la qualità come **garanzie, non punteggi**:
+
+1. **Primario — invarianti come property test.** La prevenzione delle risposte inventate non inventa mai,
+   la provenienza delle fonti è sempre presente, RESTRICTED non trapela mai, il comportamento è deterministico —
+   consolidare queste garanzie, da pochi test a livello agent, in property test esaustivi. Questa è
+   la ragione per scegliere RAGSpine rispetto a un framework carico di dipendenze.
+2. **Più un benchmark reale di recupero.** L'unica affermazione che _è_ propria di RAGSpine —
+   "il recupero ibrido + reranking listwise batte il BM25 naïf" — è una proprietà del motore, non una
+   proprietà dei dati dell'utente. Sostenerla con un benchmark di recupero reale (non sintetico) ed
+   etichettato che riporti numeri reali (Recall@k, MRR), eseguito in una corsia dedicata (non necessariamente
+   a ogni CI).
+
+Il benchmarking dell'accuratezza di dominio è esplicitamente rimandato ai dati dell'utente.
+
+## Alternative considerate (respinte)
+
+- **Valutazione dell'accuratezza su dati reali come gate di rilascio (opzione A)**: set etichettati reali + modelli
+  reali su tutti i canali come asticella. Respinta — l'accuratezza dipende dai
+  dati/modello dell'utente, che la libreria non può possedere.
+- **Gate di CI sintetico + benchmark completo pubblicato separatamente (opzione B)**: respinta come
+  _impostazione_ (qualità centrata sui numeri di accuratezza), ma la sua porzione "pubblicare un benchmark
+  reale" è adottata solo per l'affermazione sul recupero.
+
+## Conseguenze
+
+- "done / 1.0" significa _invarianti dimostrate_, non _accuratezza su dati sintetici_.
+- Il benchmark di recupero condiziona la promozione del backend vettoriale reale fuori dallo stato
+  sperimentale ([0005](/it/docs/decisions/adr-0005)).
+- Mantiene intatto il ciclo di CI veloce, offline e deterministico come sentinella di regressione.

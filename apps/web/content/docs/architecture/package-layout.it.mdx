@@ -1,0 +1,79 @@
+---
+title: Layout dei package
+description: I quindici package di dominio sotto src/ragspine e le loro responsabilità.
+---
+
+L'attuale `main` contiene **15 package di dominio di primo livello** sotto `src/ragspine/` (escluso
+`__pycache__`). Il layout è organizzato package-per-funzionalità anziché con una suddivisione orizzontale
+controllers/models/utils.
+
+```text
+src/ragspine/
+├── agent/       intent, security, tool loop, provider seam, answer orchestration
+├── cli/         installed ragspine command
+├── common/      profile, glossary, sensitivity, observability, shared constants
+├── dify/        Dify parser, IR, optimizer, code generation, restricted execution support
+├── eval/        QA, extraction, retrieval, faithfulness, and regression gates
+├── extraction/  Office/PDF/text extraction and StyledGrid IR
+├── fixtures/    package fixtures used by demos/tests
+├── graph/       provenance-aware structured/narrative relation graph seams
+├── ingestion/   structured facts, narrative chunks, sources, manifests, review queue
+├── n8n/         pure n8n ↔ Dify conversion
+├── pipeline/    static engine topology values and Mermaid/DOT/JSON export
+├── retrieval/   chunking, filtering, routing, lexical/vector search, rerank, postprocess
+├── service/     FastAPI app, public compatibility APIs, queue, jobs, FAQ, config
+├── storage/     fact-store protocol and SQLite implementation
+└── workflows/   catalog, source policy, formats, matching, scaffold, preview v1
+```
+
+## Responsabilità e confini
+
+### Nucleo del motore
+
+`common`, `storage`, `extraction`, `ingestion`, `retrieval`, `agent`, `graph` e `eval` implementano
+il percorso delle evidenze. Gli SDK pesanti vengono importati negli adapter, non nelle definizioni delle giunzioni del nucleo. Un'installazione
+base semplice e `MockProvider` preservano il percorso deterministico offline.
+
+`retrieval` include ora `filtering/` per predicati espliciti sui metadati e `routing/` per
+la selezione/fusione multi-libreria. I dati parent-child/window sono memorizzati nel chunk store in modo che
+sopravvivano ai riavvii e possano essere espansi dopo un hit su un chunk figlio senza modificare l'identità delle citazioni.
+
+### Interoperabilità dei flussi di lavoro
+
+`workflows` è responsabile dell'ingestione sicura delle configurazioni e del comportamento di catalogo/scaffolding. È l'unica fonte
+della proiezione di visualizzazione preview-v1. `dify` è responsabile del parsing semantico/IR/codegen di Dify. `n8n` converte
+tra JSON di n8n e mapping in formato Dify con avvisi e metadati di round-trip.
+
+Questi domini possono preparare codice o configurazione, ma non lo eseguono implicitamente. L'esecuzione è una
+responsabilità del servizio con un gate esplicito.
+
+### Punti di confine
+
+`cli` è il punto di confine locale installato. `service` è il punto di confine di rete/composizione e importa ampiamente per
+assemblare le risorse. `pipeline` è un piccolo livello statico di valori/esportazione del grafo per la topologia reale del motore;
+è distinto da un'anteprima del flusso di lavoro.
+
+## Due rappresentazioni del grafo
+
+| Rappresentazione    | Responsabile | Scopo                                                                        |
+| ------------------- | ----------- | ------------------------------------------------------------- |
+| `PipelineGraph`     | `pipeline`  | ispezionare la topologia assemblata del motore; Mermaid/DOT/JSON           |
+| workflow preview v1 | `workflows` | proiezione UI sicura di un singolo flusso di lavoro; solo nodi/archi/geometria |
+
+Nessuna delle due rappresentazioni esegue i nodi.
+
+## Regola pratica per import e dipendenze
+
+Il codice di dominio dipende da piccoli contratti e valori; gli adapter dipendono verso l'interno da tali contratti.
+`service` e `cli` sono radici di composizione. I nuovi SDK di fornitori vanno collocati in un adapter opzionale con un
+import lazy e test di conformità. I client dei flussi di lavoro non devono aggirare la policy delle fonti, i limiti di formato,
+la redazione dell'anteprima o il gate di esecuzione del server.
+
+<Cards>
+  <Card title="Funzioni comuni" href="/it/docs/guides/common" />
+  <Card title="Ingestione" href="/it/docs/guides/ingestion" />
+  <Card title="Recupero" href="/it/docs/guides/retrieval" />
+  <Card title="Valutazione" href="/it/docs/guides/evaluation" />
+  <Card title="Flussi di lavoro" href="/it/docs/guides/workflows" />
+  <Card title="Servizio" href="/it/docs/guides/service" />
+</Cards>

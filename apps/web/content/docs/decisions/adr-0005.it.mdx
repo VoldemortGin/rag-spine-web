@@ -1,0 +1,48 @@
+---
+title: 'ADR 0005: Core snello — mettere in quarantena le capacità dormienti come moduli experimental/extras'
+description: Distribuire solo ciò che viene eseguito nel percorso offline predefinito; spostare l'OCR, il vettore semantico reale e il verificatore a doppio canale in moduli/extras sperimentali chiaramente etichettati.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Record immutabile. Esente dal tracciamento del drift (nessun `covers`). Sostituire con un nuovo ADR, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002). Vincolato da [0003](/it/docs/decisions/adr-0003).
+
+## Contesto
+
+Quasi ogni sottosistema conteneva codice compilato e testato ma **non collegato alla
+pipeline in esecuzione**: l'estrattore OCR per PDF scansionati (parcheggiato nella coda di
+revisione, mai invocato), il verificatore a doppio canale (orfano, invocato solo dal suo
+stesso test), il canale vettoriale (completamente collegato, ma l'unico backend offline è
+un hash lessicale autodichiaratamente non semantico; gli embedding reali rinviati
+all'infrastruttura GPU), il rilevamento delle legende a colori
+(solo nei test), uno stub di OpenAIProvider e due famiglie di estrazione parallele (la legacy
+`extract_facts` vs `StyledGrid`). Per una libreria che le persone valutano, del codice dall'aspetto morto che
+in realtà non viene eseguito è un problema di fiducia.
+
+## Decisione
+
+Distribuire un **core snello** contenente solo ciò che viene eseguito nel percorso offline predefinito: BM25 +
+canale strutturato + agent + prevenzione delle risposte inventate. Spostare l'OCR, il vettore semantico reale e il
+verificatore a doppio canale in **moduli / extras sperimentali chiaramente etichettati**,
+documentati come "collegati, richiedono GPU/extra, non coperti dalle garanzie predefinite". Mantenere **un
+unico percorso di estrazione attivo** (ritirare o mettere in quarantena la duplicazione legacy/`StyledGrid`). Ogni
+modulo sperimentale viene promosso nel core solo quando dispone di un percorso reale, testato in CI.
+
+## Alternative considerate (respinte)
+
+- **Collegare tutto prima di qualsiasi 1.0 (opzione A)**: dotare il canale vettoriale di un vero modello CPU
+  offline, aggiungere una corsia CI per l'OCR, collegare il verificatore. Respinta perché per ora troppo onerosa (è
+  la direzione finale per i singoli moduli man mano che si guadagnano la promozione).
+- **Mantenere lo stato attuale, documentando onestamente (opzione C)**: conservare la postura "distribuire il contratto, rinviare
+  l'attivazione" e limitarsi a elencare le lacune. Respinta — dà l'impressione di "codice dall'aspetto impressionante
+  che non viene eseguito".
+
+## Conseguenze
+
+- L'esperienza predefinita di `pip install` è onesta ed eseguibile end-to-end, al costo
+  di essere non semantica per impostazione predefinita (in coerenza con il default snello di [0009](/it/docs/decisions/adr-0009)).
+- La sezione "honest gaps" del README deve contrassegnare chiaramente ogni modulo sperimentale.
+- Definisce il criterio di promozione: un modulo entra nel core quando dispone di un percorso reale testato in CI
+  e (per il recupero) supporta il benchmark descritto in [0006](/it/docs/decisions/adr-0006).

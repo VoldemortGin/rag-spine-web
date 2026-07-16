@@ -53,7 +53,7 @@ export default function HomePage() {
               <Logo className="h-11 w-11" />
 
               <span className="font-mono text-xs uppercase tracking-[0.2em] text-fd-muted-foreground">
-                Apache-2.0 · Python 3.10+ · framework-free
+                Apache-2.0 · Python 3.11+ · framework-free
               </span>
 
               <h1 className="text-balance text-4xl font-extrabold leading-[1.05] tracking-tight text-fd-foreground sm:text-5xl lg:text-6xl">
@@ -62,8 +62,8 @@ export default function HomePage() {
 
               <p className="max-w-xl text-pretty text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
                 Deterministic dual-channel retrieval and agent orchestration, with anti-fabrication
-                and source provenance built in — no Dify, no LangGraph, no DSL. Just composable
-                Python.
+                and source provenance built in. The core stays plain Python, while Dify 0.6 and n8n
+                workflows are supported as portable interchange formats.
               </p>
 
               <div className="flex flex-wrap items-center gap-3 pt-1">

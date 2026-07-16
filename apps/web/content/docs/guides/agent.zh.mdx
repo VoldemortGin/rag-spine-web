@@ -1,0 +1,310 @@
+---
+title: Agent
+description: 编排层——四槽位意图解析、澄清网关、确定性安全门、三路分流、tool-use 循环、LLM provider 缝，以及分路径的防编造机制守卫。
+---
+
+`agent` 领域（`src/ragspine/agent/`）是 RAGSpine 的编排器。其模块 docstring
+概括了它所负责的流程：
+
+> 意图解析 → 澄清网关 → 安全门 → 三路分流 → tool-use 循环 → 合成回答
+>
+> _(意图解析 → 澄清网关 → 安全门 → 三路分流 → 工具调用循环 → 合成回答)_
+
+它只有一个公共入口——`answer_question`——并且是
+**防编造机制**守卫所在之处。概念部分参见[防编造机制](/zh/docs/concepts/anti-fabrication)，
+分流模型参见[双通道](/zh/docs/concepts/dual-channel)。
+
+## 目录结构
+
+<Files>
+  <Folder name="agent" defaultOpen>
+    <File name="agent.py" />
+    <File name="intent.py" />
+    <File name="llm_provider.py" />
+    <File name="query_tools.py" />
+    <File name="security_gate.py" />
+  </Folder>
+</Files>
+
+## intent — 四槽位解析
+
+`intent.py` 在 `IntentParser` Protocol 之后，把原始问题解析为一个 `ParsedIntent`
+dataclass。默认的 `RuleIntentParser` 零 LLM、配置驱动，并委托给
+模块级函数 `parse_intent(question, reference_date=None)`。
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: '归一化后的指标代码（如 REVENUE）；缺失时为 None。',
+    },
+    entity: {
+      type: 'string | null',
+      description: '归一化后的实体代码（如 ACME_CN）；缺失时为 None。',
+    },
+    period: { type: '(period_type, value) | null', description: '例如 ("FY", "2024")。' },
+    channel: { type: 'string', description: '默认为 "TOTAL"（如 AGENCY / BANCA / TOTAL）。' },
+  }}
+/>
+
+`ParsedIntent` 还携带 `route`、`raw_question`、多值槽位 `metrics` /
+`entities` / `periods`（用于显式列举的复合查询），以及 `external_entity`。分流
+常量：`ROUTE_STRUCTURED = "structured"`、`ROUTE_NARRATIVE = "narrative"`、
+`ROUTE_COMPOSITE = "composite"`。识别出指标且带有叙事线索时路由到
+`composite`；带有数值线索时路由到 `structured`；否则为 `narrative`。
+
+<Callout type="info">
+  `IntentParser` Protocol 要求实现必须填充 `raw_question`。正是这一点让
+  安全门能够独立于任何解析器产出的字段、对*原始*问题重新筛查——因此
+  换成 LLM 解析器也无法绕过作用域检查。
+</Callout>
+
+## intent — 澄清网关
+
+`clarify_scope(intent, reference_date=None) -> ClarificationResult` 在任何通道之前运行。
+它有四种模式：
+
+| 模式常量                          | 值                          | 触发时机                                                         |
+| --------------------------------- | --------------------------- | ---------------------------------------------------------------- |
+| `CLARIFY_OUT_OF_SCOPE_ENTITY`     | `"out_of_scope_entity"`     | 安全门在原始问题上命中——先拒答。                                 |
+| `CLARIFY_ASK_FIRST`               | `"ask_first"`               | 缺失**指标**——猜测它会构成实质性错误。                           |
+| `CLARIFY_ANSWER_WITH_ASSUMPTIONS` | `"answer_with_assumptions"` | 缺失**实体 / 期间**——回填并明示假设。                            |
+| `CLARIFY_NONE`                    | `"none"`                    | 信息完整，或走叙事路由。                                         |
+
+这种不对称是有意为之：缺失指标时**先提问**（`narrowing_options` 为
+支持的指标列表），而缺失实体或期间时则**带明示假设作答**——默认取
+主实体（`profile.home_entity_code`）和最近一个完整财年
+（`("FY", str(ref.year - 1))`），在 `assumption_note` 中同时列出两者，
+并提供一键收窄选项。作用域外拒答**最先**检查，先于
+叙事早退和指标检查，通过对 `intent.raw_question` 调用安全门实现——
+它有意不信任 `intent.external_entity`。
+
+`ClarificationResult` 的字段：`mode`、`assumed_slots`、`assumption_note`、
+`narrowing_options`、`question`。
+
+## security_gate — 确定性，绝不可插拔
+
+`security_gate.py` 包含 `SecurityGate(external_entities, home_company_name)`。它是
+确定性的，不调用任何 LLM，也不硬编码任何公司——竞争对手列表和主公司名称
+来自 `DomainProfile`。
+
+- `detect(text) -> SecurityScreen` — 最长匹配的外部/竞争对手别名检测。它
+  在去除空白字符的视图上匹配（因此 `"竞 安"` 无法绕过），并将命中处用
+  等长空格**掩码**掉，从而不留下任何泄漏子串（处理了文档中记录的
+  `中国 → ACME_CN` 冲突）。
+- `screen(*, raw_question, metric) -> SecurityVerdict` — 仅从**原始
+  问题**重新推导作用域。命中竞争对手时返回 `SECURITY_REFUSE_OUT_OF_SCOPE`
+  （`= "out_of_scope_entity"`，刻意与 `CLARIFY_OUT_OF_SCOPE_ENTITY` 取值相同），附带
+  拒答消息和一个"改为询问 `home_company_name`"的收窄选项；否则返回
+  `SECURITY_ALLOW`。
+
+## query_tools — `query_metric` 的三态
+
+`query_tools.py` 定义了结构化通道唯一的事实产出原语，即
+`query_metric` 函数调用工具。`execute_query_metric(store, metric, entity, period, channel="TOTAL")` 会将每个参数经词表归一化，查询
+`fact_metric` 存储，并恰好返回**三种**状态之一——绝不猜测：
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    精确值存在。返回 `value`、`unit`、受控维度代码，以及
+    `source` 下的完整来源链路（`{"doc", "locator"}`）。
+  </Tab>
+  <Tab value="not_found">
+    所有参数均已归一化，但没有匹配行。返回
+    `{"status": "not_found", "normalized": {...}}` ——不插值、不推断。
+  </Tab>
+  <Tab value="unrecognized_param">
+    某个参数无法归一化为受控代码（词表返回了 `None`）。
+    返回 `{"status": "unrecognized_param", "param": ..., "raw": ...}`。
+  </Tab>
+</Tabs>
+
+工具 schema 由 profile 派生（`build_query_metric_tool_anthropic` /
+`build_query_metric_tool_openai`，外加预构建常量），因此实体示例来自
+当前激活的 profile——绝不硬编码公司。
+
+## llm_provider — 可插拔的缝
+
+自 **0.3.0** 起，`LLMProvider` Protocol 归家族共享核
+[`corespine`](https://pypi.org/project/corespine/) 所有，并从
+`ragspine.agent.llm_provider` 重新导出。它遵循 **OpenAI chat-completions 形态**——单一的
+`chat` 方法：
+
+```python
+from corespine import ChatCompletion  # re-exported via ragspine.agent.llm_provider
+
+
+class LLMProvider(Protocol):
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion: ...
+```
+
+`messages` 是 OpenAI 形态的历史消息（每条为 `{"role", "content", ...}`）；系统提示词
+就是第一条 `{"role": "system", ...}` 条目，而非单独参数。一个
+`ChatCompletion` 携带 `choices: tuple[Choice, ...]`（每个 `Choice` 包装一个含
+`content` 和可选 `tool_calls` 的 `ResponseMessage`），外加 `usage`、`model` 和 `id`
+——标准的 chat-completions 信封，全部是来自 `corespine` 的 frozen dataclass。
+
+<Callout type="info">
+  **已在 0.3.0 迁移。** 之前的 `create_message(*, system, messages, tools) ->
+  ProviderResponse` 缝已移除；请改为实现 `chat(messages, *, tools=None) -> ChatCompletion`。
+  其理由与 corespine 边界参见 [ADR 0012](/zh/docs/decisions/adr-0012)。
+</Callout>
+
+<Cards>
+  <Card
+    title="MockProvider"
+    description="离线、确定性、无需 key 或网络。第一轮发出一个 query_metric 工具调用；第二轮确定性地渲染 found / not_found / unrecognized 文本。核心完全运行在它之上。"
+  ></Card>
+  <Card
+    title="AnthropicProvider"
+    description="真实的 Claude Messages API。SDK 在 __init__ 内延迟 import（ImportError 会提示你安装 [llm] extra）；它把 OpenAI 形态的 messages/tools 映射到 Anthropic API，并把响应映射回 ChatCompletion。SDK 错误被包装为 ProviderError；超时/重试委托给 SDK。"
+  ></Card>
+</Cards>
+
+`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`。目前尚未内置聊天用的 `OpenAIProvider`
+——只有一条文档化的缝（OpenAI 工具 schema 已在 `query_tools.py` 中预构建，
+且 `[llm]` extra 附带了用于 embeddings 后端的 `openai`）。`ProviderError`（一个
+`corespine.CorespineError` 子类）只包装网络/API/超时错误——程序错误
+直接传播。
+
+<Callout type="info">
+  设置 `RAGSPINE_TOKENS_PER_MINUTE`（> 0）后，服务会用
+  corespine 的 `RateLimitedProvider` 包装已构建的 provider，实现**主动的**客户端 TPM 限流——
+  与 SDK 自身被动的 `max_retries` 429 退避互补。参见[配置](/zh/docs/reference/configuration)。
+</Callout>
+
+## agent — 编排器与 tool-use 循环
+
+`answer_question` 是唯一的公共入口：
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` 是 `tuple[str, str]`。历史仅作为生成上下文：它被插入到
+系统消息之后、当前问题之前，但绝不进入确定性意图解析、
+安全筛查、检索查询或证据/来源列表。只有 `assistant` 会被视为
+assistant 角色；未知角色归一化为 user。因此，先前的对话文本
+既不能授权一次竞争对手查询，也不能成为引用。参见
+[ADR 0017](/zh/docs/decisions/adr-0017)。
+
+它的流程：分配请求 id → 构建隐私感知的 trace 上下文 → 解析意图
+（默认 `RuleIntentParser`）→ `clarify_scope`。随后按严格顺序早退：
+
+<Steps>
+  <Step>
+    **作用域外**（`CLARIFY_OUT_OF_SCOPE_ENTITY`）→ 在**任何工具、检索或 LLM
+    调用之前**拒答。
+  </Step>
+  <Step>**先提问**（`CLARIFY_ASK_FIRST`）→ 反射式地返回澄清问题。</Step>
+  <Step>**带假设作答** → 回填有效问题，然后路由。</Step>
+  <Step>
+    **路由**：叙事 → `_run_narrative`；结构化/复合 → 展开子任务并运行
+    `_run_tool_loop`（对显式多值复合查询则走无 LLM 的 `_multi_subtask_answer`）；
+    复合路由还会额外追加一段叙事内容。
+  </Step>
+</Steps>
+
+tool-use 循环（`_run_tool_loop`）上限为 `MAX_TOOL_ITERATIONS = 5`：它调用
+`provider.chat(messages, tools=tools)`，执行所有 `query_metric` 工具调用，把结果
+作为 user 消息回填，并在模型不再返回工具调用时停止。遇到 `ProviderError` 时
+它降级为固定的、**不含数字的**文本，而不是编造。
+
+`answer_question` 返回一个 `AgentResult`：
+
+<TypeTable
+  type={{
+    answer: {
+      type: 'str',
+      description: '最终回答文本（或诚实的拒答 / 澄清问题）。',
+    },
+    route: {
+      type: 'str',
+      description: 'structured | narrative | composite（或某个澄清路由）。',
+    },
+    clarification: {
+      type: 'ClarificationResult | None',
+      description: '当网关提问或拒答时存在。',
+    },
+    tool_results: {
+      type: 'list[dict]',
+      description: '原始 query_metric 结果（found / not_found / unrecognized_param）。',
+    },
+    sources: { type: 'list[dict]', description: '每个被引用事实 / 片段的来源链路。' },
+  }}
+/>
+
+## 防编造机制守卫
+
+"无论模型输出什么都改写为未找到"的守卫位于 `_structured_answer`。
+它按状态划分工具结果，并且有意采用**分路径**设计：
+
+- **Found** → 回答**从事实值确定性地合成**；模型的
+  行文被丢弃（回归测试
+  `test_found_path_discards_fabricated_extra_number` 钉死了这一点）。
+- **无 found、有 not_found** → 诚实的拒答（"查不到 … 不提供任何推测数字"）。
+- **仅有 unrecognized_param** → 指出有问题的参数。
+- **零工具结果**（模型没有调用工具就作答）→ 原样返回模型文本。
+
+多子任务路径（`_multi_subtask_answer`）完全不调用 LLM；叙事
+路径（`_run_narrative`）信任模型行文，但会**强制追加**模型漏引的任何
+来源文档。当存在工具结果但没有一个为 `found` 时，trace 标志
+`fabrication_guard_triggered` 为 true——即守卫已改写为拒答。
+
+<Callout type="warn">
+  防编造机制在控制流中强制执行，而不是在提示词里。三条路径有意
+  **不做**统一——参见[防编造机制](/zh/docs/concepts/anti-fabrication)。
+</Callout>
+
+## 示例
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # deterministic value, or an honest "not found"
+print(result.sources)  # [{'doc': ..., 'locator': ...}]
+```
+
+## 相关阅读
+
+<Cards>
+  <Card
+    title="防编造机制"
+    href="/zh/docs/concepts/anti-fabrication"
+    description="控制流守卫，以及它为何是分路径的。"
+  />
+  <Card
+    title="双通道"
+    href="/zh/docs/concepts/dual-channel"
+    description="路由如何拆分并合并结构化与叙事通道。"
+  />
+  <Card
+    title="检索"
+    href="/zh/docs/guides/retrieval"
+    description="该编排器所消费的 NarrativeRetriever。"
+  />
+  <Card
+    title="扩展点"
+    href="/zh/docs/reference/extension-points"
+    description="LLMProvider、IntentParser、NarrativeRetriever 及其他缝。"
+  />
+</Cards>

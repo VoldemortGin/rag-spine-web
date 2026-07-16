@@ -1,0 +1,49 @@
+---
+title: 'ADR 0011: 采纳 python-project-standard；迁移到 src/ 布局，其余保持不变'
+description: 采纳内部标准作为治理哲学；对齐唯一一条有界的结构不变量（src/ragspine/ 布局），并接受四项有记录的偏离。
+---
+
+> 状态：**accepted** · 日期：2026-06-18
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
+
+关联 [0009](/zh/docs/decisions/adr-0009)（框架/依赖策略）与 [0005](/zh/docs/decisions/adr-0005)（精简核心）。
+
+## 背景
+
+一份外部内部标准（"python-project-standard"：mypy `--strict` + beartype claw 钩子 + 边界处 pydantic + `ports/`/`adapters/` Protocol 缝 + `src/<pkg>/` 布局
+
+- 一个 `core/` 基础设施包 + 一条一键零警告门禁）被用来核查本仓库。
+
+RAGSpine 依靠自身有记录的约定，已经满足该标准的**意图及其大部分实质**：`mypy strict = true`；`src/ragspine/__init__.py` 顶部的 beartype claw 钩子（受保护的 import、PEP 484 数值塔），且遵守 import 顺序纪律；每个外部依赖都置于 `Protocol` 之后，拥有零 SDK 的离线核心和默认 `MockProvider`；领域优先的深层布局；TDD；漂移守卫（`scripts/check_doc_drift.py`、`scripts/check_docstring_refs.py`）；单一 CI 门禁（`scripts/ci.sh`）；以及在代码中强制执行的防编造机制 / 来源溯源。
+
+剩余差距**纯属结构布局选择**。其中，**顶层包 vs `src/<pkg>/`** 是该标准视为硬性、机械化检查的不变量，也是迁移成本_有界_的一项：树内所有 import 已经使用绝对形式 `from ragspine.…`（零处 `from src.…`），因此移动包不会改动任何应用代码——只涉及打包配置、一处基于 `__file__` 的相对根锚点、工具的路径参数，以及文档中的路径字符串。其余偏离项（rootutils、`common/` vs `core/`、经由惰性 import 的 Protocol vs `ports/`+`adapters/`、稀疏使用 pydantic）会带来真实的横切成本，却没有任何行为收益。
+
+## 决策
+
+采纳 python-project-standard 作为治理哲学，并**对齐唯一一条有界、高价值的结构不变量：迁移到 `src/ragspine/` 布局。**具体而言：
+
+- `git mv ragspine src/ragspine`；`import ragspine` 通过 editable 安装继续可用（`.pth` 现在指向 `src/`）。应用代码零改动。
+- 配置跟进：hatchling 的 `packages`、mypy 的 `files` 以及 `[tool.ruff] src` → `src/ragspine`/`src`；`common/core.py` 中 `Path(__file__)…parents[N]` 锚点加一层；`ci.sh`/`Makefile` 中 ruff 的路径参数；`check_docstring_refs.py` 重新指向新根（其旧规则"任何 `src/…` 引用都是重组前的遗留死引用"被反转——`src/ragspine/…` 现在是规范路径）；文档及 `covers:` 中的路径字符串统一加上 `src/` 前缀。
+
+**保留以下偏离**（成本 ≫ 收益——是被接受的选择，不是债务）：
+
+1. 用 `rootutils` + `.project-root` 做根解析（仅一处，`common/core.py`，import 期零副作用），而不用 editable 安装 + `importlib.resources`。
+2. `common/` 承担该标准分配给 `core/` 的横切基础设施角色。
+3. SDK 隔离经由 `Protocol` + 惰性 import（依 [0009](/zh/docs/decisions/adr-0009) / [0005](/zh/docs/decisions/adr-0005)），而不是 `ports/` + `adapters/` 的目录拆分。
+4. pydantic 只在已经使用的边界处使用，不做全面铺开。
+
+`check_conformance.py` **未**接入 `ci.sh`：它仍然断言存在 `core/` 基础设施包、叶子级 `core/settings.py` 和 `ports/`/`adapters/` 目录，而本仓库刻意不设这些。`scripts/ci.sh` 仍是门禁。
+
+## 考虑过的备选方案（已否决）
+
+- **连顶层布局也保持不变**（本 ADR 的最初立场）：否决——`src/` 迁移是有界的（无应用代码翻动），且对齐了该标准唯一的硬性结构不变量，因此保护 (1)–(4) 的最小 diff 论据不适用于它。
+- **完全字面遵从**（同时增加 `core/`、拆分 `ports/`+`adapters/`、全面 pydantic）：否决——对一个成熟的 1078 测试代码库横切成本高昂，行为/安全收益为零。
+- **把 `check_conformance.py` 接入门禁**：否决——它会在已接受的偏离 (1)–(4) 上永久失败，让绿色门禁因非问题而变红。
+
+## 影响
+
+- 包现在位于 `src/ragspine/`；editable 的 `.pth` 指向 `src/`；所有文档和 `covers:` 路径字符串均为 `src/ragspine/…`。ADR 0001–0010 不可变，保留其原有（现已成为历史的）路径引用。
+- `check_docstring_refs.py` 的语义翻转：`src/ragspine/…` 是规范路径；裸 `ragspine/…` 或旧的扁平 `src/<mod>.py` 视为死引用。
+- 新的全新兄弟项目仍按字面遵循该标准（从第一天起就有 `core/`、`ports/`+`adapters/`）；本仓库只回补 `src/` 迁移这一项。
+- 未来可能有一个低风险 PR 在 `service/` 边界处加入 pydantic；除此之外 (1)–(4) 保持不变。

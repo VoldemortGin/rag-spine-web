@@ -1,0 +1,294 @@
+---
+title: 更新日志
+description: 按版本记录 RAGSpine 面向用户的重要变更——以及 Spine 家族各成员的当前状态。
+---
+
+本页按版本追踪**面向用户**的变更：API 形态、配置面、
+打包与依赖。想了解某个变更背后的推理，请跟随链接的
+[ADR](/zh/docs/decisions)。符号级细节请对 tag 对应的源码运行 `make docs`。
+
+<Callout type="info">
+  文档跟随当前 `main` 树，其包元数据为 `0.11.0`。这并不
+  意味着 PyPI 已发布 0.11.0。请通过 `ragspine version` 和你的 lockfile 确认
+  已安装发行版的行为。
+</Callout>
+
+## 0.11.0（当前源码快照）
+
+**自然语言工作流脚手架与安全的网站预览契约。** 这些工作已存在
+于 `main`；发布状态刻意不从源码元数据推断。
+
+### 新增
+
+- 安装后的简写 `ragspine "description"` 与显式的 `ragspine workflow create` 命令，
+  支持精确模板选择、复用退出选项、lexical/ONNX/auto 匹配、JSON/YAML 输出，以及
+  安全的跨平台文件写入。
+- 一个 1,000 条的内置目录：7 个人工精选工作流加 993 个生成的描述符，恰好覆盖
+  39 个行业、27 个用例和五种原型。Dify/n8n 应用市场页面可以作为
+  事实性研究参考，但上游工作流正文、prompt 和凭证既不
+  复制，也不会在运行时下载。
+- JSON、YAML 和 TOML 工作流摄取统一归一化为 JSON 兼容映射，并带有重复
+  键、大小、深度、结构节点、字符串、YAML 别名、符号链接和特殊文件防护。
+- 工作流预览 schema v1：确定性的脱敏节点/边/几何信息，用于渲染，不含
+  prompt、变量、provider 配置、凭证或可执行配置。
+- 只读的目录/详情/脚手架 HTTP 端点、页面缓存/ETag，以及匹配器回退。
+
+### 安全行为
+
+- 脚手架与预览绝不执行工作流。既有的 Dify/n8n 运行面继续由默认的
+  `RAGSPINE_DIFY_RUN_ENABLED=false` 把关。
+- 服务在缓冲之前会限定选定工作流请求体的大小，并从 422 响应中剥除回显的验证
+  输入/上下文。
+
+## 0.10.0
+
+**检索产品预设、历史语义，以及持久化的 small-to-big 扩展。**
+
+### 新增
+
+- 元数据过滤器，支持 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte` 和 `between`，外加一个
+  可选的自动抽取接缝。过滤只做收窄并保持顺序。
+- 多库路由与 `MultiIndexRetriever`：按库检索、RRF 融合、
+  `library_id` 溯源，以及路由失败时的全库回退。
+- 经济检索模式（`economy` / `bm25` / `lexical`），不构建任何 embedding 后端或
+  向量存储。
+- 父子/small-to-big 分块，加上存储层的 `parent_id`、`heading`、`window_text` 和
+  `parent_locator` 持久化/迁移。子块始终是引用对象；扩展的 `prompt_text` 仅
+  用于生成，且受限子块无法通过其窗口泄漏。
+- `answer_question(..., history=...)` 与 HTTP ask 的历史支持。先前轮次仅作为生成上下文，
+  绝不作为意图/安全/检索输入或证据。参见 [ADR 0017](/zh/docs/decisions/adr-0017) 和
+  [ADR 0018](/zh/docs/decisions/adr-0018)。
+
+## 0.9.0
+
+**来源连接器、关系图溯源、领域分块与流式输出。** 本版本
+再开放三条可选接缝、一个流式回答端点、`.txt` 摄取，以及两个
+易用性辅助——全部默认关闭，且未选用时**逐字节一致**。
+
+### 新增
+
+- **KB 来源连接器接缝。** 一个 `SourceConnector` Protocol
+  （`iter_documents() -> Iterable[RawDoc]`，`make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`）
+  让摄取来源可插拔：`filesystem`（零依赖默认）、`in_memory`、
+  `http` 和 `notion`。第三方连接器通过 `ragspine.source_connectors`
+  entry-point 组注册。参见[摄取](/zh/docs/guides/ingestion#数据源连接器)。
+- **可选的 `RelationExtractor` 槽位，带溯源标记。** 在
+  `build_relation_graph` 旁的 `RelationExtractor` Protocol（`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`）。
+  默认 `None` 让基础图逐字节一致；确定性共现抽取器
+  添加谱系干净的 `co_occurs_with` 边；可选的 LLM 抽取器（位于 `[llm]` 之后）给
+  每条边打上 `model-derived` + `unverified` 标记，把两个端点都过一遍 `SecurityGate`，
+  且绝不让 RESTRICTED 文本触达模型。参见 [ADR 0015](/zh/docs/decisions/adr-0015)。
+- **领域分块预设——`laws` / `qa` / `book`。** 三个感知版式的 `RAGSPINE_CHUNKER`
+  预设，只按文档族调整标题检测（条款/章节/问答
+  配对），继承基础预算、`parent_id` 和定位符。参见
+  [检索](/zh/docs/guides/retrieval#索引与分块)。
+- **流式提问端点——`POST /v1/ask/stream`（SSE）。** 与 `/v1/ask` 相同的回答，
+  逐 token 流式输出。完整守卫链（FAQ 短路、双通道检索、
+  防编造机制改写、溯源）在第一个字节流出**之前**完整跑完，
+  因此编造内容绝不可能流出一半再被撤回。参见
+  [HTTP API](/zh/docs/reference/http-api#引擎路由)。
+- **`.txt` 叙事摄取。** 纯文本文件加入叙事路径
+  （`extract_txt_narrative`）：UTF-8、空行分段、每块一个片段并带
+  `para={N}` 定位符——零依赖且确定性。参见
+  [摄取](/zh/docs/guides/ingestion#叙事摄取)。
+- **易用性辅助。** `AgentResult.answer_plain`（剥去行内 `（来源：…）`
+  后缀的回答，供从 `sources` 渲染引用的 UI 使用）、仅限关键字的
+  `Fact.metric(...)` 构造器（在冻结的 10 元组之上做与顺序无关的构造），以及
+  `SqliteFactStore.has_source_doc(source_doc_id)`（用于增量刷新的存在性探针）。
+  参见 [Python API](/zh/docs/reference/python-api)。
+
+### 依赖
+
+- 新增一个**可选、宽松许可证、延迟导入**的 extra：`[connectors]`（`httpx`，
+  仅 `http` / `notion` 连接器需要）。没有新的非可选运行时依赖；
+  离线默认路径不变。
+
+## 0.8.1
+
+**扩展接缝加固。** 广度待办中的三条治理接缝被正式化，
+让第三方后端只能_穿过_不变量 conformance 包接入，而绝不能绕过
+它们。纯结构性工作——所有默认路径保持**逐字节一致**，防编造机制
+棘轮保持为零。
+
+### 新增
+
+- **`TraceSink` 接缝 + 隐私 trace conformance。** 隐私感知的 trace sink 成为
+  可注册接缝（`make_trace_sink` / `RAGSPINE_TRACE_SINK`），因此可观测性可以经由
+  一个 conformance 包扇出到 OpenTelemetry / 文件——该包会拒绝或清洗任何携带
+  回答/事实值/chunk 文本的载荷。真实的 `OtelTraceSink` 随可选的 `[otel]`
+  extra 发布；泄漏谱系的 sink 会**通不过**该包。
+- **`FactStore` Protocol。** 结构化存储现在是 `@runtime_checkable` Protocol，以
+  stdlib-sqlite 的 `SqliteFactStore` 为默认（`make_fact_store` / `RAGSPINE_FACT_STORE`），
+  为后续的 DuckDB / Postgres 适配器铺路。其 conformance 包绑定两条
+  存储侧不变量——**found 确定性**（未命中返回空，绝不返回编造
+  值）和**溯源存续**（`source_doc_id` + locator 在 upsert/查询后依然存在）——
+  并附带必须失败的反向证明桩。
+- **`Extractor` 溯源 conformance 包。** 每个已注册抽取器（xlsx · pptx · pdf ·
+  docx · pptx-rich）都在真实 fixture 上断言携带非空 `source_doc_id` + 单元格
+  定位符；丢弃谱系的桩在两个维度上都会失败。
+
+### 依赖
+
+- 新增一个**可选、宽松许可证、延迟导入**的 extra：`[otel]`（OpenTelemetry，
+  Apache-2.0）。没有新的非可选运行时依赖。
+
+## 0.8.0
+
+**第二个对标竞品批次**（工作流 W8–W12），对照主流技术栈
+（LlamaIndex · LangChain / LangGraph · Haystack · RAGFlow · Weaviate ·
+Vespa · Jina · Cohere）做基准。与 0.7.0 一样，每项新增都**可选且默认关闭**：
+不选用任何项时，离线确定性循环保持**逐字节一致**，且每个新后端
+都继承 RESTRICTED 双出口隔离与溯源 conformance 包。
+
+### 新增
+
+- **检索后处理器链。** 一个 `NodePostprocessor` 接缝
+  （`make_postprocessor` / `RAGSPINE_POSTPROCESSOR`，如 `"mmr,lost_in_middle"`），运行
+  在重排之后、prompt 组装之前——**MMR** 多样性去重、**lost-in-the-middle**
+  重新排序，以及确定性的**抽取式上下文压缩**。全部零模型；
+  LLMLingua-2 / LLM 压缩器是接缝的后续项。压缩写入独立的
+  `prompt_text` 键，`text` 与所有引用字段保持逐字节一致。
+- **LLM 查询变换。** **HyDE**、**RAG-Fusion**（复用 RRF）、**step-back**
+  提示，以及基于既有 `QueryRewriter` / `IntentParser` 接缝的 **Adaptive-RAG**
+  路由（`make_query_transform` / `RAGSPINE_QUERY_TRANSFORM`，`RAGSPINE_ADAPTIVE`）。每个
+  生成的子查询都重跑确定性安全门；HyDE 的假想文档
+  只是检索探针，绝不是可引用的事实。
+- **RAPTOR + 分块策略。** 一个 **RAPTOR** 多粒度树（确定性
+  阈值聚类；`is_synthesis` 簇摘要携带溯源信息且绝不是
+  可引用的事实），加上 `Chunker` 接缝上的 **sentence-window** 和 **semantic** 分块
+  （`RAGSPINE_CHUNKER`，`make_raptor_*` / `RAGSPINE_RAPTOR*`）。
+- **ColBERT 与 SPLADE 重排器。** token 级晚交互（MaxSim）与学习型稀疏
+  打分，通过 `make_reranker` 接入既有 `ListwiseJudge` 接缝
+  （`RAGSPINE_RERANKER=colbert|splade`，`[colbert]` / `[splade]`）。以**重排器**形式发布；
+  重量级的多向量/稀疏检索索引是后续项。
+- **ColPali 视觉文档检索。** 在 `VisualEmbedder` 接缝上的整页图像晚交互
+  （`make_visual_embedder` / `RAGSPINE_VISUAL_EMBEDDER`，`[colpali]`），面向图表和
+  插图密集、OCR→文本会丢失版式的报告。可选且需要 **GPU**；确定性的
+  MaxSim 编排与 RESTRICTED 门口隔离已完成，真实 GPU
+  端到端是后续项。
+
+### 依赖
+
+- 仅新增**可选、宽松许可证、延迟导入**的 extra：`[colbert]`、`[splade]`、
+  `[colpali]`（均经由 `fastembed`，Apache-2.0）。没有新的非可选运行时依赖；
+  离线默认路径不变。
+
+## 0.7.0
+
+**质量深化批次**（工作流 W1–W7）：默认检索循环变得
+真正语义化，获得离线重排大脑，接入 Spine 家族的文档栈，
+增加接地性（groundedness）测量，并长出一个确定性知识图。可选新增
+默认关闭；精简的纯 BM25 路径保持逐字节一致。
+
+### 变更
+
+- **extra 存在时默认启用稠密检索。** `ServiceConfig.embedding` 现在默认
+  为 `"auto"`：安装了 `[embed-onnx]` 时，开箱循环即是真正的混合检索
+  （BM25 + ONNX 语义 → RRF），无需配置；没有 extra 时解析为 `None`，
+  精简的纯 BM25 路径逐字节一致。`RAGSPINE_EMBEDDING` 新增 `onnx` / `auto`。
+
+### 新增
+
+- **真实的语义 embedding 默认（W1）。** `OnnxEmbeddingBackend`（经由 `fastembed`，
+  `paraphrase-multilingual-MiniLM-L12-v2`，384 维多语言，离线、确定性），
+  位于 `[embed-onnx]` 之后，在 `make_embedding_backend` 中注册为 `onnx` / `auto`。
+- **本地 cross-encoder 重排器（W2）。** `CrossEncoderReranker`（`fastembed`
+  `ms-marco-MiniLM`，离线、确定性），通过新的
+  `make_reranker` 工厂接入 `ListwiseJudge` 接缝（`RAGSPINE_RERANKER`，`[rerank]`）——离线重排大脑；
+  LLM listwise 评审保留为更高成本的选项。
+- **家族文档栈（W3）。** 默认 `OcrBackend` 现在是家族的离线 OCR
+  （pdfspine → ocrspine），且扫描 PDF 路径**真正接入了摄取**（此前
+  只入队）；新增 `.docx` Extractor（`docspine`，`[doc]`）和可选的 `.pptx`
+  Extractor（`pptspine`，`[ppt]`）；docx / pptx 单元格填充与嵌套表格现在流入
+  `StyledGrid` IR。
+- **Contextual Retrieval + 版式分块（W4）。** 一个确定性上下文头
+  （`title · entity · period · heading`）只注入索引文本（`RAGSPINE_CONTEXTUAL`），
+  加上 `Chunker` 接缝上的版式感知分块和父子/small-to-big 分块
+  （`RAGSPINE_CHUNKER`）。
+- **忠实度/接地性评估（W5）。** 两个新的棘轮门——断言级
+  **忠实度**和自由文本**回答准确率**——并入同一基线棘轮，
+  默认使用离线确定性蕴含判断。参见[评估](/zh/docs/guides/evaluation)。
+- **Agent 化深度，可选（W6）。** LLM 查询分解（`RAGSPINE_QUERY_DECOMPOSE`）、
+  纠正式检索 / CRAG 评级→行动循环（`RAGSPINE_CORRECTIVE`），以及有界的多轮
+  会话记忆骨架——每一项都对每个子查询/轮次重新断言安全门与隔离。
+- **GraphRAG（W7）。** 新的 `graph/` 领域：在受控维度上的确定性**结构化关系图**
+  （子公司汇总、同行比较、推导追溯——
+  全程带引用）、一个 `GraphStore` Protocol（进程内默认实现加 `networkx` 适配器，
+  `RAGSPINE_GRAPH_STORE`，`[graph]`），以及叙事 GraphRAG 抽取/社区
+  **骨架**（可选，位于 `[graph]` + `[llm]` 之后）。参见[通道](/zh/docs/architecture/channels)。
+
+### 依赖
+
+- 仅新增**可选、宽松许可证、延迟导入**的 extra：`[embed-onnx]`、
+  `[rerank]`、`[doc]`、`[ppt]`、`[graph]`。离线、零重量级 SDK 的默认路径
+  得以保留。
+
+## 0.3.0
+
+头条是 **LLM provider 接缝迁移**到共享的家族核心，外加一个
+可选的主动限流器。完整理由参见 [ADR 0012](/zh/docs/decisions/adr-0012)。
+
+### 变更（对自定义 provider 是破坏性的）
+
+- **`LLMProvider` 现在位于 [`corespine`](https://pypi.org/project/corespine/)**，并
+  从 `ragspine.agent.llm_provider` 再导出。接口从
+  `create_message(*, system, messages, tools) -> ProviderResponse` 迁移到 **OpenAI
+  chat-completions 形态**：
+
+  ```python
+  def chat(
+      self,
+      messages: list[dict[str, Any]],
+      *,
+      tools: list[dict[str, Any]] | None = None,
+  ) -> ChatCompletion: ...
+  ```
+
+  系统提示现在是第一条 `{"role": "system", ...}` 消息，而不是独立的
+  参数，`ProviderResponse` 被 `corespine.ChatCompletion` 取代（`choices` →
+  带 `content` + `tool_calls` 的 `ResponseMessage`，外加 `usage` / `model` / `id`）。自定义
+  provider 必须迁移——参见[扩展点](/zh/docs/reference/extension-points#llmprovider)。
+
+### 新增
+
+- **主动 TPM 限流。** 设置 `RAGSPINE_TOKENS_PER_MINUTE`（int，默认 `0` = 关闭），
+  服务会用 corespine 的 `RateLimitedProvider` 包裹 provider——一个滑动窗口软
+  限制，保持在每分钟 token 上限_之下_，与 SDK 的被动
+  `max_retries` 429 退避互补。参见[配置](/zh/docs/reference/configuration)。
+- **`[all]` extra**——`pip install "rag-spine[all]"` 拉取所有运行时能力
+  （`[pdf,ocr,llm,embed,vector,service]`；不含 `[dev]`）。参见
+  [安装](/zh/docs/getting-started/installation)。
+
+### 依赖
+
+- 新增一个非可选运行时依赖：**`corespine>=0.1.0`**（薄共享家族
+  核心；它自己的 `dependencies` 为空）。离线优先、零重量级 SDK 的默认
+  路径得以保留。
+
+## Spine 家族
+
+RAGSpine 是共享薄核 `corespine` 的小家族中的一个包。当前
+兄弟包版本：
+
+<Cards>
+  <Card
+    title="corespine 0.1.0"
+    description="薄共享核：LLMProvider 接缝 + RateLimitedProvider、六条 Protocol 接缝、统一错误类型和 mypy 门。仅含领域中立原语；运行时依赖为空。"
+  ></Card>
+  <Card
+    title="spineagent 0.0.3"
+    description="通用多 agent 协作框架（agent / tool / 编排 + MCP / A2A 接缝），离线优先，构建于 corespine 之上。以双重类型门加固：mypy --strict + beartype。"
+  ></Card>
+  <Card
+    title="pdfspine 0.3.0"
+    description="Apache-2.0、纯 Rust 重新实现的 PyMuPDF（fitz），带 PyO3 绑定——PP-OCRv5 OCR 编译进 wheel 一并发布，现在还能从 Markdown 和图片生成 PDF。RAGSpine 通过它触达家族 OCR（[pdf] extra）。"
+  ></Card>
+  <Card
+    title="docspine 0.2.0"
+    description="Apache-2.0、纯 Rust 的 DOCX，一等公民的表格模型（gridSpan / vMerge / 嵌套）。现在能忠实导出 .docx → PDF（流式分页、按节几何、表格保真）。经 [doc] extra 支撑 RAGSpine 的 .docx Extractor。"
+  ></Card>
+  <Card
+    title="pptspine 0.2.0"
+    description="Apache-2.0、纯 Rust 的 PowerPoint / OOXML，合并处理更完善。现在能忠实导出 .pptx → PDF（每张幻灯片一页，占位符/主题继承）。经 [ppt] extra 支撑 RAGSpine 的可选 .pptx Extractor。"
+  ></Card>
+</Cards>

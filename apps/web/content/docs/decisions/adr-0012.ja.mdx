@@ -1,0 +1,90 @@
+---
+title: 'ADR 0012: corespine の LLM シームを採用 — create_message / ProviderResponse に代えて chat / ChatCompletion を採用'
+description: LLMProvider Protocol をファミリー共有コア（corespine）へ移動し、OpenAI chat-completions 形式を採用する。corespine の RateLimitedProvider によるオプションのアクティブ TPM スロットルを追加する。
+---
+
+> ステータス: **accepted** · 日付: 2026-06-20
+
+> 不変の記録。ドリフト追跡の対象外（`covers` なし）。編集ではなく、置き換え（supersede）で更新すること。
+
+関連: [0009](/ja/docs/decisions/adr-0009)（フレームワーク/依存関係ポリシー）
+および [0011](/ja/docs/decisions/adr-0011)（python-project-standard の採用）。
+**rag-spine 0.3.0** で出荷済み。
+
+## 背景
+
+RAGSpine は一貫して、すべての外部 SDK を型付き `Protocol` の背後に隔離し、SDK ゼロのオフラインコアとデフォルトの `MockProvider` を備えてきた（ADR [0005](/ja/docs/decisions/adr-0005) /
+[0009](/ja/docs/decisions/adr-0009)）。`LLMProvider` シームは ragspine の**内部**
+（`agent/llm_provider.py`）に、ragspine 固有のメソッドとして定義されていた:
+
+```python
+def create_message(*, system, messages, tools) -> ProviderResponse: ...
+```
+
+2 つの圧力が重なった:
+
+1. **兄弟パッケージのファミリーが、いまや同じプリミティブを共有している。** ragspine、
+   [`spineagent`](https://pypi.org/project/spineagent/)（マルチエージェントオーケストレーション）、そして
+   薄い共有コアである [`corespine`](https://pypi.org/project/corespine/) のすべてが、単一のプロバイダー契約を通じて
+   LLM と対話する必要がある。パッケージごとに独自のプロバイダー Protocol を重複させれば、契約と
+   テストシームが分断されてしまう。corespine は、まさにこうしたドメイン中立なプリミティブのために意図的に薄く保たれた
+   ファミリーの共有コアである。
+2. **独自の `create_message(*, system, messages, tools) -> ProviderResponse` という形式は、理由もなく非標準だった。**
+   システムプロンプトを別引数として切り出し、`ProviderResponse` という独自のエンベロープを
+   発明したことは、実際の SDK（そしてすべてのアダプター作者のメンタルモデル）がすでに話している、
+   広く理解されている OpenAI chat-completions 形式から乖離していた — 何の利点もない摩擦である。
+
+これとは別に、レートリミットへの防御手段は SDK の**受動的な** `max_retries` による 429 バックオフだけであり、
+これは制限に達した*後*に反応するものだった。契約上の TPM 上限を*下回り続けたい*クライアントには、
+ライブラリ内に使える調整手段がなかった。
+
+## 決定
+
+**`LLMProvider` Protocol を corespine へ移動し、OpenAI chat-completions 形式を採用する。**
+ragspine は `corespine>=0.1.0` へのハードなランタイム依存（唯一の非オプション依存）を持ち、
+このシームを `agent/llm_provider.py` から**再エクスポート**するため、既存のインポート箇所
+（`from ragspine.agent.llm_provider import LLMProvider, MockProvider, AnthropicProvider`）は
+そのまま動作し続ける。具体的には:
+
+- 単一のメソッドは
+  `chat(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion`
+  になる。システムプロンプトは単に先頭の `{"role": "system", ...}` メッセージであり、別引数ではない。
+- `ProviderResponse` は corespine の `ChatCompletion` エンベロープに置き換えられる: `choices`（各要素は
+  `content` + `tool_calls` を持つ `ResponseMessage` をラップした `Choice`）に加えて `usage`、`model`、
+  `id` — すべて frozen dataclass であり、標準的な chat-completions 形式である。
+- `AnthropicProvider` は引き続き `anthropic` SDK を遅延インポートするが、OpenAI 形式の
+  `messages`/`tools` を Anthropic Messages API にマッピングし、レスポンスを
+  `ChatCompletion` にマッピングし直すようになる。`ProviderError` は `corespine.CorespineError` のサブクラスになる。
+- オフラインの `MockProvider` とツール使用ループ（`provider.chat(messages, tools=tools)`）は
+  同時に更新される。捏造防止ガードは手を付けない（このガードは数値についてプロバイダーの文章を
+  一切信用していなかった）。
+
+**オプションのアクティブ TPM スロットルを追加する。** 新しい環境変数 `RAGSPINE_TOKENS_PER_MINUTE`（int、
+デフォルト `0` = オフ）により、`build_provider` は構築したプロバイダーを corespine の
+`RateLimitedProvider` でラップする — これはスライディングウィンドウ方式のソフトリミットで、ウィンドウに
+予算がないときは `chat` 呼び出しの前にブロックする。これは SDK の受動的な `max_retries` を**補完する**もの:
+一方は上限を事前に下回り続け、もう一方は超過からの回復を担う。
+
+## 検討した代替案（却下）
+
+- **独自の `create_message` / `ProviderResponse` シームを ragspine 内に維持する。** 却下 —
+  ファミリー全体で契約が分断され、不必要に非標準のままになる。このシームは教科書どおりの
+  ドメイン中立プリミティブであり、共有コアに属するべきものである。
+- **シームを ragspine 内に定義し、兄弟パッケージが ragspine に依存する。** 却下 —
+  依存の方向が逆転してしまう（RAG パッケージが汎用エージェントパッケージの依存先になってしまう）。
+  corespine は共有プリミティブの合意された集約先であり、矢印は corespine に*向かって*入る。
+- **レートリミットを SDK の `max_retries` だけに頼る。** 却下 — 受動的なバックオフでは、クライアントを
+  契約上の TPM 上限以下に保つことはできない。2 つのメカニズムは補完関係にあり、冗長ではない。
+
+## 帰結
+
+- **カスタムプロバイダーに対する破壊的変更。** `create_message(*, system,
+  messages, tools) -> ProviderResponse` を実装していた者は、`chat(messages, *, tools=None) ->
+  ChatCompletion` へ移行しなければならない（dataclass 群は `corespine` から、または
+  `ragspine.agent.llm_provider` の再エクスポート経由でインポートする）。[拡張ポイント](/ja/docs/reference/extension-points#llmprovider)
+  ガイドには、新しい形式での OpenAI の実例が掲載されている。
+- ragspine は非オプション依存をちょうど 1 つ獲得する（`corespine>=0.1.0`、それ自体の
+  `dependencies` は空）。オフラインファーストで重い SDK を持たないデフォルトパスは維持される。
+- プロバイダー契約はいまや Spine ファミリー全体で共有されるため、あるパッケージ向けに書かれた
+  プロバイダーはすべてのパッケージで動作する。
+- 新しい設定面は `RAGSPINE_TOKENS_PER_MINUTE` の 1 つだけであり、それ以外はすべて内部的な変更である。

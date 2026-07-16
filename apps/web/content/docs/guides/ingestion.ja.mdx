@@ -1,0 +1,252 @@
+---
+title: インジェスト
+description: IR/テキスト → ストア。バッチマニフェスト台帳を備えた構造化ファクトのインジェスト、ナラティブチャンクのインジェスト、SME 人手レビューキューのステートマシン — すべて冪等。
+---
+
+**インジェスト（ingestion）** ドメインは、抽出の出力（StyledGrid IR、ナラティブテキスト）を受け取り、
+[ストア](/ja/docs/guides/storage)へ書き込みます。レーンは 3 つあります: **構造化**（数値
+ファクト）、**ナラティブ**（ドキュメントチャンク）、そして**レビュー**（決定的パスが確信を持てない
+ものをすべて捕捉する human-in-the-loop キュー）です。すべてのレーンは冪等 —
+インジェストを再実行しても二重書き込みになってはなりません。
+
+<Callout type="info">
+  パッケージ: `src/ragspine/ingestion/`。契約: `src/ragspine/ingestion/CLAUDE.md`。
+</Callout>
+
+## レイアウト
+
+<Files>
+  <Folder name="ingestion" defaultOpen>
+    <Folder name="structured">
+      <File name="ingestion.py — ingest_excel / ingest_file → IngestReport" />
+      <File name="ingestion_manifest.py — ManifestStore 台帳 + メトリクス" />
+    </Folder>
+    <Folder name="narrative">
+      <File name="narrative_extract.py — doc → NarrativeDoc（セグメント + ロケータ）" />
+      <File name="narrative_ingest.py — バッチチャンクインジェスト → NarrativeIngestReport" />
+    </Folder>
+    <Folder name="review">
+      <File name="review_queue.py — ReviewQueue ステートマシン + 監査証跡" />
+    </Folder>
+  </Folder>
+</Files>
+
+## 構造化インジェスト
+
+`structured/ingestion.py` は 1 つのドキュメントをエンドツーエンドでオーケストレーションします:
+**抽出 → 正規化（用語集）→ カラータグ → upsert**。エントリポイントは 2 つあります:
+
+- `ingest_excel(path, store, registry, queue, *, dry_run=False, extractor_version="xlsx_styled@1", manifest=None, batch_id=None)` —
+  xlsx 専用。
+- `ingest_file(path, store, registry, queue, *, dry_run=False, manifest=None, batch_id=None, valid_as_of=None, grid_extractor=None)` —
+  統一マルチフォーマットディスパッチャ: 拡張子に応じて適切な抽出器（xlsx /
+  xlsm / pptx、または[ルーター](/ja/docs/guides/extraction#pdf-ルーティング--ページ単位のトリアージ)経由の PDF）
+  にルーティングし、共有のインジェストロジックを再利用します。
+
+どちらも **`IngestReport`**（生の数値ではなくカウントオブジェクト）を返します:
+
+<TypeTable
+  type={{
+    source_path: { type: 'str' },
+    source_doc_id: { type: 'str' },
+    file_hash: { type: 'str | None', default: 'None' },
+    dry_run: { type: 'bool', default: 'False' },
+    n_grids: { type: 'int', default: '0' },
+    n_facts_extracted: { type: 'int', default: '0' },
+    n_facts_ingested: { type: 'int', default: '0' },
+    n_tags_applied: { type: 'int', default: '0' },
+    n_enqueued_review: { type: 'int', default: '0' },
+    warnings: { type: 'list[str]', default: '[]' },
+    status: { type: 'str', default: '"ok"' },
+    error: { type: 'str | None', default: 'None' },
+  }}
+/>
+
+内部では、各グリッドはアクティブなマッピング（`apply_mapping`）によってカラータグ付けされ、
+[`Fact`](/ja/docs/guides/storage#fact-データクラス) オブジェクトに変換され、
+`store.upsert_facts(...)` で書き込まれます。ファクトにはその系譜が刻印されます —
+`source_doc_id`、`source_locator`、`source_file_hash`、`extractor_version`、
+`mapping_version`、そして `review_status=REVIEW_AUTO_APPROVED` です。
+
+```python
+from ragspine.ingestion.structured.ingestion import ingest_file
+
+report = ingest_file("report.xlsx", store, registry, queue)
+print(report.n_facts_ingested, report.n_enqueued_review)
+```
+
+### インジェストが代わりにレビューへ送るとき
+
+構造化パスは保守的です。次の場合、ファイルは自動インジェストされずに[レビューキュー](#レビューキュー)
+へルーティングされます:
+
+- どのグリッドもエンティティを解決できないのに、ファイルに抽出可能なデータが含まれている場合 — 理由
+  _"实体无法解析，需人工指认"_（エンティティを解決できず、人手による指定が必要）;
+- ファイルに着色セルがあるのに、スコープに**アクティブなカラーマッピングが存在しない**場合 — 理由
+  _"颜色映射未确认，需 SME 确认图例"_（カラーマッピング未確認、SME による凡例の確認が必要）;
+- PDF が PowerPoint のエクスポートに見える場合（pptx ソースの提供を求める）、または OCR が必要なスキャンである場合。
+
+`dry_run=True` の場合、抽出とレポート作成は完全に実行されますが、`n_facts_ingested` と
+`n_enqueued_review` は `0` のままです — ストアとキューには一切触れません。
+
+## バッチマニフェスト台帳
+
+`structured/ingestion_manifest.py` は「_何が実行されたか_」を記録します。`ManifestStore`（sqlite、
+`manifest_batch` + `manifest_input` テーブル）はバッチを開き、各入力ファイルをログし、最終ステータスと
+所要時間とともにバッチを閉じます。各バッチは 1 つの `ManifestRecord` です:
+
+| フィールド                             | 意味                                              |
+| ------------------------------------- | ------------------------------------------------- |
+| `batch_id`                            | 呼び出し側が指定、または自動 `batch-{uuid4 hex[:12]}` |
+| `status`                              | `running` → `done` / `failed`                     |
+| `inputs`                              | ファイルごとの `{path, hash, format, …}` 行        |
+| `n_facts` · `n_warnings` · `n_failed` | 集計カウント                                       |
+| `duration_s` · `failures`             | タイミング + ファイルごとのエラー                    |
+
+API: `open_batch(batch_id=None)`、`record_input(...)`、`close_batch(batch_id, status="done")`、
+`get_batch(id)`、`list_batches()`。2 つの可観測性ヘルパーが併走します:
+`compute_metrics(manifest_store, queue, store)`（ファクト総数、レビューバックログ、信頼度
+バケット、警告率）と `list_versions(store, registry)`（アクティブな抽出器バージョン +
+カラーマッピング）です。
+
+<Callout type="warn">
+  **冪等性が実際に宿る場所。** 契約はマニフェストを「ガード」と呼んでおり、実際にそれはすべての実行の
+  監査台帳（パス / ハッシュ / カウント / 失敗）です。しかし、文字どおりの二重書き込みなしの保証は、
+  ファクトストアの**一意キー upsert**（[`dim_key`](/ja/docs/guides/storage#dim_key--アップサートキー) を
+  キーとする `store.upsert_facts`）に由来します: バッチを再実行すると再抽出・再 upsert が行われますが、
+  一意キーがストアの増加を防ぎます。`batch_id` はコンテンツ由来では**ありません** —
+  呼び出し側が指定するか、ランダムな uuid です。
+</Callout>
+
+## ナラティブインジェスト
+
+ナラティブレーンは、きれいに責務分割された 2 つのモジュールで構成されます:
+
+<Tabs items={["narrative_extract", "narrative_ingest"]}>
+<Tab value="narrative_extract">
+
+純粋で決定的なテキスト抽出 — OCR ゼロ、LLM ゼロ、ストアなし。`extract_narrative(path)`
+は拡張子（`SUPPORTED_SUFFIXES = {.pptx, .pdf, .docx, .docm, .txt}`）に応じて対応する抽出器に
+ディスパッチし、**`NarrativeDoc`** を返します: `doc_id`、`file_hash`、`NarrativeSegment`
+（`text` + `source_locator`）のリスト、`skipped_pages`、`warnings`。ロケータは
+`'slide={N},frame={M}'`、`'slide={N},notes'`、`'page={N}'`、または（プレーンテキストの場合）`'para={N}'`
+のような形式です。`NarrativeDoc.to_text()` はセグメントを空行で結合します — その文字列がチャンキングの
+入力契約です。
+
+プレーンな `.txt` ファイルも同じナラティブパスを通ります — 連続した散文として扱われ、決して構造化
+ファクトに強制変換されません。`extract_txt_narrative(path)` は UTF-8（`errors="replace"` 付き）で
+読み込み、空行で段落ブロックに分割し、各ブロックを正規化して、非空のブロックごとに 1 始まりの
+`source_locator="para={N}"` を持つ `NarrativeSegment` を 1 つ出力します。依存ゼロで
+決定的です。
+
+</Tab>
+<Tab value="narrative_ingest">
+
+バッチオーケストレーション: **抽出 → チャンク化 → チャンクストアへの書き込み**、冪等かつ dry-run 可能。
+`ingest_narrative(inputs, store, *, meta_by_doc=None, dry_run=False, chunker=None)` はフォルダ、
+ファイル、またはリストを受け取り、`NarrativeIngestReport`（ファイルごとの `FileReport` のリスト +
+`counts()`）を返します。`chunker=None` の場合、各ファイルは
+`chunk_document(doc.to_text(), doc_meta)` を使用します; 注入された `Chunker` は parent-child、
+sentence-window、layout、domain、または semantic の挙動を選択できます。得られた階層/ウィンドウの
+フィールドは、メモリ内だけで再構築されるのではなくチャンクストアに永続化されます。チャンクは
+`store.replace_doc_chunks(...)` で
+[ChunkStore](/ja/docs/guides/storage#チャンクストア) に書き込まれます。
+
+ファイルごとのステータスは `ingested` / `skipped` / `failed` / `no_text` のいずれかです。冪等性は
+同じ sqlite DB 内の `narrative_doc` テーブル（`doc_id → file_hash`）を使います: 記録されたハッシュが
+ファイルと一致する場合、そのファイルは再抽出せずに**スキップ**されます。`meta_by_doc` のキーは
+`ALLOWED_META_KEYS`（`title`、`topic`、`entity`、`geography`、`period`、
+`language`、`sensitivity`、`valid_as_of`）に対して検証されます — 未知のフィールドは `ValueError` を
+送出します。period はメタデータから取得されるか、`period_from_filename(name)` によってファイル名から
+推定されます。
+
+</Tab>
+</Tabs>
+
+<Callout type="info">
+  機密度はここで適用されます: 明示的な `meta["sensitivity"]` が優先され、なければ
+  [common](/ja/docs/guides/common#機密度) の `classify_sensitivity(...)` が実行されます。これにより、
+  後段の検索が RESTRICTED の分離を強制できるようになります。
+</Callout>
+
+## レビューキュー
+
+`review/review_queue.py` は、決定的パスが確信を持てないものすべて — 低信頼度の OCR、
+チャネル間の競合、未確認のカラーマッピング、解決不能なエンティティ — を捕捉する SME 人手レビューの
+**ステートマシン**です。sqlite ベースです（ファクトストアと同じ DB ですが別テーブル:
+`review_item` + 追記専用の `review_audit`）。
+
+このステートマシンには 3 つの文字列状態と 2 つの遷移があります:
+
+```text
+pending ──approve──▶ approved   (terminal)
+pending ──reject───▶ rejected   (terminal)
+```
+
+`STATUS_PENDING = "pending"`、`STATUS_APPROVED = "approved"`、`STATUS_REJECTED = "rejected"`。
+approved と rejected は終端状態です — 終端状態のアイテムを再処理する（または存在しないアイテムに
+操作を行う）と `IllegalTransitionError` が送出されます。
+
+**`ReviewItem`** は `reason`、`payload`（JSON）、`locator`、`priority`（デフォルト `100`、
+**小さいほど先にレビューされる**）、`id`、`status`、`actor`、`note`、`corrected_value` を保持します。
+
+API:
+
+| メソッド                                                    | 効果                                                 |
+| --------------------------------------------------------- | ---------------------------------------------------- |
+| `enqueue(reason, payload, locator, priority=100) -> int`  | pending アイテムを挿入 + `enqueue` 監査行を書き込む     |
+| `list_pending() -> list[ReviewItem]`                      | pending アイテムを `priority ASC, id ASC` 順で返す     |
+| `approve(item_id, actor, note=None)`                      | → approved                                           |
+| `reject(item_id, actor, note=None, corrected_value=None)` | → rejected（オプションで修正値を記録）                  |
+| `get(item_id)` · `audit_trail(item_id)`                   | アイテムの取得 / 追記専用の `AuditRecord` 履歴          |
+
+すべての遷移は `AuditRecord`（`enqueue` / `approve` / `reject`）を追記します — この証跡は追記専用で
+決して変更されないため、レビュー履歴は完全に再構築可能です。
+[用語集のレビューキュー](/ja/docs/concepts/glossary#レビューキュー)を参照してください。
+
+## ソースコネクタ
+
+両レーンはデフォルトでローカルパスからインジェストしますが、ソース自体がプラガブルなシーム（縫い目）です。
+`ingestion/source/connector.py` は `SourceConnector` Protocol を定義します — 単一の
+`iter_documents() -> Iterable[RawDoc]` が、各ドキュメントを frozen な `RawDoc`
+（`source_doc_id`、`locator`、`content: bytes`、`content_type`、`metadata`）として yield します。
+
+デフォルトの `FilesystemConnector` は依存ゼロです。`InMemoryConnector` はプロセス内でドキュメントを
+供給します（テスト / フィクスチャ用）。`HttpConnector` と `NotionConnector` はリモートのナレッジベースに
+到達し、`[connectors]` extra の背後で `httpx` を遅延 import します。
+`make_source_connector(spec, **kwargs)` または `RAGSPINE_SOURCE_CONNECTOR` で選択します; サードパーティの
+コネクタは `ragspine.source_connectors` エントリポイントグループを通じて登録されます（名前が衝突した
+場合は組み込み名が優先されます）。
+[拡張ポイント → SourceConnector](/ja/docs/reference/extension-points#sourceconnector) を参照してください。
+
+```python
+from ragspine.ingestion.source.connector import make_source_connector
+
+# None / "none" → None; "filesystem"/"fs" → local walk; "http"/"notion" → remote ([connectors]).
+connector = make_source_connector("filesystem")
+for raw in connector.iter_documents():
+    ...  # raw is a RawDoc: source_doc_id, locator, content bytes, content_type, metadata
+```
+
+<Callout type="info">
+  `[connectors]` extra が取り込むのは `httpx` のみです（寛容なライセンス、遅延 import）。コネクタを
+  選択しない場合、インジェストは従来どおりローカルパスを読み込みます — バイト単位で同一の挙動です。
+</Callout>
+
+## このドメインが守る不変量
+
+- **冪等なインジェスト** — 構造化の再実行は `dim_key` で upsert し、ナラティブの再実行は一致する
+  `file_hash` でスキップします。再インジェストでストアが二重になることは決してありません。
+- **出典追跡の保持** — すべてのファクトとチャンクは `source_doc_id` + ロケータを保持します。
+- **保守的な自動インジェスト** — 曖昧なもの（エンティティ / マッピング / 信頼度 /
+  競合）はすべて、黙ってストアに入るのではなく人間に送られます。
+- **追記専用の監査** — レビューの遷移は記録され、決して上書きされません。
+
+## 関連
+
+<Cards>
+  <Card title="抽出ガイド" href="/ja/docs/guides/extraction" />
+  <Card title="ストレージガイド" href="/ja/docs/guides/storage" />
+  <Card title="common ガイド — 機密度と用語集" href="/ja/docs/guides/common" />
+  <Card title="レビューキューの用語集エントリ" href="/ja/docs/concepts/glossary#レビューキュー" />
+</Cards>

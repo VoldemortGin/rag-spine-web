@@ -1,0 +1,83 @@
+---
+title: 'ADR 0011: python-project-standard の採用 — src/ レイアウトへ移行し、残りは維持'
+description: ハウス標準を統治哲学として採用し、境界の明確な唯一の構造的不変条件（src/ragspine/ レイアウト）を整合させ、文書化された 4 つの乖離を受け入れる。
+---
+
+> ステータス: **accepted** · 日付: 2026-06-18
+
+> 不変の記録。ドリフト追跡の対象外（`covers` なし）。編集せず、置き換え（supersede）で対応すること。
+
+[0009](/ja/docs/decisions/adr-0009)（フレームワーク/依存関係ポリシー）
+および [0005](/ja/docs/decisions/adr-0005)（リーンコア）に関連。
+
+## コンテキスト
+
+外部のハウス標準（"python-project-standard"：mypy `--strict` + beartype claw
+フック + 境界での pydantic + `ports/`/`adapters/` の Protocol シーム + `src/<pkg>/` レイアウト
+
+- `core/` インフラパッケージ + ワンコマンドのゼロ警告ゲート）を本リポジトリに対して実行した。
+
+RAGSpine は、自身の文書化された規約により、この標準の**意図と実質の大部分**をすでに満たしている：
+`mypy strict = true`；`src/ragspine/__init__.py` の先頭にある beartype claw フック
+（ガード付き import、PEP 484 数値タワー）と、遵守されている import 順序の規律；
+ゼロ SDK のオフラインコアとデフォルトの `MockProvider` を備え、すべての外部依存が
+`Protocol` の背後に置かれていること；ドメインファーストの深いレイアウト；TDD；ドリフトガード
+（`scripts/check_doc_drift.py`、`scripts/check_docstring_refs.py`）；単一の CI ゲート
+（`scripts/ci.sh`）；そしてコードレベルで強制される捏造防止 / 出典追跡。
+
+残るギャップは**純粋に構造的なレイアウト上の選択**だけだった。その中でも、**トップレベル
+パッケージ vs `src/<pkg>/`** は、標準が厳格かつ機械的にチェックされる不変条件として扱う唯一の
+ものであり、かつ移行コストが_限定的_である唯一のものだ：ツリー内のすべての import はすでに
+絶対形式の `from ragspine.…` を使っており（`from src.…` はゼロ）、パッケージを移動しても
+アプリケーションコードは一切変わらない — 変わるのはパッケージング設定、1 箇所の
+`__file__` 相対のルートアンカー、ツールのパス引数、そしてドキュメント内のパス文字列だけである。
+その他の乖離（rootutils、`common/` vs `core/`、`ports/`+`adapters/` ではなく遅延 import 経由の
+Protocol、限定的な pydantic）は、挙動上の利得なしに実質的な横断的コストを伴う。
+
+## 決定
+
+python-project-standard を統治哲学として採用し、**境界が明確で価値の高い唯一の構造的
+不変条件を整合させる：`src/ragspine/` レイアウトへ移行する。**具体的には：
+
+- `git mv ragspine src/ragspine`；editable インストール経由で `import ragspine` は引き続き動作する
+  （`.pth` は `src/` を指すようになる）。アプリケーションコードの変更はなし。
+- 設定の追随：hatchling の `packages`、mypy の `files`、`[tool.ruff] src` →
+  `src/ragspine`/`src`；`common/core.py` の `Path(__file__)…parents[N]` アンカーを +1 レベル；
+  `ci.sh`/`Makefile` の ruff パス引数；`check_docstring_refs.py` を新しいルートに向け直す
+  （「`src/…` への参照はすべて再編前の死んだ残骸」という旧ルールは反転する — いまや
+  `src/ragspine/…` が正準パスである）；ドキュメントと `covers:` のパス文字列に `src/` プレフィックスを付け直す。
+
+**以下の乖離は維持する**（コスト ≫ 利益 — 負債ではなく、受け入れ済み）：
+
+1. ルート解決には editable インストール + `importlib.resources` ではなく、`rootutils` +
+   `.project-root` を使う（使用箇所は 1 つ、`common/core.py`、import 時に副作用ゼロ）。
+2. 標準が `core/` に割り当てる横断的インフラの役割は `common/` が担う。
+3. SDK の隔離は（[0009](/ja/docs/decisions/adr-0009) / [0005](/ja/docs/decisions/adr-0005) に従い）`Protocol` + 遅延 import で行い、`ports/` +
+   `adapters/` のディレクトリ分割は行わない。
+4. pydantic は、すでに使われている境界のみに適用し、全面適用はしない。
+
+`check_conformance.py` は `ci.sh` に**組み込まない**：それは依然として、本リポジトリが意図的に
+持たない `core/` インフラパッケージ、リーフの `core/settings.py`、`ports/`/`adapters/`
+ディレクトリの存在を要求するからだ。ゲートは引き続き `scripts/ci.sh` である。
+
+## 検討した代替案（却下）
+
+- **トップレベルレイアウトも維持する**（本 ADR の当初の立場）：却下 — `src/` への移動は
+  限定的で（アプリコードの変更なし）、標準の唯一の厳格な構造的不変条件を整合させるものであり、
+  (1)–(4) を守る最小差分の論拠はここには及ばない。
+- **完全な字義どおりの準拠**（さらに `core/` を追加し、`ports/`+`adapters/` に分割し、pydantic
+  を全面適用）：却下 — 成熟した 1078 テストのコードベースに対する横断的コストが高く、
+  挙動・安全性の利得はゼロ。
+- **`check_conformance.py` をゲートに組み込む**：却下 — 受け入れ済みの乖離 (1)–(4) で恒久的に
+  失敗し、問題でないことのためにグリーンなゲートを赤に変えてしまう。
+
+## 帰結
+
+- パッケージは今後 `src/ragspine/` に置かれる；editable の `.pth` は `src/` を指す；すべての
+  ドキュメントと `covers:` のパス文字列は `src/ragspine/…` となる。ADR 0001–0010 は不変であり、
+  元の（いまや歴史的な）パス参照を保持する。
+- `check_docstring_refs.py` のセマンティクスは反転した：`src/ragspine/…` が正準；素の
+  `ragspine/…` や旧来のフラットな `src/<mod>.py` は死んだ参照である。
+- 新規のグリーンフィールドな兄弟プロジェクトは引き続き標準に字義どおり従う（初日から `core/`、
+  `ports/`+`adapters/`）；本リポジトリは `src/` への移動のみをレトロフィットする。
+- 将来の低リスクな PR で `service/` 境界に pydantic を追加する可能性はある；それ以外は (1)–(4) が維持される。

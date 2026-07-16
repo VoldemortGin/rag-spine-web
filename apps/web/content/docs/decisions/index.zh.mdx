@@ -1,0 +1,63 @@
+---
+title: 决策记录（ADR）
+description: RAGSpine 背后的架构决策记录——不可变、只追加，只替代而不编辑。
+---
+
+一份**架构决策记录（ADR）**记录一项重大决策：迫使做出该决策的
+背景、决策本身、被否决的备选方案，以及随之而来的
+后果。RAGSpine 把它的 ADR 作为不可变的历史记录保存。
+
+## ADR 在这里的运作方式
+
+- **一个文件一项决策。** 每份记录是一个单独、自包含的选择
+  （仓库中的 `docs/adr/NNNN-kebab-title.md`）。
+- **只追加且不可变。** ADR 一旦接受就绝不编辑。要
+  推翻一项决策，需要新增一份_新的_ ADR 来替代旧的——历史
+  保持完整、可审计。
+- **只替代，不编辑。** 这就是为什么一份记录可以描述较早的路径（比如
+  `src/` 布局之前的文件位置）而不算"错"：它记录的是
+  当时的决策原貌。
+- **豁免漂移追踪。** 由于它们是历史记录，ADR 不携带 `covers`
+  frontmatter，也不被 `scripts/check_doc_drift.py` 检查。
+
+<Callout title="贯穿主线">
+  这些决策反复出现的原则是**把保证与灵活性分开**：
+  不变量（防编造机制、溯源、来源隔离、依赖许可证、安全
+  门控）是硬性的、确定的、不可插拔的，而其余一切（领域、语言、LLM、
+  embedding、重排器、解析策略）是软性的——由配置或 `Protocol` 驱动。
+</Callout>
+
+## 记录列表
+
+[ADR 0002](/zh/docs/decisions/adr-0002) 是产品方向的伞形记录；它
+索引了在同一场设计访谈中敲定的八份逐项 ADR（0003–0010）。
+
+<Callout type="warn" title="ADR 编号是仓库本地的">
+  网站 ADR 0012–0015 保留了较早的家族/网站发布序列。当前的
+  RAGSpine 引擎仓库也有自己的 ADR 文件，部分编号相同；例如，
+  网站的 ADR 0012 记录的是 corespine LLM 缝，而引擎的
+  `docs/adr/0012-onboarding-complexity-budget.md` 是另一项决策。不要仅凭
+  编号推断二者相同。下面新增的网站 ADR 0016–0018 是引擎中相同编号
+  记录的英文转录。
+</Callout>
+
+| #                                | 标题                                                                                   | 摘要                                                                                                                                                                                                                                                     | 状态   |
+| -------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| [0001](/zh/docs/decisions/adr-0001) | 用确定性双通道取代单一 LLM 路径                                       | 两条确定性通道（结构化数值 + 叙事 RAG）；LLM 被限定于合成，绝不用于编造事实。                                                                                                                                | accepted |
+| [0002](/zh/docs/decisions/adr-0002) | 产品方向：通用、许可证干净、不锁定框架的 RAG 库     | 伞形北极星；把硬性不变量与由配置/`Protocol` 驱动的软性灵活性分开，并索引 ADR 0003–0010。                                                                                                                             | accepted |
+| [0003](/zh/docs/decisions/adr-0003) | 受众：供他人在其上构建的通用开源库                          | 首要受众是要在 RAGSpine 之上构建自己 RAG 的开发者；金融成为一个示例领域，而非身份标签。                                                                                                                         | accepted |
+| [0004](/zh/docs/decisions/adr-0004) | 完全通用化：`DomainProfile` 与任意维度事实                          | 完全通用化——`CompanyProfile` 变为 `DomainProfile`；结构化通道变为带类型的事实存储，支持任意用户自定义维度。                                                                                                      | accepted |
+| [0005](/zh/docs/decisions/adr-0005) | 精简内核；把休眠能力隔离为 experimental/extras                         | 只发布在默认离线路径中真正运行的部分；把 OCR、真实向量与校验器移入清晰标注的 experimental 模块/extras。                                                                                                  | accepted |
+| [0006](/zh/docs/decisions/adr-0006) | 质量标准：不变量作为属性测试，外加一个真实检索基准            | 把质量定义为保证（由属性测试证明的不变量），外加一个真实的带标注检索基准；领域准确性交给用户的数据。                                                                                                     | accepted |
+| [0007](/zh/docs/decisions/adr-0007) | 多语言：为五种语言做架构，先发布两种；其余作为 locale 包                    | 让 `locale` 缝贯穿每一层；核心发布并测试中文 + 英文；日语 / 意大利语 / 德语以社区 locale 包形式发布。                                                                                            | accepted |
+| [0008](/zh/docs/decisions/adr-0008) | 提示词：打包在 `ragspine/prompts/<locale>/` 下的 `PromptRegistry`                 | 把提示词外置为打包的、按 locale 索引的模板文件，置于 `PromptRegistry` `Protocol` 之后，运行时由 `DomainProfile` 填充。                                                                                                                | accepted |
+| [0009](/zh/docs/decisions/adr-0009) | 重新定义"不绑定框架"：无框架锁定 + 仅限宽松许可证              | 把不绑定框架重新定义为：不锁定编排框架，且仅限宽松许可证（≤ Apache-2.0）；真实后端作为可选 extras，是为了体积，不是为了纯洁性。                                                                                    | accepted |
+| [0010](/zh/docs/decisions/adr-0010) | 意图解析：确定性安全门控 + 可插拔 `IntentParser`                  | 把始终在线、绝不可插拔的确定性安全门控与可插拔的 `IntentParser` `Protocol` 解耦。                                                                                                                                             | accepted |
+| [0011](/zh/docs/decisions/adr-0011) | 采纳 python-project-standard；迁移到 `src/` 布局，其余保持              | 采纳内部标准作为治理哲学；对齐唯一的有界结构不变量（`src/ragspine/` 布局），并接受四项有记录的偏离。                                                                               | accepted |
+| [0012](/zh/docs/decisions/adr-0012) | 采纳 corespine LLM 缝——用 `chat` / `ChatCompletion` 取代 `create_message`          | 把 `LLMProvider` Protocol 移入家族共享核（`corespine`），采纳 OpenAI chat-completions 形状，并新增可选的主动 TPM 限流。随 0.3.0 发布。                                                                                | accepted |
+| [0013](/zh/docs/decisions/adr-0013) | Dify 工作流 YAML → 纯 Python 编译器 + 静态优化顾问                 | 通过去 Dify 化的 IR（`parse → IR → codegen`）把 Dify `.yml` 编译成不绑定框架的命令式 Python，外加八条纯静态优化规则；PyYAML 置于 `[dify]` extra 之后。随 0.4.0 发布。                                              | accepted |
+| [0014](/zh/docs/decisions/adr-0014) | Dify 工作流服务化（analyze / compile / run）与三层安全执行    | 三个信任级别递增的服务端点：analyze / compile 始终可用；run 默认关闭，由 L0 静态导入门控、L1 受限沙箱与（Linux）L2 子进程隔离保护；provider 始终由服务端决定。随 0.5.0 发布。       | proposed |
+| [0015](/zh/docs/decisions/adr-0015) | 关系抽取——带 model-derived / unverified 溯源标记的可选插槽 | 在 `build_relation_graph` 旁新增 `RelationExtractor` Protocol 插槽；默认路径保持逐字节一致，LLM 抽取的边被标记为 `model-derived` + `unverified`，经 `SecurityGate` 筛查，绝不被默默信任。随 0.9.0 发布。 | accepted |
+| [0016](/zh/docs/decisions/adr-0016) | 检索产品化配置                                                         | 新增只收窄的元数据过滤、带溯源的多库 RRF 路由、父子预设，以及不构造任何 embedding/向量组件的经济模式。                                                                                       | accepted |
+| [0017](/zh/docs/decisions/adr-0017) | 对话历史只作为生成上下文                                         | 新增一等公民的历史参数，同时让它远离意图解析、安全、检索查询与证据。                                                                                                                                  | accepted |
+| [0018](/zh/docs/decisions/adr-0018) | 父子块存储级扩展                                                      | 持久化层级/窗口字段，把分块器接入摄取流程，只在隔离之后扩展，而引用仍落在命中的子块上。                                                                                                  | accepted |

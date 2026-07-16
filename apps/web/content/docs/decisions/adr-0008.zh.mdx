@@ -1,0 +1,29 @@
+---
+title: 'ADR 0008: Prompt——打包在 ragspine/prompts/<locale>/ 下的 PromptRegistry'
+description: 将 prompt 外置为随包分发、以 locale 为键的模板文件，置于 PromptRegistry Protocol 之后，运行时用 DomainProfile 的值填充。
+---
+
+> 状态：**accepted** · 日期：2026-06-17
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
+
+隶属于 [0002](/zh/docs/decisions/adr-0002) 产品方向。
+
+## 背景
+
+prompt 应当从内联代码中移出。一个 prompt 是三维的：**模板**（含占位符）× **locale**（[0007](/zh/docs/decisions/adr-0007)）× **`DomainProfile` 的值**（[0004](/zh/docs/decisions/adr-0004)），而"不硬编码公司/领域"这条不变量意味着模板必须在运行时填充，绝不能是字面量。最初提议的位置——仓库根目录的 `prompts/` 文件夹——**不会随 wheel 分发**（`packages=['ragspine']`），因此 `pip install` 的用户（即 [0003](/zh/docs/decisions/adr-0003) 中的目标受众）拿不到它。
+
+## 决策
+
+将 prompt 外置为**随包分发**的模板文件，位于 `ragspine/prompts/<locale>/<category>/*.jinja`，置于 **`PromptRegistry` Protocol** 之后（默认实现基于文件，用户可覆盖）。占位符在运行时由 `DomainProfile` 填充。prompt 保持**集中式**（一棵树，以 locale 为键），而不是按领域模块就近放置。
+
+## 考虑过的备选方案（已否决）
+
+- **仓库根目录的 `prompts/` 文件夹（最初提议）**：外置的方向正确，但位置错误——它无法分发给 `import ragspine` 的用户。
+- **就近放置的 `ragspine/<domain>/prompts/<locale>/`**：符合文档"按文件夹定位"的就近原则，但会把一份可本地化资产打散到八个领域中。否决——这里的读者是翻译者 / locale 包贡献者，他们需要的是每个 locale 一个目录，而不是跨领域搜寻（这与代码文档是不同的访问模式）。
+
+## 影响
+
+- prompt 随 wheel 分发，并像任何其他后端一样可覆盖。
+- 一个 locale 包（[0007](/zh/docs/decisions/adr-0007)）在一定程度上就是"放入一棵新的 `<locale>/` prompt 树"。
+- 翻译者编辑扁平模板而无需触碰代码；diff 保持可审阅。

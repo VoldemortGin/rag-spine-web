@@ -1,0 +1,105 @@
+---
+title: ADR 0018 — Espansione parent-child a livello di store
+description: Persistere il contesto small-to-big, collegare la giunzione Chunker attraverso l'ingestione ed espandere solo dopo il filtraggio RESTRICTED mantenendo oneste le citazioni dei figli.
+---
+
+**Stato:** accettato
+
+**Data:** 2026-07-14
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Questo completa il follow-up rinviato da [ADR 0016](/it/docs/decisions/adr-0016): spostare
+il comportamento parent-child all'espansione a livello di store in fase di recupero. È vincolato dall'ADR 0005 del motore
+(isolare la nuova capacità dal comportamento predefinito byte-identico) e dall'ADR 0010 del motore (isolamento deterministico
+indipendente dall'output del modello).
+
+## Contesto
+
+L'ADR 0016 ha aggiunto `ParentChildChunker`. Al momento del chunking un figlio trasportava `window_text` (il testo
+completo della sezione padre) e `parent_locator` (l'intervallo reale di paragrafi della sezione). Tuttavia la giunzione `Chunker`
+non era collegata all'ingestione narrativa e quei campi non venivano persistiti. Il flusso end-to-end
+small-to-big—individuare un figlio a grana fine, fornire il contesto del padre per la generazione—non è quindi mai stato eseguito sul
+percorso reale persistito.
+
+Questo registro colma la lacuna: persistere i campi di gerarchia/finestra, collegare il chunker in entrambi i percorsi
+di ingestione ed espandere all'uscita del recupero preservando il comportamento predefinito byte-identico,
+la prevenzione delle risposte inventate, la provenienza e l'isolamento a doppia uscita RESTRICTED.
+
+## Decisione
+
+Tre modifiche additive, tutte opt-in; il percorso predefinito rimane byte-identico.
+
+### Persistenza: colonne additive, i vecchi database restano leggibili
+
+`narrative_chunk` acquisisce `parent_id`, `heading`, `window_text` e `parent_locator`, ciascuno
+`TEXT NOT NULL DEFAULT ''`. `ChunkStore.init_schema` esegue una migrazione additiva:
+`PRAGMA table_info`, seguita da un `ALTER TABLE ADD COLUMN` per colonna. Le righe esistenti ricevono valori predefiniti
+vuoti e restano leggibili; non c'è alcuna ricostruzione distruttiva. `StoredChunk` rispecchia i quattro campi
+con valori predefiniti vuoti.
+
+Una ricostruzione con versione dello schema è stata scartata: le colonne additive sono più semplici e mantengono attive le vecchie librerie.
+
+### L'ingestione collega la giunzione `Chunker`
+
+Entrambi i writer accettano `chunker: Chunker | None`, dove il valore predefinito `None` delega al
+`chunk_document` integrato e rimane byte-identico:
+
+- `ingest_narrative(..., chunker=)` per la pipeline batch.
+- `NarrativeIndex(chunker=)` per l'ingestione lato recupero e l'embedding.
+
+`ServiceConfig.chunker` effettua la selezione tramite `make_chunker`, con valore predefinito `"none"`, e il payload del
+worker narrativo trasporta la selezione. Con `parent_child`/`small_to_big`, i figli arrivano con
+`window_text`/`parent_locator` e lo store li persiste.
+
+### Il recupero espande dopo l'uscita di isolamento della linea A
+
+In `narrative_link._to_snippet`, un `window_text` non vuoto diventa una chiave `prompt_text` separata. Il
+`_snippet_text` dell'agente preferisce già quella chiave come contesto di generazione. `text`, `source_locator`
+e `chunk_id` rimangono quelli del figlio individuato. `parent_locator` è un riferimento aggiuntivo di provenienza
+all'intervallo del padre.
+
+L'espansione modifica soltanto il contesto di generazione. Non diventa mai un risultato di ricerca, non cambia il ranking né aggiunge un risultato.
+I chunker predefiniti producono valori vuoti, quindi non viene aggiunta alcuna chiave e la mappatura degli snippet rimane
+byte-identica. Questo riutilizza la stratificazione `prompt_text` stabilita per la compressione post-recupero.
+
+### Decisione fissata sulla finestra RESTRICTED
+
+**`window_text` segue la doppia uscita RESTRICTED già esistente del figlio; quando un figlio è RESTRICTED,
+l'intero snippet—inclusa la sua finestra padre—viene rifiutato.**
+
+`_to_snippet` viene eseguito solo dopo che l'uscita `link/` ha rimosso i chunk `sensitivity == RESTRICTED`. Un
+figlio riservato non raggiunge mai l'espansione della finestra e il suo `window_text` non può mai diventare
+`prompt_text`. Tra le due semantiche candidate—rimuovere solo la finestra o rifiutare l'intero snippet—scegliamo
+il rifiuto dell'intero snippet. Il contesto del padre è esposto solo attraverso un figlio che ha superato entrambe le
+uscite.
+
+Con l'attuale modello di sensibilità a livello di documento, figlio e padre condividono la stessa sensibilità, quindi un
+figlio consentito con una sezione padre riservata non può emergere dall'ingestione. Il meccanismo è comunque
+fissato in via difensiva. `test_parent_child_isolation.py` fornisce un chunk riservato contenente una
+finestra e dimostra che l'intero snippet viene rifiutato senza alcuna fuoriuscita.
+
+## Alternative considerate (scartate)
+
+- Sostituire lo snippet `text` con `window_text`: il contesto espanso si spaccerebbe per evidenza del risultato e
+  comprometterebbe l'onestà della provenienza. Il testo/locator del figlio restano citabili; la finestra è riservata alla sola generazione.
+- Rimuovere la finestra mantenendo lo snippet di un figlio riservato: la gestione parziale è più fragile
+  del rifiuto dell'intero snippet ed è in conflitto con la semantica di uscita esistente.
+- Espandere prima del filtraggio RESTRICTED: questo apre un percorso di fuga diretto. L'espansione avviene rigorosamente in
+  `_to_snippet`, a valle della rimozione.
+- Aggiungere una versione dello schema e ricostruire: l'approccio additivo `ALTER TABLE` mantiene leggibili i vecchi database senza
+  cerimoniale di migrazione.
+
+## Conseguenze
+
+- Small-to-big funziona end-to-end: un match preciso su un figlio fornisce una sezione padre per la generazione mentre
+  la citazione resta ancorata al vero locator del figlio e il locator del padre rimane un
+  riferimento a ritroso.
+- Il comportamento predefinito offline è byte-identico: il chunking predefinito lascia i campi vuoti, non aggiunge chiavi
+  allo snippet e non altera il punteggio né la provenienza. La registrazione dei metadati BM25/vettoriali non legge mai i nuovi
+  campi.
+- Anche `SentenceWindowChunker` acquisisce la persistenza attraverso lo stesso percorso.
+- Gli artefatti modificati includono quattro campi `ChunkStore`/`StoredChunk` e la migrazione, le due
+  giunzioni di ingestione `chunker=`, `ServiceConfig.chunker` e il passaggio attraverso il worker,
+  `narrative_link._to_snippet` da finestra a `prompt_text` e
+  `tests/conformance/test_parent_child_isolation.py` oltre ai test di persistenza/migrazione.

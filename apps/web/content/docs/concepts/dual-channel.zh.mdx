@@ -1,0 +1,175 @@
+---
+title: 双通道
+description: 一条确定性的结构化/数值通道加一条叙事 RAG 通道，由同一个 agent 路由器统一：拆分复合问题并同时运行两条通道。
+---
+
+RAGSpine 用两种根本不同的机制回答两类根本不同的问题——
+由单个 agent 决定一个问题需要哪一条（或两条都要）。
+
+- **"数字是多少？"** → **结构化通道**：事实表加
+  function-calling。确定性，绝不合成数值。
+- **"为什么/发生了什么？"** → **叙事 RAG 通道**：对文档
+  chunk 做混合检索、可选的 listwise 重排，然后由 LLM 带引用地综合。
+
+路由器位于 `agent/agent.py`（`answer_question`）；意图解析与
+澄清门位于 `agent/intent.py`。
+
+<Callout type="info">
+  两条通道绝不会模糊成一条"问模型"的路径。结构化通道是唯一
+  被允许产出数值事实的东西，而且它不信任模型文字——参见
+  [防编造机制](/zh/docs/concepts/anti-fabrication)。
+</Callout>
+
+## Agent 如何路由
+
+每个问题首先由一个零 LLM、配置驱动的规则解析器
+（`RuleIntentParser`，可通过 `IntentParser` Protocol 替换）解析为**四个意图槽位**：
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: '经词表归一化的指标代码（如 REVENUE）；缺失时为 None。',
+    },
+    entity: {
+      type: 'string | null',
+      description: '归一化的实体代码（如 ACME_CN）；缺失时为 None。',
+    },
+    period: {
+      type: '(period_type, value) | null',
+      description: '例如 ("FY", "2024")、("HY", "2024H1")、("QUARTER", "2025Q1")。',
+    },
+    channel: { type: 'string', description: '默认为 TOTAL（如 AGENCY / BANCA / TOTAL）。' },
+  }}
+/>
+
+路由由解析出的槽位与词面线索决定（`parse_intent`）：
+
+<Cards>
+  <Card title="structured">
+    数值意图——识别到了 `metric`，或出现"多少" / "what is" 这类数值线索。回答
+    就是那个数字，来自事实存储。
+  </Card>
+  <Card title="narrative">
+    归因/监管/趋势/"为什么"意图。回答由检索到的
+    片段综合而成，每条都带引用。
+  </Card>
+  <Card title="composite">
+    两者兼具——同时识别到指标**和**叙事线索（如"收入为什么下降了？"）。
+    Agent 先跑结构化路径，再追加一段归因分析。
+  </Card>
+</Cards>
+
+在路由之前，**澄清门**（`clarify_scope`）施加一种刻意的
+不对称：
+
+- 缺失**指标** → _先追问_（猜测指标会是实质性错误）。
+- 缺失**实体/期间** → _带明示假设作答_（默认为本方
+  集团/最近的完整财年，暴露该假设，并提供一键收窄）。
+- **超出作用域/竞争对手实体** → 在任何通道运行之前拒答（参见
+  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)与确定性
+  安全门）。
+
+## 结构化通道：`found` / `not_found` / `unrecognized` 三态
+
+结构化通道唯一产出事实的原语是 `query_metric` 工具
+（`agent/query_tools.py`）。它的执行函数把每个参数经词表
+归一化，然后查询 `fact_metric` 存储。它返回**三种**状态之一——
+绝不猜测：
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    精确值存在。返回数值、单位、全部受控维度代码，
+    以及完整谱系：
+
+    ```json
+    {
+      "status": "found",
+      "value": 1320,
+      "unit": "USD_M",
+      "metric_code": "REVENUE",
+      "entity": "ACME_CN",
+      "period_type": "FY",
+      "period": "2024",
+      "channel": "TOTAL",
+      "source": { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="not_found">
+    所有参数都归一化成功，但事实表中没有匹配行。**不做
+    插值、不做推断**——agent 会把它改写为诚实拒答。
+
+    ```json
+    {
+      "status": "not_found",
+      "normalized": { "metric_code": "REVENUE", "entity": "ACME_CN", "period": "2025", "channel": "TOTAL" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="unrecognized_param">
+    某个参数无法归一化为受控代码（词表返回
+    `None` 而不是猜测）。会点名出问题的参数及其原始值。
+
+    ```json
+    { "status": "unrecognized_param", "param": "entity", "raw": "some unknown company" }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  词表归一化器（`normalize_metric` / `normalize_entity` / `normalize_period`）对一切
+  无法识别的输入返回 `None`。这个 `None` 会变成 `unrecognized_param`——绝不会
+  被强行折算成一个最接近的猜测代码。
+</Callout>
+
+## 叙事 RAG 通道
+
+当路由为 `narrative` 时，agent 调用注入的 `NarrativeRetriever`
+（`_run_narrative`）。默认链路（`retrieval/`）为：
+
+<Steps>
+  <Step>
+    **混合检索**——感知 CJK 的 Okapi BM25 + 可注入的向量通道（默认无 = 纯
+    BM25），用 Reciprocal Rank Fusion 融合（`rrf_fuse`，`k=60`），外加词表驱动的多查询
+    改写。
+  </Step>
+  <Step>
+    **Listwise 重排**——可选的 LLM listwise 评审（`listwise_rerank`）重排头部
+    候选；任何失败都会回退到 RRF 顺序。
+  </Step>
+  <Step>
+    **带引用综合**——LLM 只依据提供的片段作答，agent 会
+    强制补上模型漏引的来源文档名。
+  </Step>
+</Steps>
+
+如果没有接入检索器，或检索一无所获，叙事 RAG 通道会
+诚实降级（"未检索到/尚未接入"），而不是发明一个回答。
+
+## 复合路径：两条都跑、比较、合并
+
+对复合问题，agent 先跑结构化路径，再跑
+叙事路径并合并：
+
+```text
+<structured answer, with the number(s) + lineage>
+
+归因分析：
+<narrative answer, synthesized from cited snippets>
+```
+
+两条通道的来源会拼接在一起。当结构化侧展开为
+多个子任务时（用户显式列出的多个指标/实体/期间），
+agent **以确定性方式、不经 LLM** 执行每个 `query_metric` 子任务
+（`_multi_subtask_answer`），并且对恰好两个可比期间，它会
+自己计算差值。
+
+<Callout type="info">
+  防编造机制是**按路径**施加的，而不是统一开关：结构化路径由事实值
+  确定性地合成回答，多子任务路径根本不调用 LLM，
+  叙事路径信任模型文字但强制引用。这种不对称是刻意的。
+</Callout>

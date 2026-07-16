@@ -1,0 +1,459 @@
+---
+title: Recupero
+description: Il canale RAG narrativo — chunking a granularità di paragrafo, Okapi BM25 consapevole del CJK, un canale vettoriale iniettabile, fusione RRF, reranking listwise via LLM e l'adapter che rimuove i contenuti RESTRICTED prima che possano raggiungere un prompt.
+---
+
+Il dominio `retrieval` (`src/ragspine/retrieval/`) è il **canale RAG narrativo** di RAGSpine —
+la metà che risponde alle domande _"perché / cosa è successo"_ recuperando chunk di documenti,
+fondendo segnali lessicali e (opzionalmente) vettoriali, effettuando il reranking e consegnando snippet citati
+all'agent. È la controparte del canale strutturato deterministico; vedi
+[Doppio canale](/it/docs/concepts/dual-channel) per come l'agent instrada tra i due.
+
+Due proprietà sono qui non negoziabili e imposte a livello di codice:
+
+- **Ibrido semantico per impostazione predefinita, BM25 puro come fallback a zero dipendenze.** Il canale vettoriale è
+  _iniettabile_. Con l'extra `[embed-onnx]` installato, il recupero è genuinamente ibrido
+  (BM25 + semantico ONNX → RRF) senza alcuna configurazione (`RAGSPINE_EMBEDDING=auto`); senza alcun backend di embedding
+  collegato è puro Okapi BM25 + RRF — completamente offline, deterministico, zero SDK.
+- **Isolamento RESTRICTED a due uscite.** I contenuti con sensibilità `RESTRICTED` vengono rimossi in
+  **entrambe** le uscite `rerank/` e `link/` prima che possano raggiungere un prompt. Vedi
+  [Isolamento RESTRICTED](/it/docs/concepts/restricted-isolation).
+
+## Struttura
+
+<Files>
+  <Folder name="retrieval" defaultOpen>
+    <Folder name="chunking">
+      <File name="chunking.py" />
+      <File name="chunk_store.py" />
+    </Folder>
+    <Folder name="lexical">
+      <File name="retrieval.py" />
+    </Folder>
+    <Folder name="vector">
+      <File name="embedding_backends.py" />
+      <File name="store.py" />
+    </Folder>
+    <Folder name="filtering">
+      <File name="metadata_filter.py" />
+      <File name="automatic.py" />
+    </Folder>
+    <Folder name="routing">
+      <File name="router.py" />
+      <File name="multi_index.py" />
+    </Folder>
+    <Folder name="rerank">
+      <File name="listwise_rerank.py" />
+    </Folder>
+    <Folder name="link">
+      <File name="narrative_link.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+La pipeline si legge da sinistra a destra: `chunking` produce e versiona i chunk → `lexical`
+(con `vector` opzionale) li valuta e li fonde → `rerank` riordina i candidati migliori →
+`link` adatta il risultato per l'agent ed elimina i RESTRICTED.
+
+## Preset di prodotto correnti per il recupero
+
+`RAGSPINE_RETRIEVAL_MODE=auto` mantiene il comportamento ibrido configurato. Gli alias `hybrid` e
+`vector` consentono anch'essi il percorso embedding/vettoriale. `economy`, `bm25` e `lexical` sono un preset esplicito
+a zero embedding: l'assemblaggio del servizio non costruisce un backend di embedding né uno store vettoriale.
+
+I predicati sui metadati supportano `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte` e `between`.
+Sono operazioni di restringimento deterministiche che preservano l'ordine. L'estrazione automatica dei filtri è una
+fase opzionale separata; un'estrazione fallita o assente non allarga mai silenziosamente oltre l'insieme di candidati
+non filtrato.
+
+Per librerie multiple, `MultiIndexRetriever` chiede a un router gli ID delle librerie, esegue ciascun
+indice selezionato in modo indipendente e fonde le liste ordinate con RRF. I risultati portano con sé la provenienza `library_id`.
+Se il routing fallisce, il fallback di disponibilità sicuro cerca in ogni libreria configurata.
+
+## chunking — chunker a granularità di paragrafo + store versionato
+
+`chunking/chunking.py` trasforma il testo semplice di un documento in chunk per il recupero. Il budget
+di token è approssimato dal **conteggio dei caratteri** (nessun tokenizzatore di terze parti), mantenendolo
+offline e deterministico.
+
+<TypeTable
+  type={{
+    chunk_document: {
+      type: '(text, meta, *, max_chars=480, overlap_chars=80) -> list[Chunk]',
+      description:
+        'Aggregazione greedy dei paragrafi fino a max_chars, con sovrapposizione adiacente. Testo vuoto → [].',
+    },
+    DocumentMeta: {
+      type: 'dataclass',
+      description:
+        "Metadati a livello di documento ereditati per chunk: doc_id, title, topic, entity, geography, period, language, sensitivity (default 'INTERNAL'), source_locator_prefix.",
+    },
+    Chunk: {
+      type: 'dataclass',
+      description:
+        'Un chunk: chunk_id, doc_id, seq, text, source_locator, intervallo di paragrafi, metadati ereditati e campi di espansione additivi parent_id / heading / window_text / parent_locator.',
+    },
+  }}
+/>
+
+Costanti: `DEFAULT_CHUNK_CHARS = 480`, `DEFAULT_OVERLAP_CHARS = 80`. I singoli paragrafi
+sovradimensionati vengono suddivisi in base ai terminatori di frase (`。！？；.!?;`), poi tagliati forzatamente, **senza sovrapposizione**
+tra i sotto-chunk — così il `text` di un chunk rimane sempre una sottostringa contigua del
+sorgente, il che mantiene oneste le citazioni (vedi [Provenienza](/it/docs/concepts/provenance)).
+`chunk_document` solleva `ValueError` se `max_chars <= 0`, `overlap_chars < 0` o
+`overlap_chars >= max_chars`.
+
+`chunking/chunk_store.py` è lo **store di chunk versionato** (SQLite, che rispecchia lo store
+dei fatti: schema esplicito, SQL parametrizzato, un punto di ingresso `execute_read` di sola lettura).
+
+- `StoredChunk` — ogni campo di `Chunk`, inclusi i campi parent/window, più i metadati di ingestione:
+  `valid_as_of`, `ingested_at`, `version` (default `1`), `active` (default `True`). Gli schemi SQLite
+  più vecchi vengono migrati in modo additivo.
+- `ChunkStore(db_path)` — `init_schema()` crea la tabella `narrative_chunk` ed è
+  idempotente. `replace_doc_chunks(doc_id, chunks, valid_as_of="") -> int` effettua una **sostituzione
+  versionata**: incrementa `version = max(version) + 1`, marca le righe vecchie come `active=0`, inserisce
+  i nuovi chunk `active=1` e restituisce il numero di righe scritte. La re-ingestione è
+  idempotente; passare una lista vuota ritira il documento dall'insieme attivo.
+- `iter_chunks(*, doc_id=None, topic=None, entity=None, geography=None, period=None, language=None, include_inactive=False) -> list[StoredChunk]` — un pre-filtro sui metadati
+  combinato in AND (per impostazione predefinita solo su elementi attivi), usato per restringere i candidati **prima** di qualsiasi valutazione.
+
+## lexical — Okapi BM25 (CJK uni+bigrammi) + fusione RRF
+
+`lexical/retrieval.py` è il nucleo di scoring. È tutto Python puro — nessun `rank-bm25`, nessun
+SDK.
+
+- `tokenize(text) -> list[str]` — converte in minuscolo; le sequenze alfanumeriche ASCII diventano parole; **le
+  sequenze CJK vengono emesse sia come unigrammi sia come bigrammi adiacenti**. Questa doppia granularità è ciò che
+  fa funzionare BM25 per il cinese senza un segmentatore.
+- `bm25_scores(query_tokens, docs_tokens, k1=1.5, b=0.75) -> list[float]` — Okapi
+  BM25 standard (`DEFAULT_BM25_K1 = 1.5`, `DEFAULT_BM25_B = 0.75`).
+- `rrf_fuse(rankings, k=60) -> dict[str, float]` — Reciprocal Rank Fusion, `score += 1.0 / (k + rank)` con rango a partire da 1. La costante è `DEFAULT_RRF_K = 60` (il valore RRF
+  standard).
+- `GlossaryQueryRewriter(max_queries=5)` — un riscrittore multi-query deterministico basato su regole
+  che espande una query usando i sinonimi di entità/metrica del glossario (zero LLM). La query
+  originale è sempre prima.
+
+Questi si compongono nelle classi di recupero:
+
+<TypeTable
+  type={{
+    RetrievalResult: {
+      type: 'dataclass',
+      description:
+        'Risultato: chunk StoredChunk | Chunk e punteggi bm25_score, vector_score e fused_score.',
+    },
+    HybridRetriever: {
+      type: 'class',
+      description:
+        'Pre-filtro sui metadati → (BM25 + vettoriale opzionale) × multi-query → RRF → top_k. embedding_backend=None ⇒ BM25 puro.',
+    },
+    NarrativeIndex: {
+      type: 'class',
+      description:
+        'Ingresso end-to-end: ingestione (chunk + store idempotente) → ricerca ibrida → reranking listwise opzionale.',
+    },
+  }}
+/>
+
+`HybridRetriever.search(...)` applica il pre-filtro sui metadati **prima** di qualsiasi valutazione o
+embedding, calcola i vettori dei chunk in modo lazy (in cache per `chunk_id`) solo per i candidati
+sopravvissuti e risolve i pareggi in modo deterministico tramite `(-fused_score, chunk_id)`.
+
+<Callout type="info">
+  `HybridRetriever` espone anche `.topology() -> PipelineGraph`, un sottile delegato verso
+  l'esportatore di topologia della [pipeline](/it/docs/guides/pipeline) — così puoi renderizzare il cablaggio effettivo
+  di un retriever configurato come Mermaid / DOT / JSON.
+</Callout>
+
+## vector — backend di embedding iniettabili (default: nessuno)
+
+Il canale vettoriale è un _punto di estensione_, non un default. Il Protocol `EmbeddingBackend`
+(definito in `lexical/retrieval.py`) ha un unico metodo:
+
+```python
+class EmbeddingBackend(Protocol):
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+```
+
+Si inietta un'implementazione tramite il parametro keyword `embedding_backend=` su `HybridRetriever`,
+`NarrativeIndex` e `build_narrative_retriever`. L'argomento predefinito a livello di libreria è
+`None` — **il canale vettoriale è disattivato e il recupero è puro BM25 + RRF**. A livello di **servizio**,
+però, `RAGSPINE_EMBEDDING` ora ha come default `auto`: il backend semantico ONNX quando
+`[embed-onnx]` è importabile, altrimenti `None` — così un'installazione predefinita _con l'extra_ è genuinamente
+ibrida fin da subito, mentre un'installazione minimale rimane BM25 puro identico byte per byte.
+
+`vector/embedding_backends.py` include tre backend concreti più una factory:
+
+<Cards>
+  <Card
+    title="OnnxEmbeddingBackend"
+    description="Il default semantico raccomandato (dietro [embed-onnx], via fastembed). Modello paraphrase-multilingual-MiniLM-L12-v2 (384 dimensioni, multilingue — cross-linguale ZH/EN), offline e deterministico. Selezionato da onnx / auto; scarica i pesi al primo utilizzo, poi opera offline."
+  ></Card>
+  <Card
+    title="DeterministicEmbeddingBackend"
+    description="Backend offline a hash lessicale (bucketing dei token blake2b + normalizzazione L2). Zero rete/SDK. La sua docstring lo segnala come non semantico — altamente correlato con BM25, nessun vero guadagno di recall semantico."
+  ></Card>
+  <Card
+    title="SentenceTransformerEmbeddingBackend"
+    description="Modello predefinito Qwen/Qwen3-Embedding-0.6B; device rilevato automaticamente (cuda → mps → cpu, sovrascrivibile via RAGSPINE_EMBEDDING_DEVICE). Il modello viene caricato in modo lazy al primo embed."
+  ></Card>
+  <Card
+    title="OpenAIEmbeddingBackend"
+    description="Modello predefinito text-embedding-3-large; `import openai` lazy; incapsula gli errori dell'SDK come ProviderError."
+  ></Card>
+</Cards>
+
+```python
+from ragspine.retrieval.vector.embedding_backends import make_embedding_backend
+
+# spec (case-insensitive; defaults to env RAGSPINE_EMBEDDING_BACKEND):
+#   None / "none"            → None  (pure BM25 + RRF, the zero-dep fallback)
+#   "auto"                   → OnnxEmbeddingBackend if [embed-onnx] importable, else None
+#   "onnx" / "fastembed" / "minilm" → OnnxEmbeddingBackend (semantic, offline, deterministic)
+#   "deterministic"          → DeterministicEmbeddingBackend
+#   "openai"                 → OpenAIEmbeddingBackend
+#   "qwen3" / "st" / "sentence-transformers" → SentenceTransformerEmbeddingBackend
+backend = make_embedding_backend("onnx")
+```
+
+`vector/store.py` fornisce inoltre un Protocol `VectorStore` pluggabile
+(`upsert` / `query` / `delete` / `count`) con un `InProcessVectorStore` a zero dipendenze
+(coseno brute-force, risoluzione dei pareggi per id crescente). Nota che il suo `query` rispetta un filtro `where` ma
+**non** elimina automaticamente i RESTRICTED — quella rimozione resta alle due uscite autoritative qui sotto.
+
+## rerank — reranker listwise via LLM (fallback RRF)
+
+`rerank/listwise_rerank.py` riordina i candidati migliori con un giudice LLM, dietro il
+Protocol `ListwiseJudge`:
+
+```python
+class ListwiseJudge(Protocol):
+    def judge(self, query: str, candidates: list[str]) -> list[int]: ...
+```
+
+Il punto di ingresso è `listwise_rerank(query, results, judge, *, top_n=10)` (`DEFAULT_TOP_N = 10`). Contano due comportamenti:
+
+1. **Uscita RESTRICTED n. 1.** I candidati il cui `chunk.sensitivity` è uguale (senza distinzione tra maiuscole e minuscole)
+   a `"RESTRICTED"` sono esclusi dall'insieme inviato al giudice e mantenuti nelle loro
+   posizioni RRF originali — il testo RESTRICTED non raggiunge **mai** il prompt del giudice. Se ogni
+   candidato è RESTRICTED, il giudice non viene mai chiamato.
+2. **Fallback RRF.** In caso di qualsiasi eccezione del giudice o output malformato, il sottoinsieme aperto degrada
+   all'ordine identità (RRF). `listwise_rerank` non solleva mai eccezioni.
+
+Le funzioni pure di supporto — `build_listwise_prompt(query, candidates)` e
+`parse_listwise_response(text, n_candidates)` (parsing robusto in una permutazione di lunghezza `n`,
+con fallback all'identità) — rendono il reranking deterministico e testabile senza un modello reale.
+
+## link — adapter verso l'agent (rimuove i RESTRICTED all'uscita)
+
+`link/narrative_link.py` è la cucitura tra questo dominio (la "linea B" del recupero) e
+l'[agent](/it/docs/guides/agent) (la "linea A"). Adatta un `NarrativeIndex` al contratto
+`NarrativeRetriever` dell'agent (che è definito sul lato agent, in `agent/agent.py`).
+
+- `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — il suo
+  `retrieve(query, *, filters=None, top_k=50) -> list[dict]` mappa `filters` in kwargs
+  di metadati, chiama l'indice sottostante, riprova una volta senza filtri se il risultato filtrato è
+  vuoto e restituisce dict di snippet.
+
+  **Uscita RESTRICTED n. 2.** Il valore di ritorno è costruito come una comprehension che elimina ogni chunk
+  la cui sensibilità è uguale a `"RESTRICTED"` _prima_ che venga prodotto qualsiasi dict di snippet:
+
+  ```python
+  return [
+      _to_snippet(r)
+      for r in results
+      if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+  ]
+  ```
+
+  Così il testo RESTRICTED non raggiunge mai il prompt di sintesi dell'LLM — la stessa costante
+  (`RESTRICTED_SENSITIVITY = "RESTRICTED"`) protegge entrambe le uscite.
+
+- `ProviderListwiseJudge(provider)` — un `ListwiseJudge` concreto basato sul
+  `LLMProvider` dell'agent. Costruisce il prompt, effettua una singola chiamata `provider.chat(...)` e analizza la
+  risposta; gli errori del provider si propagano e vengono intercettati dalla degradazione di `listwise_rerank`.
+- `build_narrative_retriever(chunk_db, provider=None, *, embedding_backend=None) -> tuple[NarrativeIndexRetriever, ChunkStore]` — il punto di ingresso per il cablaggio CLI/servizio. Apre lo
+  store di chunk, chiama `init_schema` e assembla la catena predefinita: **BM25 puro + RRF**
+  (nessun backend vettoriale per impostazione predefinita) + multi-query `GlossaryQueryRewriter` + (quando viene
+  fornito `provider`) un reranking `ProviderListwiseJudge`. La chiusura dello store spetta al chiamante.
+
+Un dict di snippet porta con sé la provenienza completa: `text`, `doc_id`, `title`, `source_locator`,
+`chunk_id`, i campi dei metadati, `sensitivity` e un dict `scores` annidato
+(`{"bm25", "vector", "fused"}`).
+
+## Come collegarlo
+
+```python
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Default: pure BM25 + RRF + glossary multi-query + (with a provider) listwise rerank.
+retriever, store = build_narrative_retriever("data/chunks.db")
+try:
+    snippets = retriever.retrieve("为什么营收下滑", filters={"entity": "ACME_CN"}, top_k=10)
+    # snippets is RESTRICTED-free and carries full lineage per item
+finally:
+    store.close()
+```
+
+<Callout type="warn">
+  Entrambe le uscite RESTRICTED (`rerank/` e `link/`) devono rimanere. Sono la metà imposta a livello di codice
+  dell'invariante di [isolamento RESTRICTED](/it/docs/concepts/restricted-isolation); rimuoverne una qualsiasi
+  lascerebbe che contenuti riservati raggiungano un prompt.
+</Callout>
+
+## Lo stack di capacità opt-in (0.7.0+)
+
+Tutto quanto sopra è il **loop predefinito**: offline, deterministico, BM25 + RRF (denso attivato
+automaticamente quando `[embed-onnx]` è presente). Le release 0.7.0 e 0.8.0 aggiungono un ampio insieme di
+tecniche RAG mainstream come **layer opt-in** sulle cuciture Protocol esistenti. Ciascuno è
+**disattivato per impostazione predefinita e identico byte per byte quando non selezionato**, scelto da una factory `make_*` o dalla
+corrispondente variabile d'ambiente `RAGSPINE_*`, e ciascuno eredita l'isolamento RESTRICTED a due uscite
+e gli invarianti di provenienza — un nuovo layer non indebolisce mai la prevenzione delle risposte inventate. Si raggruppano
+in base alla fase su cui agiscono.
+
+<Callout type="info">
+  Il default resta deterministico e offline; selezionare un layer è un opt-in deliberato. I numeri
+  restano sempre nel [canale strutturato](/it/docs/architecture/channels) — ogni layer qui sotto modella solo
+  il recupero *narrativo*. L'elenco per release è nel [Changelog](/it/docs/changelog).
+</Callout>
+
+### Indicizzazione e chunking
+
+- **Contextual Retrieval** (`RAGSPINE_CONTEXTUAL` / `make_index_text_fn`) — antepone un
+  header di contesto deterministico (`title · entity · period · heading`, vocabolario controllato, zero
+  contenuti inventati) al **solo testo di indice/embedding**. `chunk.text`, `source_locator` e le citazioni
+  restano identici byte per byte.
+- **Layout-aware e parent-child** (`RAGSPINE_CHUNKER=layout|parent_child`) — suddivide sui
+  confini strutturali invece che su un budget fisso di caratteri. I figli portano `parent_id`, `heading`,
+  `window_text` e `parent_locator`; lo store li persiste e il recupero espande il figlio
+  selezionato in `prompt_text` separati destinati alla sola generazione.
+- **Sentence-window e semantico** (`RAGSPINE_CHUNKER=sentence_window|semantic`) — un chunk per
+  frase con una finestra al momento della sintesi, oppure suddivisioni sui confini degli embedding (il semantico usa
+  `[embed-onnx]`).
+- **Preset di dominio — laws / qa / book** (`RAGSPINE_CHUNKER=laws|qa|book`) — sottili
+  chunker layout-aware che cambiano solo il rilevamento delle intestazioni per una famiglia di documenti ciascuno: **laws**
+  inizia una sezione a ogni clausola (`第N条/款/项`), **book** a ogni capitolo (`第N章/节/篇`, o
+  un'intestazione markdown / numerata), e **qa** accoppia ogni domanda (`Q:` / `问：` / una riga che termina con `?`)
+  con i paragrafi di risposta che seguono sotto un `parent_id` condiviso. Tutto il resto — il
+  budget, `parent_id` e i locator — è ereditato dal chunker di base.
+
+<Callout type="warn">
+  L'espansione parent/window non cambia mai l'identità della citazione. `text`, `chunk_id` e `source_locator`
+  rimangono il figlio corrispondente; il contesto espanso usa `prompt_text`. Un figlio `RESTRICTED` viene eliminato
+  prima di `_to_snippet`, insieme alla sua finestra, così un parent dall'aspetto sicuro non può reintrodurre
+  testo riservato.
+</Callout>
+- **Albero multi-granularità RAPTOR** (`make_raptor_retriever` / `RAGSPINE_RAPTOR*`) — clustering
+a soglia **deterministico** ricorsivo; i riassunti `is_synthesis` per cluster portano l'unione della
+provenienza dei loro membri e **non sono mai fatti citabili**. Il recupero può estrarre una foglia (dettaglio) o un
+nodo interno (tema).
+
+### Rappresentazione e reranking
+
+- **Default denso semantico** (`RAGSPINE_EMBEDDING=onnx|auto`, `[embed-onnx]`) — il
+  `OnnxEmbeddingBackend` di cui sopra; `auto` si risolve in ONNX quando importabile, altrimenti in BM25 puro, così il
+  loop fornito diventa genuinamente ibrido BM25 + denso → RRF senza alcuna configurazione.
+- **Reranking cross-encoder locale** (`RAGSPINE_RERANKER=cross_encoder|ce|auto`, `[rerank]`) — il
+  cervello di reranking offline (`CrossEncoderReranker`, ms-marco MiniLM); quando selezionato ha la
+  precedenza sul giudice listwise LLM.
+- **Late-interaction ColBERT** (`RAGSPINE_RERANKER=colbert`, `[colbert]`) — scoring
+  **MaxSim** multi-vettore a livello di token, fornito come reranker.
+- **Learned-sparse SPLADE** (`RAGSPINE_RERANKER=splade`, `[splade]`) — scoring neurale sparso
+  a espansione di termini (interpretabile come BM25, più forte), fornito come reranker.
+
+<Callout type="info">
+  I reranker cross-encoder, ColBERT e SPLADE girano tutti **dentro** `listwise_rerank`, quindi
+  ereditano gratuitamente l'**uscita RESTRICTED n. 1** — un candidato RESTRICTED non raggiunge mai il reranker.
+  ColBERT / SPLADE sono forniti come **reranker**; i loro *backend di recupero* multi-vettore / sparsi (indici)
+  sono un onesto sviluppo futuro.
+</Callout>
+
+### Trasformazione delle query
+
+- **Decomposizione LLM** (`RAGSPINE_QUERY_DECOMPOSE=llm`) — fan-out multi-sotto-domanda; ogni
+  sotto-domanda riesegue l'intera pipeline protetta e le sue risposte vengono fuse in modo deterministico.
+- **HyDE · RAG-Fusion · step-back** (`RAGSPINE_QUERY_TRANSFORM=hyde|rag_fusion|step_back`) —
+  trasformazioni di query via LLM sopra il retriever di base. RAG-Fusion riutilizza `rrf_fuse`; il
+  documento ipotetico di HyDE è una **sonda di recupero, mai un fatto citabile**.
+- **Adaptive-RAG** (`RAGSPINE_ADAPTIVE`) — un classificatore di complessità a euristica deterministica (o LLM opt-in)
+  instrada tra il percorso single-shot e la decomposizione.
+- **Recupero correttivo / CRAG** (`RAGSPINE_CORRECTIVE`) — promuove il solitario
+  fallback `retry_without_filters` a un loop deterministico grade→act limitato (≤2)
+  (drop-filters → rewrite → refuse); rifiutare un contesto debole è la scelta sicura per la prevenzione delle risposte inventate.
+
+Ogni variante generata riesegue il gate di sicurezza deterministico **prima del recupero** — una
+sotto-query su un concorrente viene rifiutata, così i numeri interni non trapelano mai.
+
+### Post-recupero
+
+- **MMR · lost-in-the-middle · compressione** (`RAGSPINE_POSTPROCESSOR`, es.
+  `"mmr,lost_in_middle"`) — una catena `NodePostprocessor` deterministica che gira _dopo_ il reranking
+  e _prima_ dell'assemblaggio del prompt: de-duplicazione per diversità MMR, riordinamento lost-in-the-middle (i risultati migliori
+  in testa e in coda) e compressione estrattiva del contesto. La compressione scrive una chiave
+  `prompt_text` separata che l'agent preferisce per il prompt, lasciando `text` e ogni campo di riferimento
+  identici byte per byte. Il compressore LLMLingua-2 / LLM è uno sviluppo futuro sulla cucitura.
+
+### Grafo e multi-hop
+
+- **Grafo di relazioni strutturato** (dominio `graph/`) — un grafo tipizzato deterministico sulle
+  dimensioni controllate per **roll-up delle controllate, confronto tra pari e tracciamento delle derivazioni**
+  (interamente citato), più un Protocol `GraphStore` (`RAGSPINE_GRAPH_STORE`, default in-process +
+  adapter `[graph]` `networkx`) e uno scheletro **opt-in** di estrazione / community GraphRAG narrativo
+  (dietro `[graph]` + `[llm]`). È una superficie multi-hop autonoma, non un ramo del router
+  — vedi [Canali](/it/docs/architecture/channels).
+- **Slot relation-extractor** (`RAGSPINE_RELATION_EXTRACTOR`, `make_relation_extractor`) — uno
+  slot opt-in accanto a `build_relation_graph` per le relazioni che vivono solo nel testo narrativo.
+  Il default (`None`) lascia il grafo di base identico byte per byte; l'estrattore deterministico per co-occorrenza
+  aggiunge archi `co_occurs_with` a lignaggio pulito; l'estrattore LLM (dietro `[llm]`)
+  timbra ogni arco `model-derived` + `unverified`, filtra entrambi gli estremi attraverso il
+  `SecurityGate` e non lascia mai che il testo RESTRICTED raggiunga il modello. Vedi
+  [ADR 0015](/it/docs/decisions/adr-0015).
+
+### Multimodale
+
+- **Recupero di documenti visuali ColPali** (`RAGSPINE_VISUAL_EMBEDDER=colpali`, `[colpali]`) —
+  late interaction page-as-image (MaxSim sui patch visivi, riutilizzando lo scorer ColBERT), per
+  report densi di grafici e figure dove OCR→testo perde il layout. **Opt-in e GPU**; un hit
+  visuale è un indizio con riferimento alla pagina (`is_visual`), mai un fatto citabile, e le pagine RESTRICTED vengono
+  eliminate alla costruzione dell'indice. L'end-to-end su GPU reale è uno sviluppo futuro (`colqwen2` è l'alternativa
+  di modello più permissiva).
+
+L'opt-in è uniforme — inietta il risultato di una factory, oppure imposta la variabile d'ambiente e lascia che il servizio la colleghi:
+
+```python
+from ragspine.retrieval.rerank.cross_encoder import make_reranker
+from ragspine.retrieval.postprocess import make_postprocessor
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Offline cross-encoder rerank + an MMR / lost-in-the-middle post-chain.
+retriever, store = build_narrative_retriever(
+    "data/chunks.db",
+    reranker=make_reranker("cross_encoder"),                  # or RAGSPINE_RERANKER=cross_encoder
+    postprocessor=make_postprocessor("mmr,lost_in_middle"),   # or RAGSPINE_POSTPROCESSOR="mmr,lost_in_middle"
+)
+```
+
+## Vedi anche
+
+<Cards>
+  <Card
+    title="Doppio canale"
+    href="/it/docs/concepts/dual-channel"
+    description="Come l'agent instrada tra il canale strutturato e quello narrativo."
+  />
+  <Card
+    title="Isolamento RESTRICTED"
+    href="/it/docs/concepts/restricted-isolation"
+    description="L'invariante di filtraggio a due uscite che questo dominio impone."
+  />
+  <Card
+    title="Agente"
+    href="/it/docs/guides/agent"
+    description="L'orchestratore che consuma un NarrativeRetriever e sintetizza risposte citate."
+  />
+  <Card
+    title="Punti di estensione"
+    href="/it/docs/reference/extension-points"
+    description="EmbeddingBackend, ListwiseJudge, NarrativeRetriever e gli altri Protocol."
+  />
+</Cards>

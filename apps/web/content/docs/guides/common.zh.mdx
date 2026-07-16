@@ -1,0 +1,199 @@
+---
+title: 通用功能（Common）
+description: 每个领域共享的横切原语——可配置的公司/领域 profile、确定性敏感度分类、维度词表、隐私感知的可观测性，以及全局路径常量。
+---
+
+**common** 领域承载所有其他领域都依赖的横切原语：
+可配置的**公司/领域 profile**（因此绝不硬编码任何公司）、
+确定性的**敏感度**模型、维度**词表**、隐私感知的
+**可观测性**，以及全局路径的唯一事实来源。它们不依赖
+系统的其余部分——它们是 import 图的最底层。
+
+<Callout type="info">
+  包：`src/ragspine/common/`。契约：`src/ragspine/common/CLAUDE.md`。
+</Callout>
+
+## 目录结构
+
+<Files>
+  <Folder name="common" defaultOpen>
+    <File name="company_profile.py — DomainProfile / CompanyProfile + 加载器" />
+    <File name="core.py — 全局路径常量（唯一事实来源）" />
+    <File name="glossary.py — 维度同义词 + 归一化" />
+    <File name="observability.py — request_id + 结构化追踪" />
+    <File name="sensitivity.py — 确定性敏感度分类器" />
+  </Folder>
+</Files>
+
+## 公司 / 领域 profile
+
+`company_profile.py` 让 RAGSpine 成为通用的管理层 copilot，而不是硬编码的
+财务应用。身份、同义词、维度和竞争对手列表全部来自一个 TOML
+文件（`config/company.toml`）；文件缺失时静默回退到内置的 ACME 默认值。
+
+profile 是一个不可变的 frozen dataclass。`CompanyProfile` 是同一个 `DomainProfile`
+类的模块级**别名**——两个名字在 `isinstance` 检查和构造器中都可用。
+
+<TypeTable
+  type={{
+    home_company_name: { type: 'str' },
+    home_entity_code: { type: 'str' },
+    home_entity_synonyms: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: '别名 → 实体代码。',
+    },
+    entity_geography: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: '实体代码 → 地理区域。',
+    },
+    external_entities: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: '竞争对手别名 → 显示名。',
+    },
+    home_entity_labels: { type: 'dict[str, str]', default: '{}' },
+    sensitivity: { type: 'SensitivityPolicy', default: 'SensitivityPolicy()' },
+    dimensions: { type: 'tuple[DimensionSpec, ...]', default: '()' },
+  }}
+/>
+
+每个声明的维度都是一个不可变的 `DimensionSpec`（ADR 0004）：`name`、`label`、`kind`
+（`categorical` / `temporal` / `measure`）、`synonyms`、`units`、`labels`、`default`、
+`required`、`clarify`（`ask_first` / `assume` / `none`）、`identity`、`expand`、
+`derived_from` / `derivation`，以及编造白名单标志。默认 profile
+声明五个维度——`metric`、`entity`、`period`（temporal）、`channel`
+（默认 `TOTAL`、不展开）和 `geography`（`identity=False`，由 `entity` 派生）。
+
+```python
+from ragspine.common.company_profile import load_company_profile
+
+profile = load_company_profile()          # explicit path > $RAGSPINE_COMPANY_CONFIG > config/company.toml
+print(profile.home_entity_code)           # 'ACME_GROUP' by default
+```
+
+`load_company_profile(path=None)` 解析配置路径（显式参数 →
+`RAGSPINE_COMPANY_CONFIG` 环境变量 → `config/company.toml`），用 `tomllib`/`tomli` 解析，
+在文件缺失或无法解析时回退到内置默认值——绝不抛出，
+绝不打印。
+
+<Callout type="warn">
+  **配置驱动，不硬编码公司。** 身份、指标和竞争对手来自 profile。
+  `external_entities` 映射（竞争对手别名 → 显示名）是 agent 识别
+  作用域外竞争对手问题的方式。任何地方都不要硬编码公司。
+</Callout>
+
+## 敏感度
+
+`sensitivity.py` 是确定性的数据分级层，由
+[叙事摄取](/zh/docs/guides/ingestion#叙事摄取)路径应用，也是下游
+[RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)所依赖的基础。级别是
+普通字符串——没有枚举。唯一的命名常量是 `RESTRICTED = "RESTRICTED"`；
+未标记的默认级别是 `"INTERNAL"`。
+
+规则存放在一个不可变的 `SensitivityPolicy` 中（从 `[sensitivity]` 配置
+节读取，没有硬编码的公司词汇）：
+
+<TypeTable
+  type={{
+    default_level: { type: 'str', default: '"INTERNAL"' },
+    escalate_unknown_to_restricted: {
+      type: 'bool',
+      default: 'False',
+      description: '严格开关：把所有未知内容都视为 RESTRICTED。',
+    },
+    restricted_filename_patterns: { type: 'list[str]', default: '[]' },
+    restricted_keywords: { type: 'list[str]', default: '[]' },
+  }}
+/>
+
+`classify_sensitivity(filename, text, policy) -> str` 是一个纯函数（零外部
+调用），按优先级顺序返回第一个匹配的级别：
+
+<Steps>
+  <Step>文件名 / 路径匹配某个 `restricted_filename_patterns` 条目 → `RESTRICTED`</Step>
+  <Step>否则文本匹配某个 `restricted_keywords` 条目 → `RESTRICTED`</Step>
+  <Step>否则 `escalate_unknown_to_restricted` 为 `True` → `RESTRICTED`</Step>
+  <Step>否则返回 `policy.default_level`（默认 `"INTERNAL"`）</Step>
+</Steps>
+
+安全立场：未标记的文档默认为 `INTERNAL`；信号命中时升级为
+`RESTRICTED`；一刀切的"所有未知 → RESTRICTED"行为是可选启用的严格
+开关，默认关闭。
+
+## 词表
+
+`glossary.py` 把自由形式的维度同义词归一化为受控代码。它没有
+类——只有模块级函数加上由已加载 profile 派生的字典。
+无法识别的输入返回 `None`；它绝不猜测。
+
+| 函数                                                                           | 映射                                                           |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `normalize_metric(raw) -> str \| None`                                         | 指标同义词 → `metric_code`                                    |
+| `normalize_entity(raw) -> str \| None`                                         | 实体同义词 → `entity_code`                                    |
+| `resolve_external_entity(text) -> str \| None`                                 | 竞争对手提及 → 显示名（最长匹配）                             |
+| `geography_for_entity(entity_code) -> str \| None`                             | 实体的默认地理区域                                            |
+| `unit_for_metric(metric_code) -> str \| None`                                  | 指标的默认单位                                                |
+| `normalize_period(raw) -> tuple[str, str] \| None`                             | 绝对期间 → `(period_type, period)`                            |
+| `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | 相对期间（今年/去年/上季度…）→ `(period_type, period)`        |
+
+期间归一化产出的 `period_type` 取值与
+[事实存储](/zh/docs/guides/storage#dim_key--upsert-键)所使用的一致：`FY`（`FY2024` / `2024`）、
+`HY`（`2024H1`）和 `QUARTER`（`2025Q1`）。
+
+```python
+from ragspine.common.glossary import normalize_metric, normalize_period
+
+normalize_metric("营收")        # 'REVENUE'
+normalize_period("FY 2024")    # ('FY', '2024')
+normalize_metric("not a metric")  # None — never guesses
+```
+
+## 可观测性
+
+`observability.py` 是两个小原语：
+
+- `new_request_id() -> str` — 12 字符的 `uuid4` 十六进制短码。
+- `emit_trace(logger=None, **fields) -> None` — 以固定消息
+  `"trace"` 记录一条 INFO 日志，通过 `extra=` 把 `**fields` 附加到日志记录上。它只使用
+  stdlib 的 `logging`（不调用 `basicConfig`）；由宿主或测试挂接 handler。logger 名称是
+  `TRACE_LOGGER_NAME = "ragspine.trace"`。
+
+<Callout type="warn">
+  **隐私感知的 trace。** 日志被视为 Restricted。`emit_trace` 只应携带
+  非敏感元数据——request_id、路由、受控代码（metric / entity / period / channel）、
+  状态计数、分数、布尔标志、耗时、token 用量——**绝不**携带原始回答文本、
+  事实值或 chunk 文本。
+</Callout>
+
+## Core — 全局常量
+
+`core.py` 是路径的唯一事实来源，从 `__file__` 派生（不依赖 cwd 或
+`rootutils`，零 import 时副作用）：
+
+| 常量                      | 值                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `REPO_ROOT`               | 仓库根目录，来自 `Path(__file__).parents[3]`                                   |
+| `DATA_DIR`                | `REPO_ROOT / "data"`                                                           |
+| `DEFAULT_FACT_DB`         | `data/fact_metric.db` — 事实表**和**叙事 chunk 表（同一个 sqlite）             |
+| `DEFAULT_MAPPING_DB`      | `data/color_mapping.db` — 颜色映射注册表                                       |
+| `DEFAULT_REVIEW_QUEUE_DB` | `data/review_queue.db` — SME 评审队列                                          |
+
+## 本领域坚守的不变量
+
+- **配置驱动**——身份 / 指标 / 竞争对手来自 `CompanyProfile`；绝不
+  硬编码公司。
+- **隐私感知的 trace**——`observability` 只记录代码 / 计数 / 耗时，绝不记录
+  回答、事实值或 chunk 文本。
+- **确定性、绝不猜测的归一化**——词表与敏感度分类器都是
+  纯函数；无法识别的输入返回 `None` / 默认级别。
+
+## 相关阅读
+
+<Cards>
+  <Card title="存储指南" href="/zh/docs/guides/storage" />
+  <Card title="摄取指南——摄取时的敏感度" href="/zh/docs/guides/ingestion" />
+  <Card title="概念：RESTRICTED 隔离" href="/zh/docs/concepts/restricted-isolation" />
+  <Card title="概念：溯源与链路" href="/zh/docs/concepts/provenance" />
+</Cards>

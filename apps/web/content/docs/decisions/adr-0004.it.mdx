@@ -1,0 +1,48 @@
+---
+title: 'ADR 0004: Generalità completa — DomainProfile e fatti a dimensioni arbitrarie'
+description: Generalizzare completamente — CompanyProfile diventa DomainProfile e il canale strutturato diventa uno store di fatti tipizzati con dimensioni arbitrarie definite dall'utente.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002). Condizionato da [0003](/it/docs/decisions/adr-0003).
+
+## Contesto
+
+La spina dorsale composta da RAG narrativo + agent + prevenzione delle risposte inventate è genuinamente agnostica rispetto al dominio, ma
+il canale strutturato è finanziario fino al midollo: una 4-tupla fissa `metric/entity/period/channel`,
+tabelle `fact_metric`, REVENUE/PROFIT/ROE e un vocabolario di metriche ancora
+hardcoded in `common/glossary.py` (entità/geografia/sensibilità sono già
+guidate dalla configurazione; le metriche no). Avendo scelto una libreria general-purpose
+([0003](/it/docs/decisions/adr-0003)), "generale" deve valere per _entrambi_ i canali.
+
+## Decisione
+
+Generalizzare **completamente**. `CompanyProfile` → `DomainProfile`. Il canale strutturato
+diventa uno **store di fatti tipizzati con dimensioni arbitrarie definite dall'utente** più una
+query parametrica su di esse; metrica/periodo/canale collassano in dimensioni dichiarate. Il vocabolario
+di metriche e i sinonimi passano da `glossary.py` alla configurazione. Finance/ACME viene fornito come
+**un esempio incluso tra ≥2**, con almeno un esempio non finanziario per dimostrare
+la generalità tramite dimostrazione pratica.
+
+## Alternative considerate (respinte)
+
+- **Generalità limitata alla spina dorsale (opzione B)**: dichiarare "generali" solo RAG narrativo + agent +
+  prevenzione delle risposte inventate; mantenere il canale numerico strutturato come modulo
+  finanziario forkabile. Respinta — cede il differenziatore più raro (Q&A numerico
+  strutturato deterministico) a un "forkatelo da soli."
+- **Guidata dalla configurazione ma senza secondo dominio (opzione C)**: dimostrare la generalità per costruzione
+  (nessun elemento finanziario hardcoded) senza ancora fornire una demo di un secondo dominio. Respinta come
+  _punto di arrivo_ — è stata scelta invece la generalizzazione completa, con un esempio reale di un secondo dominio.
+
+## Conseguenze
+
+- La scommessa ingegneristica più grande dell'insieme: ne conseguono la modifica dello schema (4-tupla → dimensioni arbitrarie),
+  la generazione dinamica degli schemi dei tool e il parsing guidato dalla configurazione.
+- Assorbe la questione autonoma della "completezza guidata dalla configurazione".
+- Obbliga il parser degli intenti a smettere di hardcodare le dimensioni finanziarie → [0010](/it/docs/decisions/adr-0010).
+- **Rischio:** il rigore derivava in parte _proprio dai_ vincoli finanziari; la generalizzazione non deve
+  indebolire alcuna invariante. Questa è stata la scelta più ambiziosa dell'utente rispetto al
+  percorso incrementale raccomandato — l'implementazione deve proteggere esplicitamente le invarianti.

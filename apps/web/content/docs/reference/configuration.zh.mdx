@@ -1,0 +1,105 @@
+---
+title: 配置
+description: ServiceConfig 环境变量、检索选择器、工作流执行闸门、公开 API 凭据，以及 CompanyProfile。
+---
+
+`ServiceConfig.from_env()` 把 dataclass 字段 `name` 映射到 `RAGSPINE_NAME`。仍然支持
+三个旧式别名：`RAGSPINE_PROVIDER` → `provider_type`、`RAGSPINE_COMPANY_PROFILE` →
+`company_profile_path`，以及 `RAGSPINE_FAQ_SOURCE` → `faq_source`。规范化的字段名变量
+优先于其别名。
+
+## 核心与存储
+
+| 变量                           | 默认值                     | 用途                                           |
+| ------------------------------ | -------------------------- | ---------------------------------------------- |
+| `RAGSPINE_DB_PATH`             | `data/fact_metric.db`      | 结构化事实 SQLite 存储                         |
+| `RAGSPINE_CHUNK_DB_PATH`       | 未设置                     | 叙事 chunk 存储；未设置时诚实降级              |
+| `RAGSPINE_MAPPING_DB_PATH`     | 未设置                     | 映射存储                                       |
+| `RAGSPINE_QUEUE_DB_PATH`       | 未设置                     | SME 审核队列，不是 RQ 作业队列                 |
+| `RAGSPINE_MANIFEST_DB_PATH`    | 未设置                     | 结构化摄取清单                                 |
+| `RAGSPINE_REDIS_URL`           | `redis://localhost:6379/0` | RQ/Redis 连接                                  |
+| `RAGSPINE_ALLOWED_UPLOAD_ROOT` | 未设置                     | 解析后的摄取路径白名单                         |
+| `RAGSPINE_FAQ_SOURCE`          | 未设置                     | 经审定的 FAQ JSON；未设置意味着空缓存          |
+| `RAGSPINE_REFERENCE_DATE`      | 未设置                     | 用于相对期间解析的 ISO 日期                    |
+
+## Provider 与检索
+
+| 变量                          | 默认值           | 取值 / 用途                                                                              |
+| ----------------------------- | ---------------- | ---------------------------------------------------------------------------------------- |
+| `RAGSPINE_PROVIDER`           | `mock`           | `mock` 或 `anthropic`                                                                    |
+| `RAGSPINE_MODEL`              | provider 默认值  | 服务端模型 ID                                                                            |
+| `RAGSPINE_BASE_URL`           | 未设置           | 服务端 provider 网关 URL                                                                 |
+| `RAGSPINE_TOKENS_PER_MINUTE`  | `0`              | corespine 滑动窗口 provider 限流；0 表示关闭                                             |
+| `RAGSPINE_RETRIEVAL_MODE`     | `auto`           | `auto`/`hybrid`/`vector`，或零 embedding 的 `economy`/`bm25`/`lexical`                   |
+| `RAGSPINE_EMBEDDING`          | `auto`           | `none`、`auto`、`onnx`、`deterministic` 或 `openai`                                      |
+| `RAGSPINE_RERANKER`           | `none`           | `cross_encoder`、`colbert`、`splade`、`auto` 或不启用                                    |
+| `RAGSPINE_POSTPROCESSOR`      | `none`           | 逗号分隔的链，例如 `mmr,lost_in_middle`                                                  |
+| `RAGSPINE_QUERY_DECOMPOSE`    | `none`           | 可选的 LLM 查询分解                                                                      |
+| `RAGSPINE_CORRECTIVE`         | `none`           | 可选的 `crag` 包装器                                                                     |
+| `RAGSPINE_QUERY_TRANSFORM`    | `none`           | `hyde`、`rag_fusion` 或 `step_back`                                                      |
+| `RAGSPINE_ADAPTIVE`           | `none`           | 可选的启发式/LLM 复杂度路由                                                              |
+| `RAGSPINE_CHUNKER`            | `none`           | 默认、父子/small-to-big、版面、法律、QA、书籍、句子窗口或语义                            |
+| `RAGSPINE_VECTOR_STORE`       | `none`           | 不启用、进程内，或配置的持久化适配器                                                     |
+| `RAGSPINE_PERSISTENCE_POLICY` | `default`        | 隔离优先的默认策略，或 `persist_everything`                                              |
+
+经济模式比设置一个便宜的 embedding 更彻底：它根本不会构造 embedding
+后端或向量存储。
+
+## 工作流与公开兼容 API
+
+| 变量                          | 默认值           | 用途                                                          |
+| ----------------------------- | ---------------- | ------------------------------------------------------------ |
+| `RAGSPINE_WORKFLOW_MATCHER`   | `auto`           | 工作流匹配器选择；auto 可回退到词法匹配                       |
+| `RAGSPINE_DIFY_RUN_ENABLED`   | `false`          | Dify/n8n 兼容执行的总闸门                                     |
+| `RAGSPINE_DIFY_RUN_TIMEOUT_S` | `10.0`           | 执行超时（秒）                                                |
+| `RAGSPINE_DIFY_RUN_ISOLATION` | `inprocess`      | `inprocess` 或 Linux 增强的 `subprocess`                      |
+| `RAGSPINE_STUDIO_DIR`         | 空               | 挂载到 `/studio` 的已存在静态目录                             |
+| `RAGSPINE_DIFY_PUBLIC_APPS`   | 空               | `key=/path/workflow.yml;...`；为空则禁用公开 Dify API         |
+| `RAGSPINE_N8N_API_KEY`        | 未设置           | 期望的 `X-N8N-API-KEY`；未设置则禁用 `/api/v1/*`              |
+| `RAGSPINE_N8N_STORE_PATH`     | `data/n8n_store` | n8n 兼容文件存储的根目录                                      |
+
+启用执行是一个信任边界决策，不是认证。内部运行路由仍然
+需要反向代理/网络层保护。公开的 Dify 与 n8n API 有各自的密钥；webhook
+有意不做认证。
+
+## CompanyProfile
+
+公司档案控制本公司身份、实体别名、标签/地理、竞争对手作用域，以及
+敏感级别分类。引擎使用的加载器读取 `RAGSPINE_COMPANY_CONFIG` 或
+显式路径：
+
+```bash
+RAGSPINE_COMPANY_CONFIG=config/company.toml \
+  .venv/bin/python scripts/run_server.py
+```
+
+`ServiceConfig.company_profile_path` 由规范化的
+`RAGSPINE_COMPANY_PROFILE_PATH` 或旧式的 `RAGSPINE_COMPANY_PROFILE` 填充，但当前的公司档案
+加载走的是另一个 `RAGSPINE_COMPANY_CONFIG` 路径。在这些组装面统一之前，
+请优先使用后者。
+
+```toml
+[home]
+company_name = "YourCo"
+entity_code = "YOURCO_GROUP"
+
+[home.synonyms]
+"yourco" = "YOURCO_GROUP"
+
+[external_entities]
+"globex" = "Globex"
+
+[sensitivity]
+default_level = "INTERNAL"
+restricted_keywords = ["board_minutes", "绩效"]
+```
+
+任何生产环境的公司身份都不应硬编码在引擎中。竞争对手/拒答决策与
+受限内容分类均派生自该档案。
+
+## Provider 测试说明
+
+确定性的 mock 路径是经过完整验证的离线基线。项目作者身在
+中国，无法访问 Anthropic API，因此 Anthropic 特有的行为没有获得
+同等程度的直接集成测试。使用该适配器的用户应在自己的环境中验证模型 ID、凭据、
+网关行为与速率限制。

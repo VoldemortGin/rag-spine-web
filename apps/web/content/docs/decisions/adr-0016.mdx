@@ -1,0 +1,111 @@
+---
+title: ADR 0016 — Retrieval productization config
+description: Metadata filtering, multi-index routing, parent-child preset, and economy mode, with every retrieval invariant preserved.
+---
+
+**Status:** accepted
+
+**Date:** 2026-07-14
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+Part of the [ADR 0002 product direction](/docs/decisions/adr-0002). Constrained by
+[ADR 0005](/docs/decisions/adr-0005) (new capability isolated from the byte-identical default path)
+and [ADR 0010](/docs/decisions/adr-0010) (deterministic security/isolation independent of model
+output). It mirrors the seam meta-pattern of [ADR 0015](/docs/decisions/adr-0015).
+
+## Context
+
+We want to match the product-facing surface of Dify dataset retrieval—metadata filtering,
+multi-knowledge-base routing, parent-child segmentation, and economy versus high-quality modes—while
+keeping RAGSpine's three code-level invariants intact for every new mode: anti-fabrication, source
+provenance, and RESTRICTED double-exit (`link/` + `rerank/`) isolation. The default offline,
+zero-network path must stay byte-identical, and parametrized conformance must bind every mode so it
+cannot silently regress an invariant.
+
+## Decision
+
+Four additions, all offline-deterministic, opt-in, and default-byte-identical. Each follows the
+family seam pattern: Protocol + zero-dependency deterministic default + `make_*` factory +
+environment selector + parametrized conformance.
+
+### 1. Metadata filtering
+
+`retrieval/filtering/` adds `MetadataFilter`/`FilterCondition`: a deterministic pre-scoring stage
+with `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, and `between`. Strings compare
+lexicographically and a missing field does not match. `apply` always returns an order-preserving
+subsequence, so it can only narrow. Because both exits still strip RESTRICTED, even a filter that
+selects restricted content cannot surface it.
+
+It is wired through `HybridRetriever.search(metadata_filter=)` and
+`NarrativeIndex.retrieve(metadata_filter=)`; default `None` is byte-identical. `automatic.py` is an
+opt-in seam: the `FilterExtractor` Protocol plus `make_filter_extractor` (default `none` → `None`,
+offline `ControlledVocabFilterExtractor` opt-in, LLM extractor as an opt-in adapter). Its output can
+only be a `MetadataFilter`, structurally unable to reach the answer channel, and can only narrow.
+
+### 2. Multi-index and multi-route routing
+
+`MultiIndexRetriever` in `retrieval/routing/multi_index.py` implements the A-line
+`NarrativeRetriever` Protocol. It can fan out across libraries and perform cross-library RRF fusion
+using `lexical.rrf_fuse`; every result gets `library_id` so provenance retains the origin library.
+
+Routed mode uses a `LibraryRouter` seam and `make_library_router`. Default `none` fans out to all;
+the deterministic `KeywordLibraryRouter` matches the query to library descriptions; an LLM router
+is opt-in. Zero overlap falls back to all libraries so routing never starves recall. Isolation is
+inherited: each library's base retriever has already removed RESTRICTED content, so fusion can only
+pass a subset onward.
+
+### 3. Parent-child chunk preset
+
+`ParentChildChunker` in `chunking/domain_presets.py` (aliases `parent_child` and
+`small_to_big`) is a thin `LayoutAwareChunker` subclass. It overrides only `_child_extra` to attach
+`window_text`, the parent section's full text, and `parent_locator`, the section's real paragraph
+span. A precise child hit can therefore expand deterministically to parent context, with provenance
+pointing to a real locator.
+
+The base `Chunk` gains additive `parent_locator` with an empty default plus one overridable hook.
+Default chunkers set neither value and remain byte-identical. This uses the existing
+`CHUNKER_IMPLS` provenance conformance.
+
+### 4. Economy mode
+
+`retrieval/mode.py` adds `RetrievalMode` and `make_retrieval_mode`, selected by
+`ServiceConfig.retrieval_mode`. The existing pure-BM25 path (`embedding_backend=None`) becomes the
+explicit `economy` preset. Assembly constructs no embedding backend or vector store, so embedding
+cost is zero. `hybrid`/`vector` select the alternate surface. Default `auto` means hybrid with
+embedding assembled according to `ServiceConfig.embedding`, preserving previous behavior.
+
+Every mode is bound by parametrized conformance with a non-vacuous reverse proof:
+
+- `tests/conformance/test_metadata_filter_invariants.py`: per-operator narrowing/determinism and a
+  widening stub that must fail.
+- `test_multi_index_isolation.py`: per-router isolation/provenance and a leaky base that must fail.
+- `test_retrieval_mode_invariants.py`: per-mode isolation/provenance and economy zero-embedding.
+
+Principle: **put product-facing capability in opt-in seams beside the default path, never inside it;
+inherit and deterministically prove all three retrieval invariants for every mode.**
+
+## Alternatives considered (rejected)
+
+- Let automatic filter extraction emit something beyond filter conditions, such as answer rewrites:
+  this would open a fabrication channel. Its return type is confined to `MetadataFilter`.
+- Let filtering add or reorder candidates: widening/reordering could smuggle RESTRICTED content or
+  perturb the byte-identical default. `apply` is strictly narrowing and order-preserving.
+- Strip RESTRICTED inside `MultiIndexRetriever`: this would duplicate the exit and risk divergence.
+  Each library's existing exit owns isolation; fusion never reads chunks.
+- Repoint parent-child at retrieval-time store expansion immediately: at this decision's time the
+  chunker was not wired into narrative ingestion and hierarchy/window data was not persisted. The
+  preset first landed parent context plus a real locator. [ADR 0018](/docs/decisions/adr-0018)
+  subsequently completes that deferred store-level expansion.
+- Use a boolean `economy` flag: a named mode and factory fit the family seam pattern and expose the
+  choice as first-class configuration.
+
+## Consequences
+
+- Retrieval gains metadata filtering, multi-library routing, parent-child segmentation, and
+  economy/vector presets while the default offline path remains byte-identical and zero-network.
+- Anti-fabrication, provenance—including library origin—and RESTRICTED double-exit isolation hold
+  for all new modes and are enforced by conformance rather than trust.
+- New artifacts are `retrieval/filtering/`, `retrieval/routing/`, `ParentChildChunker`, additive
+  `Chunk.parent_locator` and `_child_extra`, `retrieval/mode.py`,
+  `ServiceConfig.retrieval_mode`, and three conformance packs.

@@ -1,0 +1,96 @@
+---
+title: Short-circuit FAQ
+description: Una cache di domande e risposte verificate da esperti di dominio che bypassa l'LLM — protetta da esclusioni conservative, perché si trova a monte della protezione di prevenzione delle risposte inventate.
+---
+
+La cache FAQ restituisce una risposta verificata da esperti di dominio per una domanda nota, bypassando completamente l'LLM, il
+fact store e il retriever. È un'ottimizzazione di latenza e costi — e un
+**livello ad alto rischio**, perché si trova _a monte_ della protezione di prevenzione delle risposte inventate. Uno
+short-circuit errato salterebbe ogni controllo di sicurezza a valle.
+
+<Callout type="warn">
+  Poiché il livello FAQ si trova a monte della [prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication), le sue
+  esclusioni sono deliberatamente conservative: gli elementi strutturato-numerici, relativi a concorrenti, in tempo reale, scaduti,
+  disabilitati e `RESTRICTED` non attivano **mai** lo short-circuit.
+</Callout>
+
+## Dove si colloca
+
+Nella route `/v1/ask` (`service/api/routes.py`), il lookup FAQ viene eseguito per primo:
+
+```python
+# 1) FAQ short-circuit — on hit, never touches provider / fact store / retriever
+hit = faq_cache.lookup(req.question, reference_date=ref)
+if hit is not None:
+    return AskResponse(..., route="faq", answer=hit.answer, sources=[...])
+
+# 2) miss -> normal workflow (anti-fabrication guard, dual channel, ...)
+result = answer_question(req.question, store, provider, ...)
+```
+
+`lookup` è una funzione pura (`service/faq/faq_cache.py`): consulta `parse_intent` /
+`clarify_scope` per le decisioni di confine ma non raggiunge mai l'LLM, il fact store o il
+retriever. La corrispondenza avviene esclusivamente per match esatto normalizzato / alias (NFKC,
+casefold, normalizzazione degli spazi e rimozione della punteggiatura finale) — nessuna
+corrispondenza fuzzy o basata su embedding.
+
+## Le esclusioni conservative
+
+`lookup` restituisce un **miss** (`None`) se _una qualsiasi_ di queste condizioni è vera — le esclusioni vengono verificate
+_prima_ di consultare l'indice della cache:
+
+<Accordions>
+  <Accordion title="Entità fuori ambito / concorrente">
+    Se `clarify_scope` restituisce `CLARIFY_OUT_OF_SCOPE_ENTITY`, oppure il campo `external_entity` estratto dal parsing è
+    valorizzato, la domanda riguarda un'entità esterna/concorrente — non attivare mai lo short-circuit, così da preservare il percorso
+    di rifiuto di sicurezza.
+  </Accordion>
+  <Accordion title="Domande strutturato-numeriche">
+    Se la route è `ROUTE_STRUCTURED`, oppure è stato riempito uno slot strutturato (`metric` / `entity` /
+    `period`, o le loro forme multi-valore), la domanda richiede un numero aggiornato — deve passare attraverso il
+    canale strutturato e la sua provenienza, non una stringa in cache.
+  </Accordion>
+  <Accordion title="Segnali in tempo reale / sensibili al tempo">
+    Se la domanda (normalizzata) contiene un segnale di tempo reale — “今天”, “现在”, “最新”, “current”,
+    “latest”, “股价”, ecc. — una risposta fissa in cache diventerebbe obsoleta, quindi viene esclusa. La scansione dei segnali
+    usa la stessa normalizzazione NFKC/casefold dell'indice, così le varianti a larghezza intera non possono sfuggire al controllo.
+  </Accordion>
+  <Accordion title="Scaduto (fuori dalla finestra di validità)">
+    Ogni elemento può includere `valid_from` / `valid_until`. Se la data di riferimento è fuori dall'intervallo
+    chiuso — o se il parsing di una data fallisce — l'elemento viene considerato fuori finestra ed escluso.
+  </Accordion>
+  <Accordion title="Disabilitato">
+    Gli elementi con `enabled = false` vengono filtrati al momento della costruzione dell'indice e ricontrollati in modo difensivo al
+    momento del lookup.
+  </Accordion>
+  <Accordion title="Sensibilità RESTRICTED">
+    Qualsiasi elemento il cui `sensitivity` è `RESTRICTED` (senza distinzione di maiuscole/minuscole, con spazi rimossi) non attiva mai
+    lo short-circuit — in coerenza con l'[isolamento RESTRICTED](/it/docs/concepts/restricted-isolation).
+  </Accordion>
+</Accordions>
+
+## Un elemento FAQ
+
+Gli elementi sono verificati da esperti di dominio e tracciati per versione; l'hit trasporta la propria provenienza
+(`FAQHit.source`):
+
+```json
+{
+  "id": "what-is-ragspine",
+  "question": "RAGSpine 是什么？",
+  "aliases": ["What is RAGSpine?"],
+  "answer": "RAGSpine 是一个无框架的后端 RAG 引擎……",
+  "source": "internal/faq-handbook.md",
+  "version": 3,
+  "enabled": true,
+  "valid_from": "2026-01-01",
+  "valid_until": null,
+  "sensitivity": "INTERNAL"
+}
+```
+
+<Callout type="info">
+  Un hit restituisce `route: "faq"` con un blocco `cache` (`hit`, `type`, `faq_id`, `version`, `source`).
+  La trace registra solo `cache_hit`, `faq_id` e `faq_version` — mai il testo della risposta. Carica il
+  JSON delle FAQ tramite la variabile d'ambiente `RAGSPINE_FAQ_SOURCE`.
+</Callout>

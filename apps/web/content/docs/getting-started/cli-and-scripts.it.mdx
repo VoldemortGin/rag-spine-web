@@ -1,0 +1,82 @@
+---
+title: CLI e script
+description: Comandi ragspine installati e punti di ingresso Make/script per il checkout dei sorgenti.
+---
+
+Il comando da console `ragspine` è distribuito nel wheel. `scripts/` e il `Makefile` nella radice sono
+comodità di sviluppo disponibili solo in un checkout dei sorgenti.
+
+## Comando da console installato
+
+| Comando                                         | Scopo                                                                       |
+| ----------------------------------------------- | ----------------------------------------------------------------------------- |
+| `ragspine quickstart`                           | dimostrazione offline deterministica                                           |
+| `ragspine ask --db PATH "question"`             | una domanda attraverso il percorso mock/offline                                    |
+| `ragspine version`                              | versione della distribuzione installata                                          |
+| `ragspine dify analyze FILE`                    | analizza e ispeziona staticamente un flusso di lavoro Dify; nessuna generazione di codice né esecuzione |
+| `ragspine dify compile FILE`                    | compila la configurazione di un flusso di lavoro Dify in sorgente Python; non lo esegue     |
+| `ragspine workflow list`                        | elenca i metadati dei template inclusi                                                |
+| `ragspine workflow show ID --format yaml\|json` | stampa un singolo flusso di lavoro incluso                                                    |
+| `ragspine workflow preview ID`                  | emette la proiezione versionata del grafo a solo scopo di visualizzazione                              |
+| `ragspine workflow create DESCRIPTION`          | trova la corrispondenza con un template o genera un flusso di lavoro Dify 0.6 di base                         |
+
+Questa forma abbreviata è equivalente a `workflow create`:
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+### Opzioni di workflow-create
+
+| Opzione                          | Significato                                                                          |
+| ------------------------------- | -------------------------------------------------------------------------------- |
+| `--template ID`                 | seleziona un template esatto del catalogo e salta la corrispondenza                               |
+| `--no-reuse`                    | genera sempre il flusso di lavoro di base fisso                                          |
+| `--matcher lexical\|auto\|onnx` | sceglie la corrispondenza lessicale deterministica, ONNX automatico con fallback, oppure ONNX obbligatorio |
+| `--format yaml\|json`           | formato di output serializzato; il valore predefinito è YAML                                           |
+| `-o, --output PATH`             | percorso di output                                                                      |
+| `--stdout`                      | scrive solo il documento del flusso di lavoro sullo standard output                              |
+| `--force`                       | sostituisce un file normale esistente; i link e i file speciali restano vietati        |
+
+Il matcher ONNX richiede `[embed-onnx]`; al primo utilizzo potrebbe scaricare e memorizzare nella cache il proprio modello. `auto`
+ripiega sulla corrispondenza lessicale quando ONNX non è disponibile, mentre l'opzione esplicita `onnx` segnala un errore.
+
+`dify compile` e `dify analyze` accettano percorsi `.json`, `.yaml`, `.yml` e `.toml`. L'analisi
+li normalizza in una mappatura compatibile con JSON prima della validazione Dify. La compilazione genera codice;
+solo l'endpoint di esecuzione del servizio, protetto separatamente, esegue l'output compilato.
+
+## Target Make per il checkout dei sorgenti
+
+Eseguire tutti questi comandi dalla radice del repository.
+
+| Target                                            | Scopo                                                                              |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `make venv`                                       | crea `.venv` con uv                                                               |
+| `make install`                                    | installazione editable di `[dev,service,vector]`                                              |
+| `make install-all`                                | installazione editable di `[dev,service,vector,llm,embed]`; non identica a `[all]`          |
+| `make test`                                       | pytest escludendo i test GPU/di rete                                                   |
+| `make ci`                                         | gate bloccante a otto fasi di documentazione, typing, lint, test, QA e demo            |
+| `make lint`                                       | `scripts/lint.sh` informativo; il gate di CI invoca separatamente mypy strict e ruff |
+| `make fmt`                                        | correzioni e formattazione con ruff                                                            |
+| `make drift`                                      | controllo di deriva tra documentazione e codice                                                    |
+| `make demo`, `make ask Q="…"`                     | demo deterministica e singola domanda                                               |
+| `make eval-qa`, `make eval-retrieval`             | valutazione di QA e recupero                                                          |
+| `make serve`, `make worker`                       | server FastAPI e worker RQ basato su Redis                                            |
+| `make build`, `make publish-test`, `make publish` | flusso di lavoro di build e upload con Twine                                                      |
+
+Lo script CI locale è il gate autoritativo. Le otto fasi sono: integrità dei riferimenti della
+documentazione, deriva della documentazione, `mypy --strict`, ruff, la suite di test normale, i test Docling
+isolati, i ratchet di QA in modalità tool e agent, e lo smoke test della demo.
+
+## Script importanti
+
+- `scripts/ask.py`: interfaccia per domande one-shot. `--provider mock` è deterministico; l'adapter
+  Anthropic reale richiede `[llm]` e le credenziali. L'autore del progetto non può accedere alla
+  API di Anthropic, quindi quel percorso di provider non ha ricevuto la stessa copertura di integrazione verificata sul campo.
+- `scripts/run_demo.py`: smoke test completamente offline da fixture a risposta.
+- `scripts/run_server.py`: launcher uvicorn con `--host` e `--port`.
+- `scripts/run_worker.py`: consumer RQ; `--queue` ha come valore predefinito `ragspine-ingest`.
+- `scripts/topology.py`: esporta la topologia statica del motore come Mermaid, DOT o JSON.
+
+Al momento, intenzionalmente, non esistono sottocomandi da console `ragspine serve`, `ragspine worker` o `ragspine topology`;
+quelli restano script del checkout dei sorgenti.

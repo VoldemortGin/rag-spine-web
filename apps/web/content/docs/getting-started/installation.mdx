@@ -1,127 +1,97 @@
 ---
 title: Installation
-description: Install RAGSpine from PyPI or from source, pick the optional extras you need, and understand the offline-first core.
+description: Install RAGSpine on Python 3.11+, choose optional capabilities deliberately, and distinguish a PyPI release from the repository version.
 ---
 
-RAGSpine requires **Python 3.11+**. The current release is **0.9.0**. The core imports zero
-third-party SDKs and runs fully offline with a deterministic `MockProvider` — you only pull in
-heavier dependencies via the optional extras below. Its non-optional runtime dependencies are
-the thin shared family core [`corespine`](https://pypi.org/project/corespine/) (`>=0.1.1`), which
-owns the cross-package primitives such as the `LLMProvider` seam and `RateLimitedProvider`, plus
-a handful of lightweight utility libraries (`python-pptx`, `openpyxl`, `rootutils`, `pypdfium2`)
-and `beartype` for runtime type-checking.
+RAGSpine requires **Python 3.11 or newer**. The repository currently declares version `0.11.0`;
+that is not a guarantee that PyPI has published the same version. After installation, run
+`ragspine version` to see the selected distribution.
 
-## Install from PyPI
+## PyPI installation
 
-```bash title="install"
-pip install rag-spine
-# everything (all the optional extras below):
-pip install "rag-spine[all]"
-# or with uv:
+```bash
 uv add rag-spine
+# or
+python -m pip install rag-spine
 ```
 
-<Callout type="info">
-The **distribution name is hyphenated** (`rag-spine`), but the **import name is not**:
+The distribution name is `rag-spine`; the import and console-command names are `ragspine`:
 
 ```python
 import ragspine
 ```
 
-So you `pip install rag-spine` but `from ragspine.agent.agent import answer_question`.
+To request the project's aggregate runtime extra in one command:
 
-</Callout>
+```bash
+uv add "rag-spine[all]"
+```
+
+`[all]` aggregates the runtime extras listed in `pyproject.toml`; it deliberately excludes
+development tooling. It also does **not** include the separately opt-in `[ppt]` or heavy
+`[pdf-docling]` alternatives. Add either explicitly when required, for example:
+
+```bash
+uv add "rag-spine[all,ppt,pdf-docling]"
+```
 
 ## Optional extras
 
-The base install gives you the offline core. Add extras for the capabilities you need:
+| Extra                                            | Main capability                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `[service]`                                      | FastAPI, uvicorn, HTTP test/client support, RQ, and Redis           |
+| `[pdf]` / `[pdf-docling]`                        | Default `pdfspine` extraction / heavy Docling fallback              |
+| `[ocr]`                                          | PaddleOCR; the CUDA-specific Paddle runtime is installed separately |
+| `[doc]` / `[ppt]`                                | `docspine` DOCX / opt-in `pptspine` PPTX extraction                 |
+| `[llm]`                                          | Anthropic and OpenAI SDK adapters                                   |
+| `[embed]` / `[embed-onnx]`                       | sentence-transformers / FastEmbed ONNX embeddings                   |
+| `[rerank]`, `[colbert]`, `[splade]`, `[colpali]` | optional neural reranking or visual-document representation         |
+| `[vector]` / `[graph]`                           | sqlite-vec, pgvector, Qdrant / NetworkX adapters                    |
+| `[otel]`                                         | OpenTelemetry trace export                                          |
+| `[connectors]`                                   | HTTP and Notion source connectors                                   |
+| `[dify]`                                         | Dify compiler boundary validation with Pydantic 2                   |
+| `[dev]`                                          | tests, lint/type checks, docs, build, and Twine                     |
 
-| Extra       | Pulls in                                                    | For                                              |
-| ----------- | ----------------------------------------------------------- | ------------------------------------------------ |
-| `[service]` | fastapi, uvicorn, httpx, rq, redis                          | the HTTP + async-queue layer                     |
-| `[pdf]`     | pdfspine                                                    | digital-PDF table extraction                     |
-| `[pdf-docling]` | docling (+ `transformers<5.9` on macOS)                 | optional docling fallback engine for digital-PDF layout/table extraction (heavy, ~600MB) |
-| `[ocr]`     | paddleocr                                                   | scanned-PDF OCR (Linux + NVIDIA GPU)             |
-| `[llm]`     | anthropic, openai                                           | the real Anthropic chat provider + OpenAI embeddings backend (lazy-imported) |
-| `[embed]`   | sentence-transformers                                       | real embedding models for the vector channel     |
-| `[vector]`  | sqlite-vec, pg8000, qdrant-client                           | persistent vector stores (sqlite-vec / pgvector / Qdrant) |
-| `[embed-onnx]` | fastembed                                                | the offline **semantic** embedding default (ONNX MiniLM); dense-on via `RAGSPINE_EMBEDDING=auto` |
-| `[rerank]`  | fastembed                                                   | the offline local **cross-encoder** reranker (deterministic) |
-| `[doc]`     | docspine                                                    | `.docx` table + narrative extraction (pure-Rust)  |
-| `[ppt]`     | pptspine                                                    | opt-in richer-merge `.pptx` extraction (pure-Rust) |
-| `[graph]`   | networkx                                                    | the `networkx` GraphStore adapter for the relation graph |
-| `[otel]`    | opentelemetry-api, opentelemetry-sdk                        | export privacy-safe traces via the OpenTelemetry `TraceSink` adapter |
-| `[dify]`    | PyYAML, pydantic                                            | the Dify workflow YAML compiler (`ragspine dify compile`/`analyze`) |
-| `[dev]`     | pytest, reportlab, markdown, pdoc, ruff, mypy, build, twine | tests, fixture generation, docs, lint, packaging |
-| `[all]`     | `[pdf,ocr,doc,llm,embed,embed-onnx,rerank,colbert,splade,colpali,vector,graph,otel,service,dify]` | every runtime capability at once (excludes `[dev]`) |
-
-Combine extras with commas:
-
-```bash title="install with extras"
-pip install "rag-spine[service,llm]"
-```
+PyYAML is a base dependency because workflow JSON/YAML wire-format support is part of the base
+CLI. TOML reading uses Python 3.11's `tomllib`. The Dify compiler adds Pydantic 2 through
+`[dify]`; `[service]` also uses modern FastAPI (`>=0.110`) and therefore Pydantic 2.
 
 <Callout type="warn">
-  The `[ocr]` extra targets Linux + NVIDIA GPU. `paddlepaddle-gpu` is CUDA-version-specific and is
-  **not** declared by the extra — install it separately per PaddlePaddle's official guidance on your
-  target box. The real-OCR integration tests are GPU-gated and skipped elsewhere.
+  An application pinned to `fastapi>=0.99,<0.100` and `pydantic>=1.10,<2` cannot install
+  RAGSpine's modern service or Dify extras in the same environment. Keep that application in its
+  existing environment and run RAGSpine's service in a separate virtual environment or process.
+  A base `rag-spine` install does not itself require Pydantic 2.
 </Callout>
 
-<Callout type="info">
-  The advanced retrieval representations from 0.8.0 sit behind their own opt-in extras (all via
-  `fastembed`, all default-off): `[colbert]` (ColBERT late-interaction reranker), `[splade]`
-  (SPLADE learned-sparse reranker), and `[colpali]` (ColPali visual-document retrieval — **GPU**,
-  the weights carry their own model license). See the
-  [Retrieval guide](/docs/guides/retrieval) for how each is selected via `RAGSPINE_*`.
-</Callout>
+ONNX extras may download model weights on first use and cache them for later offline runs.
+`[ocr]` is primarily intended for Linux/NVIDIA deployments. ColPali model weights have their own
+license; installing an Apache-licensed Python dependency does not change a model's license.
 
-## Install from source
+## Install current source
 
-Clone the repo and create an isolated environment with [uv](https://docs.astral.sh/uv/):
+Run these commands from the cloned repository root:
 
-```bash title="from source"
-git clone https://github.com/VoldemortGin/ragspine.git && cd ragspine
+```bash
+git clone https://github.com/VoldemortGin/ragspine.git
+cd ragspine
 uv venv .venv
-VIRTUAL_ENV="$(pwd)/.venv" uv pip install -e ".[dev,service,vector]"
+uv pip install --python .venv/bin/python -e ".[dev,service,vector]"
 ```
 
-<Callout type="info">
-  The `VIRTUAL_ENV="$(pwd)/.venv"` prefix is **required**: it tells `uv` to install into the `.venv`
-  you just created rather than a system Python it might otherwise discover. This is the canonical
-  dev setup — editable (`-e`) with the `[dev,service,vector]` extras.
-</Callout>
+On Windows, use `.venv\\Scripts\\python.exe` in the final command. The Make targets are
+conveniences for Unix-like development environments:
 
-If you have `make`, the same setup is wrapped as targets (run from the repo root):
-
-```bash title="via make"
-make venv        # uv venv .venv
-make install     # editable install with [dev,service,vector]
-make install-all # editable install with [dev,service,vector,llm,embed]
+```bash
+make venv
+make install
 ```
 
-## Offline-first by design
+`make install` selects `[dev,service,vector]`. Despite its name, `make install-all` selects
+`[dev,service,vector,llm,embed]`; it is not the same set as the published `[all]` extra.
 
-The core depends only on the abstraction, never the SDK. Every external dependency — LLM
-provider, embedding backend, reranker, OCR engine, retriever, task queue — is a typed
-`Protocol`, lazy-imported and injected at the edges. That means:
+## Offline boundary
 
-- A plain `pip install rag-spine` (no extras) is enough to run the structured channel, the
-  agent orchestration, and the end-to-end demo **with no API key and no network**.
-- The bundled `MockProvider` is deterministic, so offline runs are reproducible.
-- You add real backends (Claude, OpenAI, sentence-transformers, PaddleOCR) only when you
-  install the matching extra and inject the provider.
-
-## Next steps
-
-<Cards>
-  <Card
-    title="Quickstart"
-    href="/docs/getting-started/quickstart"
-    description="Run the demo, ask a question offline, and start the HTTP service."
-  />
-  <Card
-    title="CLI & scripts"
-    href="/docs/getting-started/cli-and-scripts"
-    description="The make targets and developer entry-point scripts."
-  />
-</Cards>
+A base install can run the structured channel, deterministic orchestration, catalog browsing,
+lexical workflow matching, workflow generation, format normalization, and graph preview without
+an API key. Real model providers, remote connectors, Redis, external vector databases, and first
+model downloads are opt-in networked capabilities.

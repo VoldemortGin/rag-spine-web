@@ -8,6 +8,7 @@
     "retrieval",
     "agent",
     "evaluation",
+    "workflows",
     "service",
     "pipeline",
     "common"

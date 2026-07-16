@@ -17,6 +17,13 @@ See [Anti-fabrication](/docs/concepts/anti-fabrication).
 The sqlite-backed store for narrative document chunks
 (`retrieval/chunking/chunk_store.py`). Each chunk carries `doc_id` + `source_locator`
 (NOT NULL) plus metadata (`title`, `entity`, `period`, `sensitivity`, …).
+Current rows also persist `parent_id`, `heading`, `window_text`, and `parent_locator` for
+generation-only small-to-big/window expansion.
+
+### Economy retrieval mode
+
+The `economy` / `bm25` / `lexical` service preset. It constructs neither an embedding backend nor
+a vector store and performs lexical retrieval only.
 
 ### Clarification gateway
 
@@ -75,6 +82,12 @@ only the fictional demo profile.
 The four parsed slots — `metric`, `entity`, `period`, `channel` — extracted from a
 question by the intent parser and used for routing and querying (`agent/intent.py`).
 
+### History turn
+
+A `(role, text)` tuple supplied to `answer_question(history=...)` or `/v1/ask`. History is LLM
+generation context only; it is excluded from intent/security decisions, retrieval queries, and
+evidence.
+
 ### IR / StyledGrid
 
 The frozen intermediate representation that documents are extracted into (style- and
@@ -102,6 +115,22 @@ the core run fully offline with no API key — the default for demos and tests.
 The RAG path for "why / what happened" questions: hybrid retrieve → optional rerank →
 synthesis with citations. Default chain is pure BM25 + RRF (no vector backend wired).
 
+### Metadata filter
+
+A validated narrowing predicate over chunk metadata. Supported operators are `eq`, `ne`, `in`,
+`nin`, `gt`, `gte`, `lt`, `lte`, and `between`; filtering preserves incoming result order.
+
+### Multi-index retrieval
+
+Per-library retrieval followed by RRF fusion. Each result retains `library_id` provenance; routing
+failure falls back to all configured libraries.
+
+### Parent-child expansion
+
+Small-to-big retrieval where the child determines rank and citation, while persisted parent/window
+text becomes separate generation-only `prompt_text`. Restricted children and their windows are
+dropped together.
+
 ### Provenance
 
 The `source_doc_id` (or `doc_id`) + `source_locator` carried by every fact, chunk, and
@@ -112,6 +141,11 @@ answer. Carried end-to-end, never dropped. See [Provenance](/docs/concepts/prove
 A typed `Protocol` boundary at which an external dependency is injected (LLM provider,
 embedding backend, listwise judge, OCR backend, narrative retriever, task queue). The
 core imports zero SDKs and depends only on these abstractions.
+
+### Preview protocol v1
+
+A display-only workflow projection containing version, redacted nodes/edges, and deterministic
+geometry. It contains no prompts, variables, providers, credentials, or executable configuration.
 
 ### `query_metric`
 
@@ -152,3 +186,16 @@ to `RESTRICTED` by deterministic, config-driven, fail-safe signals.
 The deterministic numeric path: glossary normalization → `query_metric` over the
 `fact_metric` store → answer rendered from the fact value, with lineage. Never invents a
 number.
+
+### Workflow catalog
+
+Package-owned templates used by the scaffold command and website. It contains 7 curated workflows
+and 993 generated descriptors across 39 industries, 27 use cases, and five archetypes. Upstream
+Dify/n8n pages are source metadata only; their workflow configuration is not redistributed or
+downloaded at runtime.
+
+### Workflow scaffold
+
+A pure configuration operation that explicitly selects or matches a catalog template, otherwise
+generating a fixed Dify 0.6 `start → llm → end` graph. It returns configuration but neither writes
+nor executes it; the CLI separately performs safe file output.

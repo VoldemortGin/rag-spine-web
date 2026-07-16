@@ -1,0 +1,97 @@
+---
+title: Installazione
+description: Installa RAGSpine su Python 3.11+, scegli le funzionalità opzionali in modo consapevole e distingui una release su PyPI dalla versione del repository.
+---
+
+RAGSpine richiede **Python 3.11 o superiore**. Il repository dichiara attualmente la versione `0.11.0`;
+ciò non garantisce che PyPI abbia pubblicato la stessa versione. Dopo l'installazione, esegui
+`ragspine version` per visualizzare la distribuzione selezionata.
+
+## Installazione da PyPI
+
+```bash
+uv add rag-spine
+# or
+python -m pip install rag-spine
+```
+
+Il nome della distribuzione è `rag-spine`; i nomi dell'import e del comando da console sono `ragspine`:
+
+```python
+import ragspine
+```
+
+Per richiedere in un unico comando l'extra runtime aggregato del progetto:
+
+```bash
+uv add "rag-spine[all]"
+```
+
+`[all]` aggrega gli extra runtime elencati in `pyproject.toml`; esclude deliberatamente
+gli strumenti di sviluppo. Inoltre **non** include né `[ppt]`, che richiede un opt-in separato, né le alternative
+pesanti `[pdf-docling]`. Aggiungi esplicitamente l'uno o le altre quando necessario, ad esempio:
+
+```bash
+uv add "rag-spine[all,ppt,pdf-docling]"
+```
+
+## Extra opzionali
+
+| Extra                                            | Funzionalità principale                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `[service]`                                      | FastAPI, uvicorn, supporto test/client HTTP, RQ e Redis           |
+| `[pdf]` / `[pdf-docling]`                        | Estrazione `pdfspine` predefinita / fallback Docling pesante              |
+| `[ocr]`                                          | PaddleOCR; il runtime Paddle specifico per CUDA si installa separatamente |
+| `[doc]` / `[ppt]`                                | Estrazione DOCX `docspine` / estrazione PPTX `pptspine` in opt-in                 |
+| `[llm]`                                          | Adapter per gli SDK Anthropic e OpenAI                                   |
+| `[embed]` / `[embed-onnx]`                       | Embedding sentence-transformers / FastEmbed ONNX                   |
+| `[rerank]`, `[colbert]`, `[splade]`, `[colpali]` | reranking neurale opzionale o rappresentazione visiva dei documenti         |
+| `[vector]` / `[graph]`                           | Adapter sqlite-vec, pgvector, Qdrant / NetworkX                    |
+| `[otel]`                                         | Esportazione delle trace OpenTelemetry                                          |
+| `[connectors]`                                   | Connettori sorgente HTTP e Notion                                   |
+| `[dify]`                                         | Validazione del confine del compilatore Dify con Pydantic 2                   |
+| `[dev]`                                          | test, lint/controlli di tipo, documentazione, build e Twine                     |
+
+PyYAML è una dipendenza di base perché il supporto del formato wire JSON/YAML dei flussi di lavoro fa parte della
+CLI di base. La lettura di TOML usa `tomllib` di Python 3.11. Il compilatore Dify aggiunge Pydantic 2 tramite
+`[dify]`; `[service]` usa inoltre una versione moderna di FastAPI (`>=0.110`) e quindi Pydantic 2.
+
+<Callout type="warn">
+  Un'applicazione vincolata a `fastapi>=0.99,<0.100` e `pydantic>=1.10,<2` non può installare
+  gli extra moderni service o Dify di RAGSpine nello stesso ambiente. Mantieni quell'applicazione nel suo
+  ambiente esistente ed esegui il servizio di RAGSpine in un ambiente virtuale o in un processo separato.
+  Un'installazione di base `rag-spine` non richiede di per sé Pydantic 2.
+</Callout>
+
+Gli extra ONNX possono scaricare i pesi dei modelli al primo utilizzo e memorizzarli nella cache per le successive esecuzioni offline.
+`[ocr]` è pensato principalmente per deployment Linux/NVIDIA. I pesi dei modelli ColPali hanno una propria
+licenza; installare una dipendenza Python con licenza Apache non modifica la licenza di un modello.
+
+## Installazione dal sorgente corrente
+
+Esegui questi comandi dalla radice del repository clonato:
+
+```bash
+git clone https://github.com/VoldemortGin/ragspine.git
+cd ragspine
+uv venv .venv
+uv pip install --python .venv/bin/python -e ".[dev,service,vector]"
+```
+
+Su Windows, usa `.venv\\Scripts\\python.exe` nell'ultimo comando. I target Make sono
+comodità per gli ambienti di sviluppo Unix-like:
+
+```bash
+make venv
+make install
+```
+
+`make install` seleziona `[dev,service,vector]`. Nonostante il nome, `make install-all` seleziona
+`[dev,service,vector,llm,embed]`; non è lo stesso insieme dell'extra `[all]` pubblicato.
+
+## Confine offline
+
+Un'installazione di base può eseguire il canale strutturato, l'orchestrazione deterministica, la navigazione del catalogo,
+la corrispondenza lessicale dei flussi di lavoro, la generazione dei flussi di lavoro, la normalizzazione dei formati e l'anteprima del grafo senza
+una chiave API. I provider di modelli reali, i connettori remoti, Redis, i database vettoriali esterni e i primi
+download dei modelli sono funzionalità di rete in opt-in.

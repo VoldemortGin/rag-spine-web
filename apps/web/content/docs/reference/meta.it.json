@@ -1,0 +1,5 @@
+{
+  "title": "Riferimento",
+  "icon": "BookMarked",
+  "pages": ["configuration", "extension-points", "http-api", "python-api"]
+}

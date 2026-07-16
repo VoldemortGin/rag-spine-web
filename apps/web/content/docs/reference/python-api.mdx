@@ -1,19 +1,17 @@
 ---
 title: Python API
-description: The key public surface — answer_question, MockProvider, and FactStore — with accurate signatures and a runnable offline example. The full auto-generated reference ships via make docs.
+description: Core orchestration, stores, retrieval, workflow formats/scaffolding/preview, and Dify/n8n conversion entry points.
 ---
 
-RAGSpine is a library you assemble in plain Python. The entry points below are the
-load-bearing public surface; everything else is composed from them. The full, exhaustive API
-reference is generated from docstrings and type hints by `make docs` (see [below](#full-api-reference)).
+This page highlights stable composition surfaces. Run `make docs` in a source checkout for the
+symbol-level pdoc site.
 
-## `answer_question`
-
-`src/ragspine/agent/agent.py` — the single end-to-end orchestration entry point. It parses
-intent, runs the clarification gateway, routes (structured / narrative / composite), drives
-the tool-use loop, and applies the anti-fabrication and provenance guards.
+## Agent orchestration
 
 ```python
+from collections.abc import Sequence
+from datetime import date
+
 def answer_question(
     question: str,
     store: FactStore,
@@ -22,193 +20,118 @@ def answer_question(
     reference_date: date | None = None,
     narrative_retriever: NarrativeRetriever | None = None,
     intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
 ) -> AgentResult: ...
 ```
 
-<TypeTable
-  type={{
-    question: { type: 'str', description: 'The natural-language question.' },
-    store: { type: 'FactStore', description: 'The structured (numeric) fact store.' },
-    provider: {
-      type: 'LLMProvider',
-      description:
-        'Any object with a chat(messages, *, tools=None) -> ChatCompletion method — e.g. MockProvider (offline) or AnthropicProvider.',
-    },
-    reference_date: {
-      type: 'date | None',
-      default: 'None → today',
-      description: 'Anchor for resolving relative periods (last year, H1, …).',
-    },
-    narrative_retriever: {
-      type: 'NarrativeRetriever | None',
-      default: 'None',
-      description: 'Narrative retrieval seam; when omitted the narrative path degrades honestly.',
-    },
-    intent_parser: {
-      type: 'IntentParser | None',
-      default: 'None → RuleIntentParser',
-      description: 'Pluggable intent parser; the deterministic SecurityGate runs regardless.',
-    },
-  }}
-/>
+`HistoryTurn` is `tuple[str, str]`. Only `assistant` is recognized as the assistant role; other
+roles normalize to user. History is inserted between the system message and current question for
+generation only. It is never sent into intent parsing, security decisions, retrieval queries, or
+evidence/citation assembly.
 
-It returns an `AgentResult` dataclass:
-
-```python
-@dataclass
-class AgentResult:
-    answer: str
-    route: str
-    answer_plain: str = ""
-    clarification: ClarificationResult | None = None
-    tool_results: list[dict[str, object]] = ...
-    sources: list[dict[str, object]] = ...
-```
-
-<Callout type="info">
-  `answer_plain` is the **no-inline-sources** variant of `answer`: byte-for-byte identical
-  prose but with the trailing `（来源：…）` / `（资料来源：…）` citation suffix stripped, so a UI
-  can render citations itself from `sources` instead of duplicating them. For a refusal it
-  equals `answer` (and still leaks no suppressed number). Every answer branch — structured,
-  multi-subtask, narrative, decomposed — produces both in lock-step.
-</Callout>
-
-## `MockProvider`
-
-`src/ragspine/agent/llm_provider.py` — the deterministic, offline `LLMProvider`. No API key,
-no network: it scripts the tool-use loop from rule-based intent parsing and renders found /
-not-found / unrecognized answers — never fabricating a number. It implements the corespine
-`chat(messages, *, tools=None) -> ChatCompletion` seam (the Protocol and the `ChatCompletion`
-dataclass are re-exported from this module for convenience).
-
-```python
-MockProvider(reference_date: date | None = None)
-```
-
-The real-provider counterpart is `AnthropicProvider(model=..., base_url=...)`, which
-lazy-imports the `anthropic` SDK (install with `pip install 'rag-spine[llm]'`) and maps the
-OpenAI-shaped `chat` call onto the Anthropic Messages API.
-
-<Callout type="info">
-  Both providers return the same `corespine.ChatCompletion` envelope (`choices` →
-  `ResponseMessage` with `content` + `tool_calls`, plus `usage` / `model` / `id`). This is the
-  0.3.0 shape — see [Agent → the pluggable seam](/docs/guides/agent#llm_provider-the-pluggable-seam)
-  and [ADR 0012](/docs/decisions/adr-0012).
-</Callout>
-
-## `FactStore`
-
-`src/ragspine/storage/fact_store.py` — `FactStore` is the `@runtime_checkable` Protocol seam;
-`SqliteFactStore` is its SQLite-backed default (the class you instantiate — a Protocol has no
-constructor). Every fact carries full lineage (`source_doc_id` + `source_locator`); upserts are
-keyed on the identity dimensions so a metric × entity × period × channel row is 0-or-1,
-preserving the deterministic found / not-found read path.
-
-```python
-class SqliteFactStore:
-    def __init__(self, db_path: str | Path): ...
-    def init_schema(self) -> None: ...
-    def upsert_facts(self, facts: list[Fact], ingested_at: str | None = None) -> int: ...
-    def query(
-        self,
-        metric_code: str,
-        entity: str,
-        period_type: str,
-        period: str,
-        channel: str = "TOTAL",
-        review_statuses: tuple[str, ...] | None = VISIBLE_REVIEW_STATUSES,
-    ) -> list[Fact]: ...
-    def count(self) -> int: ...
-    def has_source_doc(self, source_doc_id: str) -> bool: ...
-    def close(self) -> None: ...
-```
-
-<Callout type="info">
-  `has_source_doc(source_doc_id)` is an existence probe — `True` when _any_ fact is already
-  stored for that document (regardless of `review_status`), else `False`. Use it to decide
-  whether a source has been ingested before an idempotent / incremental refresh. It is a
-  helper on the concrete `SqliteFactStore`, not on the `FactStore` Protocol.
-</Callout>
-
-A `Fact`'s first ten fields are positional-frozen:
-
-```python
-@dataclass
-class Fact:
-    metric_code: str
-    entity: str
-    geography: str
-    channel: str
-    period_type: str
-    period: str
-    value: float
-    unit: str
-    source_doc_id: str
-    source_locator: str
-    # ... additive v2 / lineage fields follow
-```
-
-Because those first ten fields are positional and easy to transpose, construct a metric fact
-through the keyword-only `Fact.metric(...)` builder instead of the raw positional constructor:
-
-```python
-@classmethod
-def metric(
-    cls,
-    *,
-    metric_code: str,
-    entity: str,
-    period_type: str,
-    period: str,
-    value: float,
-    unit: str,
-    source_doc_id: str,
-    source_locator: str,
-    channel: str = "TOTAL",
-    geography: str = "",
-    **extra: object,
-) -> Fact: ...
-```
-
-<Callout type="info">
-  `Fact.metric(...)` is order-independent: `channel` defaults to `"TOTAL"`, `geography` to
-  `""`, and any additive v2 field (`tags`, `confidence`, `review_status`, `valid_as_of`,
-  `dimensions`, …) passes through `**extra`. It returns an ordinary `Fact`, so the positional
-  constructor stays the frozen 10-tuple contract the evaluation harness binds with `Fact(*row)`.
-</Callout>
-
-## Runnable example
-
-The README quickstart, offline and deterministic — no API key required:
+`AgentResult` exposes `answer`, `answer_plain`, `route`, optional `clarification`, `tool_results`,
+and `sources`. `answer_plain` omits the inline citation suffix for UIs that render `sources`
+separately.
 
 ```python
 from ragspine.agent.agent import answer_question
 from ragspine.agent.llm_provider import MockProvider
 from ragspine.storage.fact_store import SqliteFactStore
 
-store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
-result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
-print(result.answer)     # deterministic value, or an honest "not found"
-print(result.sources)    # [{'doc': ..., 'locator': ...}]
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
 ```
 
-<Callout type="info">
-  `import ragspine` exposes lazy submodule access (PEP 562), so
-  `ragspine.agent.agent.answer_question` resolves without eagerly importing every subpackage. The
-  distribution name is hyphenated (`pip install rag-spine`); the import name is `ragspine`.
-</Callout>
+`FactStore` is a runtime-checkable `Protocol`; instantiate `SqliteFactStore`, not the Protocol.
+`Fact.metric(...)` is the keyword-only helper for constructing facts without transposing the frozen
+identity fields. Every stored fact retains `source_doc_id` and `source_locator`.
 
-## Full API reference
+## Narrative storage and retrieval
 
-The complete, auto-generated reference is produced from docstrings and type hints by
-[pdoc](https://pdoc.dev/):
+Narrative `Chunk`/`StoredChunk` records include additive `parent_id`, `heading`, `window_text`, and
+`parent_locator` fields. Existing SQLite databases migrate additively. Parent-child and sentence-
+window expansion happen at the store/retrieval layer: the child hit keeps its own text, chunk ID,
+and locator for citation while `window_text` can become separate generation-only `prompt_text`.
+A restricted child is dropped before expansion and cannot leak through a parent/window.
 
-```bash
-make docs        # → docs/site/  (static HTML, nginx-ready)
+Retrieval supports metadata-filter operators `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`,
+and `between`. Filters are narrowing and preserve result order. `MultiIndexRetriever` queries each
+selected library independently, fuses rankings with RRF, and attaches `library_id` provenance; a
+router failure searches all configured libraries. Economy mode constructs neither an embedding
+backend nor a vector store.
+
+## Workflow documents
+
+```python
+from ragspine.workflows.formats import (
+    dump_dify_yaml,
+    dump_json,
+    load_workflow,
+    parse_workflow,
+)
+
+workflow = load_workflow("workflow.toml")
+same_shape = parse_workflow('{"app":{"mode":"workflow"}}', format="json")
+json_text = dump_json(workflow)
+yaml_text = dump_dify_yaml(workflow)
 ```
 
-<Callout type="warn">
-  There is no embedded API browser on this docs site. For the full symbol-level reference, run `make
-  docs` locally, or read the source on GitHub:
-  [github.com/VoldemortGin/ragspine](https://github.com/VoldemortGin/ragspine).
-</Callout>
+All accepted JSON/YAML/TOML inputs normalize to a JSON-compatible mapping. TOML text needs the
+explicit format unless loaded from a `.toml` path. The format parser rejects duplicate keys,
+non-finite numbers, unsafe YAML, and oversized or deeply nested documents. The file loader also
+refuses links and non-regular files.
+
+## Catalog and scaffolding
+
+```python
+from ragspine.workflows import scaffold_workflow
+
+result = scaffold_workflow(
+    "invoice extraction and approval",
+    template_id=None,
+    reuse=True,
+)
+print(result.workflow)
+print(result.yaml)
+```
+
+Scaffolding is pure with respect to the filesystem: it returns configuration and never writes or
+executes it. Catalog APIs list/get defensive copies. An explicit template returns confidence `1`;
+otherwise matching uses configured score/margin thresholds and falls back to fixed generation.
+
+The CLI additionally handles safe atomic/exclusive file creation.
+
+## Preview v1
+
+The workflow preview builder returns a display-only JSON-compatible object with
+`preview_schema_version: 1`, `nodes`, and `edges`. It contains geometry and labels, not prompts,
+variables, credentials, provider configuration, or executable code. Validate the version before
+rendering; do not feed preview JSON back into an executor.
+
+## Dify and n8n
+
+`ragspine.dify` parses Dify YAML into an intermediate representation, analyzes it, and generates
+imperative Python for the `ragspine` or `spineagent` target. Code generation is not execution.
+
+`ragspine.n8n.n8n_to_dify` and `ragspine.n8n.dify_to_n8n` perform pure conversion and return the
+target mapping plus warnings. Unsupported semantics are reported rather than silently claimed as
+equivalent. Original n8n metadata is retained for round trips where possible.
+
+## App factory
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config,
+    provider=provider,
+    queue=queue,
+    faq_cache=faq_cache,
+    workflow_matcher=workflow_matcher,
+)
+```
+
+The service package is optional. Its workflow execution surface is disabled by default and cannot
+accept a client-supplied provider expression.

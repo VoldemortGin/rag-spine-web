@@ -1,0 +1,317 @@
+---
+title: Agent
+description: Il livello di orchestrazione — parsing dell'intento a quattro slot, il gateway di chiarimento, un gate di sicurezza deterministico, l'instradamento a tre percorsi, il ciclo tool-use, la giunzione del provider LLM e la protezione di prevenzione delle risposte inventate per singolo percorso.
+---
+
+Il dominio `agent` (`src/ragspine/agent/`) è l'orchestratore di RAGSpine. La docstring del suo modulo
+riassume il flusso di cui è responsabile:
+
+> 意图解析 → 澄清网关 → 安全门 → 三路分流 → tool-use 循环 → 合成回答
+>
+> _(parsing dell'intento → gateway di chiarimento → gate di sicurezza → instradamento a tre percorsi → ciclo tool-use → risposta sintetizzata)_
+
+Ha esattamente un unico punto di ingresso pubblico — `answer_question` — ed è dove risiede la
+protezione di **prevenzione delle risposte inventate**. Vedi [Prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication)
+per il concetto e [Doppio canale](/it/docs/concepts/dual-channel) per il modello di instradamento.
+
+## Struttura
+
+<Files>
+  <Folder name="agent" defaultOpen>
+    <File name="agent.py" />
+    <File name="intent.py" />
+    <File name="llm_provider.py" />
+    <File name="query_tools.py" />
+    <File name="security_gate.py" />
+  </Folder>
+</Files>
+
+## intent — parsing a quattro slot
+
+`intent.py` analizza una domanda grezza in una dataclass `ParsedIntent` dietro il Protocol
+`IntentParser`. Il `RuleIntentParser` predefinito non usa alcun LLM, è guidato dalla configurazione e delega alla
+funzione a livello di modulo `parse_intent(question, reference_date=None)`.
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: 'Codice metrica normalizzato (es. REVENUE); None se assente.',
+    },
+    entity: {
+      type: 'string | null',
+      description: 'Codice entità normalizzato (es. ACME_CN); None se assente.',
+    },
+    period: { type: '(period_type, value) | null', description: 'ad es. ("FY", "2024").' },
+    channel: {
+      type: 'string',
+      description: 'Il valore predefinito è "TOTAL" (ad es. AGENCY / BANCA / TOTAL).',
+    },
+  }}
+/>
+
+`ParsedIntent` trasporta anche `route`, `raw_question`, gli slot multivalore `metrics` /
+`entities` / `periods` (per i compositi elencati esplicitamente) e `external_entity`. Costanti di
+instradamento: `ROUTE_STRUCTURED = "structured"`, `ROUTE_NARRATIVE = "narrative"`,
+`ROUTE_COMPOSITE = "composite"`. Una metrica riconosciuta più un indizio narrativo instrada verso
+`composite`; un indizio numerico instrada verso `structured`; altrimenti `narrative`.
+
+<Callout type="info">
+  Il Protocol `IntentParser` richiede alle implementazioni di compilare `raw_question`. È questo che consente al
+  gate di sicurezza di riesaminare la domanda *grezza* indipendentemente da qualsiasi campo prodotto dal parser — così
+  la sostituzione con un parser LLM non può eludere il controllo di ambito.
+</Callout>
+
+## intent — il gateway di chiarimento
+
+`clarify_scope(intent, reference_date=None) -> ClarificationResult` viene eseguito prima di qualsiasi canale.
+Le sue quattro modalità:
+
+| Costante di modalità              | Valore                      | Quando                                                          |
+| --------------------------------- | --------------------------- | --------------------------------------------------------------- |
+| `CLARIFY_OUT_OF_SCOPE_ENTITY`     | `"out_of_scope_entity"`     | Il gate di sicurezza scatta sulla domanda grezza — prima si rifiuta. |
+| `CLARIFY_ASK_FIRST`               | `"ask_first"`               | **Metrica** mancante — indovinarla sarebbe un errore sostanziale. |
+| `CLARIFY_ANSWER_WITH_ASSUMPTIONS` | `"answer_with_assumptions"` | **Entità / periodo** mancante — si completa e si rende esplicita l'assunzione. |
+| `CLARIFY_NONE`                    | `"none"`                    | Completa, o un percorso narrativo.                              |
+
+L'asimmetria è deliberata: una metrica mancante **chiede prima** (con `narrowing_options` =
+le metriche supportate), mentre un'entità o un periodo mancante viene **risposto con assunzioni
+esplicitate** — usando come predefinito l'entità principale (`profile.home_entity_code`) e l'ultimo
+anno fiscale completo (`("FY", str(ref.year - 1))`), esponendo entrambi in un `assumption_note`,
+e offrendo un restringimento con un solo clic. Il rifiuto per fuori ambito viene verificato **per primo**, prima
+del ritorno anticipato narrativo e del controllo della metrica, chiamando il gate di sicurezza su
+`intent.raw_question` — che deliberatamente non si fida di `intent.external_entity`.
+
+Campi di `ClarificationResult`: `mode`, `assumed_slots`, `assumption_note`,
+`narrowing_options`, `question`.
+
+## security_gate — deterministico, mai sostituibile
+
+`security_gate.py` ospita `SecurityGate(external_entities, home_company_name)`. È
+deterministico, non chiama alcun LLM e non incorpora alcuna azienda hardcoded — l'elenco dei concorrenti e il nome
+dell'entità principale provengono dal `DomainProfile`.
+
+- `detect(text) -> SecurityScreen` — rilevamento degli alias esterni/dei concorrenti con corrispondenza più lunga. Effettua la
+  corrispondenza su una vista privata degli spazi bianchi (così `"竞 安"` non può eluderla) e **maschera** una corrispondenza
+  con spazi di uguale lunghezza in modo che non rimanga alcuna sottostringa esposta (gestendo la
+  collisione documentata di `中国 → ACME_CN`).
+- `screen(*, raw_question, metric) -> SecurityVerdict` — rideriva l'ambito **solo dalla
+  domanda grezza**. In caso di corrispondenza con un concorrente restituisce `SECURITY_REFUSE_OUT_OF_SCOPE`
+  (`= "out_of_scope_entity"`, deliberatamente uguale a `CLARIFY_OUT_OF_SCOPE_ENTITY`) con un
+  messaggio di rifiuto e un'opzione di restringimento "chiedi invece di `home_company_name`"; altrimenti
+  `SECURITY_ALLOW`.
+
+## query_tools — lo stato triplo di `query_metric`
+
+`query_tools.py` definisce l'unica primitiva del canale strutturato che produce fatti, lo
+strumento di function-calling `query_metric`. `execute_query_metric(store, metric, entity, period, channel="TOTAL")` normalizza ogni parametro attraverso il glossario, interroga lo
+store `fact_metric` e restituisce esattamente uno tra **tre** stati — mai una supposizione:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    Il valore esatto esiste. Restituisce `value`, `unit`, i codici dimensione controllati e
+    la lineage completa sotto `source` (`{"doc", "locator"}`).
+  </Tab>
+  <Tab value="not_found">
+    Ogni parametro è stato normalizzato, ma nessuna riga corrisponde. Restituisce
+    `{"status": "not_found", "normalized": {...}}` — nessuna interpolazione, nessuna inferenza.
+  </Tab>
+  <Tab value="unrecognized_param">
+    Un parametro non ha potuto essere normalizzato in un codice controllato (il glossario ha restituito `None`).
+    Restituisce `{"status": "unrecognized_param", "param": ..., "raw": ...}`.
+  </Tab>
+</Tabs>
+
+Gli schemi degli strumenti sono derivati dal profilo (`build_query_metric_tool_anthropic` /
+`build_query_metric_tool_openai`, più costanti precostruite), quindi gli esempi di entità provengono dal
+profilo attivo — mai da un'azienda hardcoded.
+
+## llm_provider — la giunzione sostituibile
+
+A partire dalla **0.3.0**, il Protocol `LLMProvider` è di proprietà del core condiviso di famiglia
+[`corespine`](https://pypi.org/project/corespine/) e viene riesportato da
+`ragspine.agent.llm_provider`. Parla il **formato chat-completions di OpenAI** — un unico
+metodo `chat`:
+
+```python
+from corespine import ChatCompletion  # re-exported via ragspine.agent.llm_provider
+
+
+class LLMProvider(Protocol):
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion: ...
+```
+
+`messages` è la cronologia in formato OpenAI (ciascuno `{"role", "content", ...}`); il prompt di sistema
+è semplicemente la prima voce `{"role": "system", ...}` anziché un argomento separato. Un
+`ChatCompletion` trasporta `choices: tuple[Choice, ...]` (ogni `Choice` incapsula un
+`ResponseMessage` con `content` e opzionalmente `tool_calls`), oltre a `usage`, `model` e `id`
+— la busta chat-completions standard, tutte dataclass frozen da `corespine`.
+
+<Callout type="info">
+  **Migrato nella 0.3.0.** Il precedente `create_message(*, system, messages, tools) ->
+  ProviderResponse` non esiste più; implementare `chat(messages, *, tools=None) -> ChatCompletion`
+  al suo posto. Vedi [ADR 0012](/it/docs/decisions/adr-0012) per le motivazioni e il confine di corespine.
+</Callout>
+
+<Cards>
+  <Card
+    title="MockProvider"
+    description="Offline, deterministico, senza chiave né rete. Il primo turno emette una chiamata allo strumento query_metric; il secondo turno rende il testo found / not_found / unrecognized in modo deterministico. Il core funziona interamente su questo."
+  ></Card>
+  <Card
+    title="AnthropicProvider"
+    description="Vera Claude Messages API. L'SDK viene importato in modo lazy dentro __init__ (ImportError indica l'extra [llm]); mappa i messages/tools in formato OpenAI sull'API di Anthropic e la risposta di ritorno in un ChatCompletion. Gli errori dell'SDK sono incapsulati come ProviderError; timeout/ritentativi sono delegati all'SDK."
+  ></Card>
+</Cards>
+
+`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`. Non c'è ancora alcun `OpenAIProvider` di chat incluso
+— solo una giunzione documentata (lo schema degli strumenti OpenAI è già precostruito in `query_tools.py`,
+e l'extra `[llm]` include `openai` per il backend degli embedding). `ProviderError` (una
+sottoclasse di `corespine.CorespineError`) incapsula solo gli errori di rete/API/timeout — gli errori di
+programma si propagano.
+
+<Callout type="info">
+  Imposta `RAGSPINE_TOKENS_PER_MINUTE` (> 0) e il servizio incapsula il provider costruito nel
+  `RateLimitedProvider` di corespine per un throttling TPM lato client **attivo** — complementare
+  al backoff 429 passivo `max_retries` dell'SDK stesso. Vedi [Configurazione](/it/docs/reference/configuration).
+</Callout>
+
+## agent — l'orchestratore e il ciclo tool-use
+
+`answer_question` è l'unico ingresso pubblico:
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` è `tuple[str, str]`. La cronologia è solo contesto di generazione: viene inserita dopo il
+messaggio di sistema e prima della domanda corrente, ma non entra mai nel parsing deterministico dell'intento,
+nella verifica di sicurezza, nella query di recupero, né nell'elenco delle evidenze/fonti. Solo `assistant` viene trattato
+come ruolo assistant; i ruoli sconosciuti vengono normalizzati a user. Di conseguenza, il testo della conversazione precedente
+non può autorizzare una query su un concorrente né diventare una citazione. Vedi
+[ADR 0017](/it/docs/decisions/adr-0017).
+
+Il suo flusso: assegna un id di richiesta → costruisce un contesto di trace rispettoso della privacy → analizza l'intento
+(predefinito `RuleIntentParser`) → `clarify_scope`. Poi effettua ritorni anticipati in ordine rigoroso:
+
+<Steps>
+  <Step>
+    **Fuori ambito** (`CLARIFY_OUT_OF_SCOPE_ENTITY`) → rifiuta **prima di qualsiasi strumento, recupero o chiamata
+    LLM**.
+  </Step>
+  <Step>**Chiedi-prima** (`CLARIFY_ASK_FIRST`) → restituisce riflessivamente la domanda di chiarimento.</Step>
+  <Step>**Rispondi-con-assunzioni** → completa la domanda effettiva, quindi instrada.</Step>
+  <Step>
+    **Instradamento**: narrativo → `_run_narrative`; strutturato/composito → espande i sotto-task ed esegue
+    `_run_tool_loop` (o il `_multi_subtask_answer` senza LLM per i compositi multivalore espliciti);
+    il composito aggiunge inoltre una sezione narrativa.
+  </Step>
+</Steps>
+
+Il ciclo degli strumenti (`_run_tool_loop`) è limitato a `MAX_TOOL_ITERATIONS = 5`: chiama
+`provider.chat(messages, tools=tools)`, esegue le eventuali chiamate allo strumento `query_metric`, reimmette i risultati
+come messaggio user e si ferma quando il modello non restituisce alcuna chiamata a strumenti. In caso di `ProviderError`
+degrada a un testo fisso e **privo di numeri** anziché inventare.
+
+`answer_question` restituisce un `AgentResult`:
+
+<TypeTable
+  type={{
+    answer: {
+      type: 'str',
+      description: 'Il testo della risposta finale (o un rifiuto onesto / una domanda di chiarimento).',
+    },
+    route: {
+      type: 'str',
+      description: 'structured | narrative | composite (o un percorso di chiarimento).',
+    },
+    clarification: {
+      type: 'ClarificationResult | None',
+      description: 'Presente quando il gateway ha chiesto o rifiutato.',
+    },
+    tool_results: {
+      type: 'list[dict]',
+      description: 'Risultati grezzi di query_metric (found / not_found / unrecognized_param).',
+    },
+    sources: {
+      type: 'list[dict]',
+      description: 'Provenienza delle fonti per ogni fatto / frammento citato.',
+    },
+  }}
+/>
+
+## La protezione di prevenzione delle risposte inventate
+
+La protezione "riscrivi in not-found indipendentemente dall'output del modello" risiede in `_structured_answer`.
+Partiziona i risultati degli strumenti per stato ed è deliberatamente **per singolo percorso**:
+
+- **Found** → la risposta viene sintetizzata **deterministicamente dal valore del fatto**; la
+  prosa del modello viene scartata (il test di regressione
+  `test_found_path_discards_fabricated_extra_number` fissa questo comportamento).
+- **Nessun found, alcuni not_found** → un rifiuto onesto ("查不到 … 不提供任何推测数字").
+- **Solo unrecognized_param** → indica il parametro problematico.
+- **Zero risultati di strumenti** (il modello ha risposto senza chiamare lo strumento) → il testo del modello viene
+  restituito integralmente.
+
+Il percorso multi-sotto-task (`_multi_subtask_answer`) non chiama mai l'LLM; il percorso
+narrativo (`_run_narrative`) si fida della prosa del modello ma **aggiunge forzatamente** qualsiasi documento sorgente citato
+che il modello ha omesso di nominare. Il flag di trace `fabrication_guard_triggered` è true quando esistono
+risultati di strumenti ma nessuno è `found` — cioè la protezione ha riscritto in un rifiuto.
+
+<Callout type="warn">
+  La prevenzione delle risposte inventate è applicata nel flusso di controllo, non in un prompt. I tre percorsi sono intenzionalmente
+  **non** unificati — vedi [Prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication).
+</Callout>
+
+## Esempio
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # deterministic value, or an honest "not found"
+print(result.sources)  # [{'doc': ..., 'locator': ...}]
+```
+
+## Vedi anche
+
+<Cards>
+  <Card
+    title="Prevenzione delle risposte inventate"
+    href="/it/docs/concepts/anti-fabrication"
+    description="La protezione nel flusso di controllo e perché è per singolo percorso."
+  />
+  <Card
+    title="Doppio canale"
+    href="/it/docs/concepts/dual-channel"
+    description="Come l'instradamento divide e unisce strutturato + narrativo."
+  />
+  <Card
+    title="Recupero"
+    href="/it/docs/guides/retrieval"
+    description="Il NarrativeRetriever consumato da questo orchestratore."
+  />
+  <Card
+    title="Punti di estensione"
+    href="/it/docs/reference/extension-points"
+    description="LLMProvider, IntentParser, NarrativeRetriever e le altre giunzioni."
+  />
+</Cards>

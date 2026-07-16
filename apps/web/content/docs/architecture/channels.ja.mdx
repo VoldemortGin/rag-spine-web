@@ -1,0 +1,75 @@
+---
+title: チャネル
+description: 構造化ファクト、ナラティブ検索、複合回答、そして出典追跡に対応したグラフユーティリティ。
+---
+
+RAGSpine は、数値ファクトと説明的なテキストに対して異なるエビデンス機構を使用します。agent が
+`structured`、`narrative`、または `composite` を選択します。グラフユーティリティは、隠れた第 4 の
+ルーティング分岐ではなく、明示的な補助サーフェスであり続けます。
+
+## 構造化チャネル
+
+`query_metric` は、統制された用語集を通じて metric、entity、period、channel を正規化し、
+`FactStore` に問い合わせます。その結果は、`found`、`not_found`、`unrecognized_param` の
+いずれかちょうど 1 つになります。
+
+- `found` の場合、最終的な数値を含む文章は保存されたファクトから再構築され、
+  `source_doc_id`/locator を伴います。
+- `not_found` の場合、結果は数値を含まない定型の拒否応答になります。
+- 認識されないパラメータの場合、応答は推測する代わりに、サポートされていない入力を特定して示します。
+
+モデルは、失敗したルックアップの代わりとなる数値を提供することはできません。
+
+## ナラティブ RAG チャネル
+
+```text
+question
+  → optional deterministic/automatic metadata filters
+  → optional library router
+  → per-library lexical and optional vector search
+  → reciprocal-rank fusion
+  → optional rerank / postprocess
+  → child-hit expansion for parent/window prompt context
+  → cited generation
+```
+
+検索モード `economy`、`bm25`、`lexical` は、embedding バックエンドもベクトルストアも構築しません。
+Hybrid/auto モードは、インストールされていれば ONNX embeddings を使用できます。メタデータフィルタの
+演算子は `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte`、`between` です。フィルタリングは絞り込み
+のみを行い、入力された順序を保持します。
+
+`MultiIndexRetriever` は、ルーティングされたライブラリを個別に検索し、その結果を RRF で融合し、
+`library_id` による出典追跡情報を保持します。ルーティングが失敗した場合は、黙って何も返さないのでは
+なく、登録されているすべてのライブラリを検索します。
+
+### 親子およびセンテンスウィンドウのエビデンス
+
+小さなチャンクは精密なヒットをもたらし、親チャンクやウィンドウは生成コンテキストを改善できます。
+チャンクストアは `parent_id`、`heading`、`window_text`、`parent_locator` を永続化します。返される
+スニペットは**子**の `text`、`chunk_id`、`source_locator` を保持し、展開されたコンテンツは別個の
+`prompt_text` に配置され、`parent_locator` が逆参照として付与されます。したがって、引用は捏造された
+集約テキストではなく、マッチした子チャンクを指します。
+
+制限対象の子チャンクは、スニペット構築の前に破棄されます。その親/ウィンドウのコンテンツも一緒に
+破棄されるため、展開によって分離境界を回避することはできません。
+
+## 複合ルート
+
+複合的な質問では、構造化ファクトのパスとナラティブの根拠提示のパスが別々に実行され、その後、
+回答と出典リストがマージされます。ナラティブの文章が自らを構造化された数値エビデンスに昇格させる
+ことはできません。会話履歴は生成コンテキストにすぎず、同様にエビデンスになることはできません。
+
+## グラフユーティリティ
+
+`graph` ドメインは、ロールアップ、比較、導出トレースのための決定的な構造化関係グラフと、
+オプトイン方式のナラティブ関係抽出を提供します。モデル由来のエッジは `model-derived` および
+`unverified` としてマークされ、呼び出し元から与えられた系譜情報を保持し、同一のセキュリティ境界に
+よってスクリーニングされます。GraphRAG ヘルパーは、二重チャネルのルーターを置き換えるものでは
+ありません。
+
+## ワークフローグラフは別物
+
+Workflow preview v1 は、Dify 互換グラフを秘匿処理した UI 投影です。記述するのはノード、エッジ、
+ラベル、ジオメトリのみであり、ナラティブのエビデンスでも、エンジンのトポロジーでも、実行可能な
+フォーマットでもありません。[Workflows](/ja/docs/guides/workflows#プレビュープロトコル-v1) を参照して
+ください。

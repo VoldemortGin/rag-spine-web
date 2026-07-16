@@ -1,0 +1,62 @@
+---
+title: 'ADR 0013: Dify 工作流 YAML → 纯 Python 编译器 + 静态优化顾问'
+description: 通过一个去 Dify 化的 IR（parse → IR → codegen）把 Dify 工作流 .yml 编译为不绑定框架的命令式 Python，并附带八条规则的静态优化顾问——PyYAML 置于新的 [dify] extra 之后，完全同步，核心零新增依赖。
+---
+
+> 状态：**accepted** · 日期：2026-06-24
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
+
+关联 [0009](/zh/docs/decisions/adr-0009)（无框架锁定 + 仅限宽松许可证）、[0011](/zh/docs/decisions/adr-0011)（python-project-standard），以及 spine 家族边界 ADR（家族仓库，`docs/adr/0001`——家族缝 / LLM 协议）。已随 **rag-spine 0.4.0** 发布。
+
+## 背景
+
+Dify 是流行的低代码 LLM 应用编排平台；其工作流可导出为 `.yml`（DSL）。许多用户在 Dify 里搭好了能用的 workflow / advanced-chat，但想**摆脱平台锁定**：得到一段不绑定框架、可读、可版本控制、可离线运行的纯 Python。RAGSpine 的身份恰恰是"不绑定框架的后端"（[ADR 0009](/zh/docs/decisions/adr-0009)：无框架锁定 + 仅限宽松许可证的依赖），因此把 Dify 工作流**编译**为命令式纯 Python——并顺带给出**静态优化建议**——与产品方向天然契合。
+
+硬约束：家族完全同步；核心保持零 SDK；LLM 调用经由 `corespine.LLMProvider.chat` 这条缝；离线的 `MockProvider` 是默认；仅限宽松许可证的门禁不动摇；`mypy --strict`；pydantic 只出现在边界。
+
+## 决策
+
+**`.yml → parse → IR → codegen + optimize`——由一个去 Dify 化的 IR 解耦的三个阶段。**
+
+- **parse**——`yaml.safe_load`（PyYAML，MIT，通过许可证门禁）把文档读入 dict，由 pydantic v2 边界模型校验（`extra='allow'` 容忍未知字段，因此 Dify 新增字段绝不会弄坏解析器）。pydantic **只出现在这一阶段**。PyYAML 置于新的 `[dify]` 可选 extra 之后惰性 import；核心 `dependencies` 不动。
+- **IR**——`DifyDoc → WorkflowIR`。节点归一化为 frozen dataclass 的 `IRNode` 子类；变量引用（`value_selector` / `{{#nodeId.field#}}`）归一化为 `VarRef` / `Literal` / `TemplateValue`；边携带 `source_handle`；Kahn 拓扑排序产出 `topo_order` 和 `parallel_layers`；出现环则抛 `CyclicGraph`。纯 stdlib——零 pydantic，且零 Dify 概念泄漏到这一层之下。
+- **codegen**——`WorkflowIR → GeneratedCode`。拓扑被展平为一个命令式脚本 `def run_workflow(inputs, *, provider=None) -> dict`；LLM 节点变为 `provider.chat(messages)`；并行层使用 `concurrent.futures.ThreadPoolExecutor`（**不生成任何 async**——家族完全同步）。纯 stdlib。
+- **optimize**——`WorkflowIR → list[Suggestion]`：**八条纯静态规则**（零 API 调用，绝不触碰线上环境；环境上限可注入）——PARALLEL_001/002、BOTTLE_001/002、CACHE_001、RESOURCE_001/002、LLM_001。
+
+落地位置为 `src/ragspine/dify/{parse,ir,codegen,optimize}/ + api.py + errors.py`。门面：`compile_dify_yaml(source, *, target='ragspine', provider_expr='MockProvider()',
+emit_trace=False, analyze=True) -> CompileResult(code, suggestions, ir)`；`analyze(source, *, env=None) -> list[Suggestion]`；底层的 `parse_dify_yaml / lower_to_ir / generate_code`。CLI：`ragspine dify compile <path>`。
+
+## 六项 MVP 默认（§7——开放问题的既定默认）
+
+为推进 MVP，六个开放问题采取了**合理默认**（评审时可修订）：
+
+1. **目标运行时**——默认生成纯 ragspine 命令式脚本；预留 `target=` 参数作为缝，spineagent 编排目标留待 P7。
+2. **优化范围**——纯静态规则（零 API）。动态 profiling / 真实 token 估算推迟。
+3. **`code` 节点**——**内联**为生成的本地函数，并加注释标明"来源信任假设"（Dify 的 code 节点本就执行任意用户代码；编译器保持同一信任边界，不做沙箱）。
+4. **不支持的节点**（http-request / tool / knowledge-retrieval / parameter-extractor / 插件）——生成带 `raise NotImplementedError` + 详细 docstring 的钩子函数（产出**可运行的骨架**，绝不让整次编译失败）；在 `GeneratedCode.warnings` 中显式记录。
+5. **应用模式**——先支持 `workflow` + `advanced-chat`（含 `answer` 节点）。`conversation_variables` / memory / 多轮对话状态留待 P7。
+6. **YAML 依赖**——新的 `[dify]` 可选 extra（PyYAML，`safe_load`）；核心 `dependencies` 不动。
+
+## 考虑过的备选方案（已否决）
+
+- **直接 `.yml → code`（无 IR）。** 否决——三个阶段会紧耦合，增加目标后端（spineagent）或做静态分析都会很难；IR 是优化器与多目标共享的支点。
+- **运行时解释器（即席执行 `.yml`）。** 否决——那等于再造一个迷你 Dify 运行时，背离了编译为库级纯 Python、离开平台的初衷，也与 ADR 0009 不绑定框架的立场相悖。
+- **生成 async 代码。** 否决——家族完全同步；`ThreadPoolExecutor` 足以覆盖并行，且更可读、可离线运行。
+- **把 PyYAML 放进核心 `dependencies`。** 否决——只有 parse 阶段需要它；惰性 import + `[dify]` extra 让"`import ragspine` 零重型依赖"继续成立。
+
+## 影响
+
+- 新增一个 `[dify]` extra（PyYAML）；核心 `dependencies` 与离线核心保持不变。
+- 不支持的节点产出**可运行骨架 + 警告**——用户拿到的是可以直接填充的脚手架，而不是一次失败的编译。
+- IR 层为后续目标预留扩展点（spineagent 编排、真实 token 估算、动态优化）。
+- 本记录最初为 **proposed**：六项默认待评审；任何变更遵循"只可取代、不可编辑"（新记录或状态翻转）。
+
+## P7 跟进（2026-06-24）：accepted
+
+> 上方的历史决策文本保持原样（只可取代，不可编辑）。本节将 §7 默认项 **#1 / #4** 从 proposed 收敛为 **accepted**，并记录 P7 的新增内容；本记录的状态随之翻转 `proposed → accepted`。
+
+- **默认 #1（目标运行时）→ 已接受并推进。** `target='spineagent'` 已实现（MVP，最小可离线运行路径）。具备 tool-use 结构（≥ 1 个 tool 节点）的工作流映射到 spineagent 的 `Coordinator` / `FunctionCallingAgent`，入口为 `run_agent(inputs, *, provider=None) -> AgentResult`；没有 tool 节点时抛出 `DifyCompileError(code='dify.no_agent_structure')` 并建议改用 `target='ragspine'`。
+- **默认 #4（不支持的节点）→ 已细化并接受。** 三种节点类型——knowledge-retrieval / parameter-extractor / tool——从 `NotImplementedError` 钩子升级为**真实代码生成**：knowledge-retrieval → `build_narrative_retriever + retrieve`（`KNOWLEDGE_CHUNK_DB` 默认 `':memory:'`，即离线空存储）；parameter-extractor → `provider.chat(tools=[function-tool schema])` 并解析 `tool_calls`；tool → 一个 spineagent `@function_tool` 占位符及其调用点。**只有真正需要外部副作用的节点**（http-request 等）仍保留为钩子——编译器无法凭空变出外部副作用，留下可填充的骨架才是诚实的行为。
+- **新增：`answer_question` 折叠 pass**（`codegen/fold.py`，默认开启，由 `fold_answer_question` 开关）：当 IR 在结构上匹配 `start → knowledge-retrieval → llm(context points at that retrieval) → answer/end` 的问答骨架时，折叠为单次 `ragspine.answer_question(...)` 调用——比手工连接 retrieve + chat 更短也更正确（内建防编造机制的"未找到"改写 + 来源溯源）。
+- **重申：**编译器本身**不增加任何运行时依赖**——生成的代码会 import ragspine 检索原语 / spineagent，但 `ragspine.dify` 自身的 import 保持干净；`mypy --strict` / ruff / `filterwarnings=error` 全绿。

@@ -1,0 +1,265 @@
+---
+title: Valutazione
+description: Gli harness di valutazione per QA ed estrazione — metriche QA a quattro gate, accuratezza dell'estrazione per canale e un gate di regressione sulla baseline che si alza progressivamente e non si abbassa mai in modo silenzioso.
+---
+
+Il dominio `eval` (`src/ragspine/eval/`) è il ciclo chiuso di valutazione di RAGSpine: due harness
+(QA ed estrazione) che assegnano un punteggio al motore rispetto a golden set sotto controllo di versione, più un
+**gate sulla baseline** che fa fallire la CI in caso di regressione. La sua invariante guida:
+
+> Il gate sulla baseline **si alza progressivamente, non si abbassa mai** — una regressione deve far fallire il gate, mai
+> abbassarlo silenziosamente. Non indebolire mai un golden o una baseline per far passare un caso.
+
+## Struttura
+
+<Files>
+  <Folder name="eval" defaultOpen>
+    <File name="qa_eval.py" />
+    <File name="extraction_eval.py" />
+  </Folder>
+</Files>
+
+I dati golden e di baseline risiedono in `data/golden/` (forzati sotto controllo di versione), e le
+fixture di ground truth per l'estrazione in `data/fixtures/`.
+
+## Valutazione QA — i quattro gate
+
+`qa_eval.py` è l'harness a ciclo chiuso per il Q&A. Il punto di ingresso:
+
+```python
+def run_qa_eval(
+    golden_path: str | Path,
+    mode: str = "tool",
+    kb_dir: str | Path | None = None,
+) -> QAEvalReport: ...
+```
+
+Carica e valida il golden set, costruisce una knowledge base sintetica deterministica
+(`build_eval_kb`, a partire da `_EVAL_FACT_ROWS` + `_EVAL_NARRATIVE_DOCS` del modulo), esegue ogni
+caso in una delle due modalità (`EVAL_MODES = ("tool", "agent")`) e restituisce un report a quattro gate.
+
+<Cards>
+  <Card
+    title="modalità tool"
+    description="Zero LLM, accesso diretto ai tool: parse_intent → clarify_scope → execute_query_metric / retrieve narrativo. Deterministica."
+  ></Card>
+  <Card
+    title="modalità agent"
+    description="Orchestratore completo: answer_question con un MockProvider(reference_date=...) deterministico."
+  ></Card>
+</Cards>
+
+Ogni caso (`GoldenCase`: `id`, `question`, `case_type`, `expected`, `tags`,
+`reference_date`) viene eseguito producendo un `CaseOutcome` normalizzato (route, modalità di chiarimento, valore/unità/fonte
+trovati, flag di rifiuto, fonti, stati dei tool), quindi valutato rispetto ai **quattro
+gate** — mantenuti come quattro pass rate separati, mai fusi in un unico numero:
+
+<TypeTable
+  type={{
+    NUMERIC_ACCURACY: {
+      type: '"numeric_accuracy"',
+      description:
+        'Corrispondenza esatta: found_value == expected.value E found_unit == expected.unit (percorso strutturato).',
+    },
+    CITATION_VALIDITY: {
+      type: '"citation_validity"',
+      description:
+        'Risposta giusta + fonte sbagliata = fallimento. La fonte attesa deve corrispondere e il documento deve comparire nel testo della risposta.',
+    },
+    REFUSAL_APPROPRIATENESS: {
+      type: '"refusal_appropriateness"',
+      description:
+        'Bidirezionale: se expected.refuse, allora rifiutato E found_value è None; altrimenti non rifiutato.',
+    },
+    CLARIFICATION_APPROPRIATENESS: {
+      type: '"clarification_appropriateness"',
+      description:
+        'Bidirezionale: clarification_mode == expected.clarification (una domanda completa non deve innescare una domanda di chiarimento).',
+    },
+  }}
+/>
+
+`GATE_METRICS` è la tupla di tutti e quattro. Una quinta metrica separata traccia le risposte inventate nei
+casi di rifiuto:
+
+<Callout type="warn">
+  `FABRICATION = "fabrication"` viene calcolata solo sui casi di rifiuto tramite
+  `detect_fabricated_numbers(answer)`: rimuove i token di periodo (inseriti in whitelist a partire dalla dimensione
+  temporale del profilo attivo) e tratta qualsiasi cifra rimanente come risposta inventata. L'obiettivo è **0**.
+  È deliberatamente *non* fusa nei quattro gate.
+</Callout>
+
+I tipi del report:
+
+- `GateMetric` — `name`, `total`, `passed`, `pass_rate` (`1.0` se `total == 0`, altrimenti
+  `passed / total`), `failures`, `by_tag`.
+- `QAEvalReport` — `mode`, `n_cases`, `metrics: dict[str, GateMetric]` e un
+  `fabrication: GateMetric` separato (con una proprietà `fabrication_count`). `evaluate(cases, outcomes, mode)` applica le regole di tutti e quattro i gate per ciascun caso.
+
+## Gate di fedeltà e ancoraggio alle fonti (0.7.0+)
+
+I quattro gate qui sopra valutano corrispondenza delle citazioni, rifiuto e chiarimento — ma non hanno mai verificato
+che una risposta **narrativa** sia effettivamente _implicata dagli_ snippet recuperati, che è esattamente
+il punto in cui avviene l'allucinazione. `eval/groundedness.py` chiude questa lacuna con **due nuovi gate
+soggetti a ratchet**:
+
+<TypeTable
+  type={{
+    FAITHFULNESS: {
+      type: '"faithfulness"',
+      description:
+        'Ogni affermazione nella risposta narrativa deve essere implicata dal contesto recuperato. Intercetta la forma più comune di risposta inventata: un\'affermazione che introduce un\'entità / un numero / un\'asserzione assente dagli snippet.',
+    },
+    ANSWER_ACCURACY: {
+      type: '"answer_accuracy"',
+      description:
+        'La risposta narrativa a testo libero deve coprire il contenuto sostanziale del documento atteso. I casi narrativi non avevano prima alcun punteggio di correttezza del contenuto — solo citazione / rifiuto / chiarimento.',
+    },
+  }}
+/>
+
+`GROUNDEDNESS_METRICS = (faithfulness, answer_accuracy)` sono **nuove chiavi nello stesso
+`report.metrics`**, quindi confluiscono nello **stesso ratchet della baseline** dei quattro gate (sotto) —
+ri-baselinati in `1.0` e verificati sia in `--mode tool` sia in `--mode agent`. I quattro
+`GATE_METRICS` mantengono la loro semantica **esatta**; nulla viene fuso.
+
+Il metodo predefinito è l'**entailment offline deterministico basato su sovrapposizione lessicale**
+(`LexicalOverlapJudge`: un'affermazione è implicata se e solo se la sua copertura dei token di contenuto da parte del contesto supera
+una soglia) — nessun modello, nessuna rete, quindi `make ci` lo verifica completamente offline. Il contesto è osservato
+**solo lato valutazione**; il ciclo `answer_question` predefinito è invariato al byte.
+
+<Callout type="warn">
+  Il giudice predefinito è un **proxy lessicale, non un vero NLI** — cieco a parafrasi, negazione e
+  inversione numerica; intercetta la forma più comune di risposta inventata (nuovi token assenti dal
+  contesto), dimostrato con un test inverso in cui un'affermazione non implicata **fallisce** il gate mentre un
+  eco fedele passa. Il vero giudice ONNX-NLI (`[eval]`) e un giudice LLM (`[llm]`) dietro la
+  cucitura `EntailmentJudge` (`make_entailment_judge`), più context-precision / recall /
+  answer-relevance, sono seguiti onesti.
+</Callout>
+
+Questo rende la prevenzione delle risposte inventate un blocco di regressione **misurato** sul canale narrativo, non solo
+asserito — l'invariante ora viene verificata dove fallisce davvero.
+
+## Gate di regressione sulla baseline QA
+
+`qa_eval.py` possiede anche il confronto con la baseline:
+
+- `make_baseline_entry(report) -> dict` → `{"metrics": {name: pass_rate}, "fabrication_count": int, "n_cases": int}`.
+- `compare_to_baseline(report, baseline) -> BaselineComparison` — **fa fallire il gate quando il
+  `pass_rate` di un qualsiasi gate è sotto la sua soglia di baseline, oppure `fabrication_count` sale sopra la
+  baseline.** Vengono verificate solo le metriche elencate nella baseline; l'uguaglianza esatta passa. Ogni
+  regressione registra `metric`, `baseline`, `current`, `delta`.
+
+**Non esistono soglie hardcoded** — le soglie sono i pass rate per modalità
+memorizzati in precedenza in `data/golden/qa_baseline.json`. La baseline si alza progressivamente attraverso le esecuzioni
+osservate.
+
+## Harness QA — la CLI
+
+`scripts/run_qa_eval.py` pilota l'harness dalla radice del progetto:
+
+<Tabs items={['esegui', 'salva un rapporto', 'aggiorna la baseline']}>
+  <Tab value="run">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool
+    ```
+  </Tab>
+  <Tab value="save a report">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode agent --report out/qa_report.json
+    ```
+  </Tab>
+  <Tab value="update baseline">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool --update-baseline
+    ```
+  </Tab>
+</Tabs>
+
+Flag: `--mode {tool,agent}` (predefinito `tool`), `--golden` (predefinito
+`data/golden/qa_golden_set.jsonl`), `--report`, `--baseline` (predefinito
+`data/golden/qa_baseline.json`), `--update-baseline`. Il gate è indicizzato per modalità: una modalità
+senza baseline ne genera automaticamente una alla prima esecuzione e passa (exit 0); con una baseline, qualsiasi
+regressione di un gate o aumento delle risposte inventate esce con 1.
+
+## Formato dei dati golden
+
+`data/golden/qa_golden_set.jsonl` contiene un oggetto JSON per riga. Ogni caso reca `id`,
+`question`, `case_type` (uno tra `numeric` / `clarification` / `refusal` / `narrative` /
+`composite`), `expected` (sempre `clarification` ∈ `{none, ask_first, answer_with_assumptions}`
+e `refuse: bool`; numeric/composite aggiungono `value` + `unit` +
+`source`; narrative/composite aggiungono `narrative_doc`), `tags` e un `reference_date`.
+
+```json
+{
+  "id": "num-001",
+  "question": "香港FY2025的REVENUE是多少",
+  "case_type": "numeric",
+  "expected": {
+    "clarification": "none",
+    "refuse": false,
+    "value": 1702.0,
+    "unit": "USD_M",
+    "source": { "doc": "ACME_FY2025_Results.pptx", "locator": "slide=5,table=1,row=2,col=3" }
+  },
+  "tags": { "topic": "FIN", "scope": "ACME_HK", "qtype": "must_not_clarify" },
+  "reference_date": "2026-06-12"
+}
+```
+
+<Callout type="info">
+  Il golden set utilizza l'azienda fittizia ACME e cifre sintetiche. `data/golden/` è
+  tracciato forzatamente in modo che la baseline non possa scivolare fuori dal controllo di versione.
+</Callout>
+
+## Valutazione dell'estrazione
+
+`extraction_eval.py` assegna un punteggio all'estrazione da documenti d'ufficio per canale:
+
+```python
+def run_eval(
+    facts: list[dict[str, object]],
+    ground_truth: dict[str, object] | list[dict[str, object]],
+) -> EvalReport: ...
+```
+
+Allinea i `facts` estratti rispetto alla ground truth tramite `sheet!cell_ref`, valutando solo le celle
+presenti su entrambi i lati, e calcola l'accuratezza su **tre canali**:
+
+| Canale                  | Costante                                    | Campo del fatto confrontato |
+| ----------------------- | ------------------------------------------- | --------------------------- |
+| Valore della cella      | `CELL_VALUE = "cell_value"`                 | `value`             |
+| Mappatura dei colori    | `COLOR_MAPPING = "color_mapping"`           | `tags`              |
+| Attribuzione dell'intestazione | `HEADER_ATTRIBUTION = "header_attribution"` | `merge_span`        |
+
+Tipi: `ChannelMetric` (`name`, `total`, `correct`, `accuracy`, `mismatches`), `EvalReport`
+(`channels: dict[str, ChannelMetric]`, `n_facts`). Il gate di regressione è
+`compare_to_baseline(metrics, baseline) -> BaselineComparison`: qualsiasi canale il cui `accuracy`
+scende sotto la propria soglia fallisce (`passed=False`); vengono verificati solo i canali elencati nella baseline;
+l'uguaglianza esatta passa. Le fixture di ground truth risiedono in `data/fixtures/` (es.
+`fixtures_ground_truth.json`, `pdf/pdf_ground_truth.json`, `pptx/pptx_ground_truth.json`).
+
+## Vedi anche
+
+<Cards>
+  <Card
+    title="Prevenzione delle risposte inventate"
+    href="/it/docs/concepts/anti-fabrication"
+    description="Il comportamento che le metriche di rifiuto e di risposte inventate proteggono."
+  />
+  <Card
+    title="Provenienza"
+    href="/it/docs/concepts/provenance"
+    description="La discendenza che il gate di validità delle citazioni verifica."
+  />
+  <Card
+    title="Agente"
+    href="/it/docs/guides/agent"
+    description="L'orchestratore esercitato nella valutazione in modalità agent."
+  />
+  <Card
+    title="CLI e script"
+    href="/it/docs/getting-started/cli-and-scripts"
+    description="run_qa_eval.py e gli altri script alla radice del repository."
+  />
+</Cards>

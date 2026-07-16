@@ -1,0 +1,107 @@
+---
+title: 总览
+description: 纯 Python 双通道 RAG、工作流互操作、安全预览，以及可选的服务化执行边界。
+---
+
+RAGSpine 的引擎是普通的 Python：带类型的接缝、dataclass、显式的存储，以及可读的
+控制流。`answer_question(...)` 是问答的组合入口。一个独立的工作流
+领域负责解析、脚手架生成、预览、转换和编译 Dify 兼容配置；一个
+可选的 FastAPI 服务暴露这些操作，以及一个刻意默认关闭的执行器。
+
+这个区分很重要。RAGSpine 拥有 Dify 和 n8n 的**互换面**，但它不内嵌
+任一平台的运行时，不在运行时下载它们的应用市场，也不需要图框架就能
+回答问题。
+
+## 架构承诺
+
+<Cards>
+  <Card
+    title="代码强制的证据"
+    description="结构化数值来自事实存储；未命中会变成显式拒答。叙事回答保留来源定位符。"
+  />
+  <Card
+    title="领域包"
+    description="十五个顶层领域让编排、存储、检索、互操作、服务和 CLI 的职责清晰可见。"
+  />
+  <Card
+    title="带类型的边界"
+    description="Provider、embedding、存储、分块器、重排器、队列、连接器和匹配器都通过 Protocol 注入。"
+  />
+  <Card
+    title="默认不执行"
+    description="目录、脚手架、解析、转换、编译、拓扑和预览操作都不会执行工作流。运行路由默认禁用。"
+  />
+</Cards>
+
+## 问答请求生命周期
+
+```text
+question
+  → deterministic security/intent screening
+  → clarification gateway
+  → optional service-edge FAQ short-circuit
+  → structured | narrative | composite route
+       structured: normalize → query fact store → found/not_found/unrecognized
+       narrative: filter → retrieve/fuse → rerank/postprocess → cited generation
+       composite: execute both evidence paths and merge
+  → anti-fabrication/provenance checks
+  → answer + sources
+```
+
+可选的 `history` 只会插入到最终的生成消息序列中。它绝不改变
+确定性的意图/安全判定、检索查询，也不改变什么可以算作证据。
+
+叙事路径可以使用元数据过滤、带 RRF 融合的按库路由，以及存储层的
+父块/窗口扩展。引用字段始终是子命中的字段；扩展文本是独立的
+生成上下文。受限（restricted）的子块会在扩展之前被移除。
+
+## 工作流生命周期
+
+```text
+description or JSON/YAML/TOML
+  → normalize to JSON-compatible mapping
+  → explicit template or catalog match
+  → reuse safe Dify workflow | generate fixed start→llm→end graph
+  → deterministic YAML/JSON + preview schema v1
+  → optional analyze / convert / compile
+  → explicit server-controlled execution gate (off by default)
+```
+
+目录是包数据：7 个精选模板加 993 个生成的描述符。上游的 Dify/n8n
+URL 仅作为研究元数据；不会再分发任何上游工作流文本或凭证。
+
+## 信任边界
+
+- 基础库和目录不需要任何 API key。
+- 服务的常规 engine/catalog/compiler 路由没有内置的应用层鉴权，必须
+  由部署基础设施来保护。
+- Dify 兼容的公开端点需要 Bearer app key；n8n 兼容的公开 CRUD 需要
+  `X-N8N-API-KEY`。
+- Webhook 有意不做鉴权，需要入口层管控。
+- 工作流执行额外由默认的 `RAGSPINE_DIFY_RUN_ENABLED=false` 把关。
+- 进程内的限制层不是操作系统沙箱；子进程资源限制仅在 Linux 上可用。
+
+## 继续阅读
+
+<Cards>
+  <Card
+    title="通道"
+    href="/zh/docs/architecture/channels"
+    description="结构化、叙事、复合与图证据路径。"
+  />
+  <Card
+    title="包布局"
+    href="/zh/docs/architecture/package-layout"
+    description="十五个顶层源码领域。"
+  />
+  <Card
+    title="工作流"
+    href="/zh/docs/guides/workflows"
+    description="目录、格式、预览、转换与执行边界。"
+  />
+  <Card
+    title="请求流程"
+    href="/zh/docs/architecture/request-flow"
+    description="Agent 控制流详解。"
+  />
+</Cards>

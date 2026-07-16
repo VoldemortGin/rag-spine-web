@@ -1,0 +1,237 @@
+---
+title: Archiviazione
+description: Il livello di persistenza sqlite — un archivio di fatti numerici e un archivio di chunk narrativi, entrambi con lineage completo delle fonti. La dataclass Fact, la chiave di upsert dim_key e letture deterministiche trovato/non-trovato.
+---
+
+Il dominio **storage** è il livello di persistenza sqlite alla base dei due canali di RAGSpine: un
+**archivio di fatti** (metriche numeriche) e un **archivio di chunk** (narrativo). Entrambi mantengono il lineage
+completo delle fonti — ogni riga conosce il documento e il locator da cui proviene — ed entrambi adottano lo stesso
+stile disciplinato: uno schema esplicito, SQL parametrizzato e un punto di ingresso `execute_read`
+di sola lettura, così il codice di osservabilità non tocca mai la connessione grezza.
+
+<Callout type="info">
+  L'archivio dei fatti risiede in `src/ragspine/storage/fact_store.py` (contratto:
+  `src/ragspine/storage/CLAUDE.md`). L'**archivio di chunk** narrativo risiede nel sottoalbero di recupero in
+  `src/ragspine/retrieval/chunking/chunk_store.py` — è la metà narrativa dello stesso livello concettuale di
+  storage, e il suo schema rispecchia deliberatamente `fact_store`. Entrambi poggiano sullo stesso file
+  sqlite, `data/fact_metric.db`, in tabelle separate.
+</Callout>
+
+## Struttura
+
+<Files>
+  <Folder name="storage" defaultOpen>
+    <File name="fact_store.py — dataclass Fact + Protocollo FactStore + SqliteFactStore (tabella fact_metric)" />
+  </Folder>
+  <Folder name="retrieval/chunking">
+    <File name="chunk_store.py — StoredChunk + ChunkStore (tabella narrative_chunk)" />
+  </Folder>
+</Files>
+
+## La dataclass Fact
+
+Un `Fact` è un singolo punto dati di metrica: dimensioni + valore + lineage (+ i campi v2 di semantica di stile e
+lineage di versione). È una `@dataclass` (non frozen). L'**ordine dei campi fa parte del
+contratto**: i primi dieci sono congelati posizionalmente e i nuovi campi vengono soltanto aggiunti in coda.
+
+<TypeTable
+  type={{
+    metric_code: { type: 'str', description: "1 — ad es. 'REVENUE'." },
+    entity: { type: 'str', description: '2 — codice entità controllato.' },
+    geography: { type: 'str', description: '3 — dimensione non identitaria, sovrascrivibile.' },
+    channel: { type: 'str', description: "4 — ad es. 'TOTAL', 'AGENCY'." },
+    period_type: { type: 'str', description: "5 — valori 'FY' / 'HY' / 'QUARTER'." },
+    period: { type: 'str', description: "6 — ad es. '2024'." },
+    value: { type: 'float', description: '7 — il valore numerico.' },
+    unit: { type: 'str', description: "8 — ad es. 'USD_M', 'PCT'." },
+    source_doc_id: { type: 'str', description: '9 — provenienza della fonte.' },
+    source_locator: {
+      type: 'str',
+      description: "10 — provenienza della fonte (ad es. 'sheet=5yr!C4').",
+    },
+    tags: { type: 'dict[str, object]', default: '{}' },
+    source_file_hash: { type: 'str | None', default: 'None' },
+    extractor_version: { type: 'str | None', default: 'None' },
+    mapping_version: { type: 'int | None', default: 'None' },
+    confidence: { type: 'float | None', default: 'None' },
+    review_status: { type: 'str', default: 'REVIEW_AUTO_APPROVED' },
+    valid_as_of: { type: 'str | None', default: 'None' },
+    ingested_at: { type: 'str | None', default: 'None' },
+    corrected_by: {
+      type: 'str | None',
+      default: 'None',
+      description: 'Lineage di correzione — l\'esperto (SME) che ha applicato la correzione.',
+    },
+    corrected_audit_seq: {
+      type: 'int | None',
+      default: 'None',
+      description: 'Lineage di correzione — il seq di audit di revisione dietro il valore.',
+    },
+    dimensions: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'Contenitore in memoria, NON una colonna del DB.',
+    },
+  }}
+/>
+
+<Callout type="warn">
+  **I primi dieci campi sono congelati posizionalmente** — `metric_code, entity, geography, channel,
+  period_type, period, value, unit, source_doc_id, source_locator`. L'harness di valutazione lega una
+  10-tupla tramite `Fact(*row)`; riordinarne o rimuoverne uno qualsiasi lo rompe. I nuovi campi sono **solo
+  additivi**, aggiunti in coda — `dimensions` è l'ultimo campo.
+</Callout>
+
+Poiché quei dieci campi posizionali sono facili da trasporre, costruisci un fatto di metrica tramite il
+classmethod keyword-only `Fact.metric(*, metric_code, entity, period_type, period, value, unit,
+source_doc_id, source_locator, channel="TOTAL", geography="", **extra)` — indipendente dall'ordine,
+con `channel` / `geography` valorizzati per default e i campi v2 additivi passati tramite `**extra`. Restituisce
+un normale `Fact`, quindi il contratto posizionale della 10-tupla (`Fact(*row)`) resta intatto.
+
+`dimensions` è un contenitore in memoria per dimensioni arbitrarie, **escluso dalle colonne del DB**. La sua
+guardia `__post_init__` solleva `ValueError` se una chiave collide con un nome riservato strutturale / di lineage /
+`dim_key`, e un contenitore vuoto deriva uno specchio identitario
+(`{metric, entity, channel, period}`). Non viene mai scritto in una colonna e non viene mai
+ricostruito in un `Fact(**data)`.
+
+### Stato di revisione
+
+`review_status` regola la visibilità. Le letture visibili per default restituiscono solo
+`VISIBLE_REVIEW_STATUSES = (REVIEW_AUTO_APPROVED, REVIEW_APPROVED)`; l'insieme completo è
+`auto_approved`, `pending`, `approved`, `rejected`, `blocked`.
+
+## FactStore
+
+`FactStore` è un **Protocol** `@runtime_checkable` — la giunzione importata dal core (usalo solo come
+type hint / target di `isinstance`; istanziarlo solleva un'eccezione). La classe che costruisci è il
+default sqlite a zero dipendenze, `SqliteFactStore`, direttamente oppure tramite la
+factory `make_fact_store(spec, **kwargs)` / la variabile d'ambiente `RAGSPINE_FACT_STORE` (i backend
+di terze parti si registrano sotto il gruppo di entry-point `ragspine.fact_stores`).
+
+```python
+from ragspine.storage.fact_store import Fact, SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+
+store.upsert_facts([
+    Fact("REVENUE", "ACME_GROUP", "ASIA", "TOTAL", "FY", "2024",
+         1234.5, "USD_M", "doc-42", "sheet=5yr!C4"),
+])
+
+hits = store.query("REVENUE", "ACME_GROUP", "FY", "2024")   # [] = not found, [Fact] = found
+store.close()
+```
+
+| metodo                                                                                                                    | scopo                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `init_schema()`                                                                                                           | crea `fact_metric`, esegue la migrazione delle colonne v2, crea entrambi gli indici univoci                                          |
+| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | inserimento batch; in caso di conflitto su `dim_key`, sovrascrive valore + lineage; restituisce il conteggio delle righe scritte                                  |
+| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | ricerca esatta parametrizzata, restituisce 0 o 1 riga                                                                         |
+| `count() -> int`                                                                                                          | totale dei fatti                                                                                                            |
+| `has_source_doc(source_doc_id) -> bool`                                                                                   | `True` se esiste _un qualsiasi_ fatto per quel documento (qualunque stato di revisione) — una sonda di esistenza per il refresh idempotente / incrementale |
+| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | punto di ingresso SELECT di sola lettura per il riuso di ledger/metriche                                                                  |
+| `delete_by_source_doc(source_doc_id) -> int`                                                                              | elimina fisicamente i fatti di un documento (qualunque stato di revisione); idempotente                                                        |
+| `set_review_status(dim_key, status) -> int`                                                                               | scrittura di ritorno della revisione umana: cambia lo `review_status` di un fatto tramite `dim_key`; restituisce 0 o 1                                  |
+| `dim_key_for(fact) -> str` _(statico)_                                                                                     | calcola il `dim_key` di un `Fact` a partire dalle sue colonne identitarie tipizzate (l'accessor pubblico — `dim_key` non è mai un campo di `Fact`) |
+| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | recupera un fatto tramite `dim_key` (qualunque stato di revisione); `None` se assente                                                      |
+| `close()`                                                                                                                 | chiusura idempotente della connessione (chiusa automaticamente anche al GC tramite `weakref.finalize`)                                            |
+
+La tabella è `fact_metric`. `query()` emette una `SELECT` a corrispondenza esatta su
+`(metric_code, entity, period_type, period, channel)`; poiché quella combinazione è univoca,
+il risultato è sempre **0 righe (non trovato) o 1 riga (trovato)**. Questo determinismo è ciò su cui si basa
+l'[invariante di prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication) — l'assenza di un fatto `found`
+significa che l'orchestratore riscrive la risposta come "non trovato."
+
+### `dim_key` — la chiave di upsert
+
+`dim_key` è la chiave di conflitto per l'upsert: una chiave naturale canonica in JSON ordinato sulle
+**sole dimensioni identitarie** — `metric`, `entity`, `channel` e `period`
+(`period_type + period`, quindi `('FY','2024')` e `('HY','2024')` differiscono). `geography` è
+`identity=False`, una colonna non-chiave sovrascrivibile, e **non** fa parte della chiave.
+
+<Callout type="info">
+  `dim_key` è calcolato dalle colonne tipizzate da `_compute_dim_key` (non legge mai il
+  contenitore `dimensions`), viene ricalcolato a ogni scrittura e al backfill legacy, ed è **esclusivamente di storage** —
+  mai un campo di `Fact`, mai ricostruito in un `Fact`. Mantenere ogni combinazione identitaria a
+  0-o-1 riga è ciò che preserva il percorso di lettura deterministico trovato/non-trovato.
+</Callout>
+
+Due indici univoci coesistono e codificano la stessa unicità finanziaria:
+
+- `ux_fact_dim_key` — `UNIQUE (dim_key)`, il target di conflitto dell'upsert.
+- `ux_fact_metric` — `UNIQUE (metric_code, entity, period_type, period, channel)`, l'indice
+  composito legacy, mantenuto in parallelo.
+
+In caso di conflitto, `upsert_facts` sovrascrive le colonne sovrascrivibili —
+`geography, value, unit, source_doc_id, source_locator` più tutti i campi v2/di provenienza
+(`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
+valid_as_of, ingested_at, corrected_by, corrected_audit_seq`) — e assegna direttamente il timestamp a `ingested_at`. Rieseguire l'ingestione degli stessi dati
+non fa quindi mai crescere l'archivio; questa è la spina dorsale
+dell'[ingestione idempotente](/it/docs/guides/ingestion#il-registro-manifest-dei-batch).
+
+### Schema auto-migrante
+
+`init_schema()` aggiunge tramite ALTER le colonne v2 mancanti e la colonna `dim_key` a una tabella
+preesistente, poi esegue il backfill di `dim_key` per le righe in cui è `NULL` (ricalcolato in Python dalle
+colonne identitarie di ogni riga). Tutti i campi v2 hanno valori di default, quindi le vecchie chiamate a `Fact(...)` restano invariate.
+
+## L'archivio di chunk
+
+`ChunkStore` (in `retrieval/chunking/chunk_store.py`) è la controparte narrativa, modellata
+su `fact_store` — schema `narrative_chunk` esplicito, SQL parametrizzato, `execute_read`. Un
+`StoredChunk` è il contenuto di un chunk più i suoi metadati: `chunk_id`, `doc_id`, `seq`, `text`,
+`source_locator`, `para_start`, `para_end`, `title`, `topic`, `entity`, `geography`,
+`period`, `language`, `sensitivity` (default `"INTERNAL"`), `valid_as_of`, `ingested_at`,
+`version` e `active`. Gli schemi attuali aggiungono `parent_id`, `heading`, `window_text` e
+`parent_locator`. `init_schema()` aggiunge quelle colonne con default vuoti a un database più vecchio, così
+gli archivi di chunk esistenti restano leggibili.
+
+`window_text` è contesto di espansione riservato alla sola generazione. Un hit di recupero e una citazione conservano i valori figlio
+`text`, `chunk_id` e `source_locator`; `parent_locator` è un riferimento a ritroso di provenienza, non un
+locator sostitutivo. I figli restricted vengono rimossi insieme al loro contesto di espansione prima
+dell'assemblaggio del prompt.
+
+`replace_doc_chunks(doc_id, chunks, valid_as_of="")` è la scrittura **versionata e idempotente**:
+rieseguire l'ingestione di un documento passa le righe della vecchia versione a `active=0` e inserisce i
+nuovi chunk a `version = max+1, active=1`. L'insieme attivo coincide sempre con l'ingestione più
+recente; le vecchie versioni restano per il lineage. Una lista vuota ritira il documento dall'insieme attivo.
+
+<Callout type="info">
+  Il recupero applica pre-filtri sui metadati dei chunk (`active`, sensibilità, periodo, …) *prima* dello scoring. La
+  colonna `sensitivity` è ciò che alimenta l'[isolamento RESTRICTED](/it/docs/concepts/restricted-isolation)
+  a valle.
+</Callout>
+
+## Gestione delle risorse
+
+Entrambi gli archivi aprono una singola connessione `sqlite3` con `row_factory = sqlite3.Row` e registrano un
+`weakref.finalize` affinché la connessione si chiuda in modo deterministico al GC — anche se il chiamante
+dimentica `close()` — il che impedisce a una connessione sqlite nuda di sollevare un `ResourceWarning`
+sotto il gate a zero warning. `close()` è idempotente.
+
+## Percorsi di default del database
+
+I default provengono da [`common/core.py`](/it/docs/guides/common#core--costanti-globali):
+`DEFAULT_FACT_DB = data/fact_metric.db` (contiene sia `fact_metric` sia `narrative_chunk`),
+`DEFAULT_MAPPING_DB = data/color_mapping.db` e
+`DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`.
+
+## Invarianti garantite da questo dominio
+
+- **Provenienza** — ogni fatto e ogni chunk porta con sé `source_doc_id` + un locator; il lineage non
+  viene mai perso.
+- **Trovato/non-trovato deterministico** — l'univocità di `dim_key` mantiene ogni identità di metrica a una sola
+  riga, quindi un fatto mancante è privo di ambiguità.
+- **Contratto sull'ordine dei campi** — i primi dieci campi di `Fact` sono congelati posizionalmente; le aggiunte sono
+  solo in coda; `dimensions` non è mai una colonna.
+- **Scritture idempotenti** — i fatti fanno upsert su `dim_key`; i chunk vengono sostituiti per versione.
+
+## Correlati
+
+<Cards>
+  <Card title="Guida all'ingestione" href="/it/docs/guides/ingestion" />
+  <Card title="Guida all'estrazione — la fonte dei Fact" href="/it/docs/guides/extraction" />
+  <Card title="Concetto: Prevenzione delle risposte inventate" href="/it/docs/concepts/anti-fabrication" />
+  <Card title="Concetto: provenienza e tracciabilità" href="/it/docs/concepts/provenance" />
+</Cards>

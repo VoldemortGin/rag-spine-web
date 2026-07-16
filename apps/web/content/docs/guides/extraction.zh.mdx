@@ -1,0 +1,306 @@
+---
+title: 抽取
+description: 文档 → 冻结的 StyledGrid IR。感知样式与颜色的 xlsx/pptx/pdf 抽取器、逐页 PDF 路由、版本化的颜色语义注册表，以及交叉核对进评审队列的双通道校验。
+---
+
+**extraction** 领域把办公文档转换为冻结的、感知样式的中间
+表示（**StyledGrid IR**）——不是"简单的文本切分"。每个抽取器都是
+确定性优先、感知颜色与样式的，要么直接产出事实，要么发出
+`StyledGrid` 供下游摄取。重量级解析器（Docling、PaddleOCR）位于
+`Protocol` 缝之后并延迟 import，因此核心可离线运行。
+
+<Callout type="info">
+  包位于 `src/ragspine/extraction/`。其领域契约是
+  `src/ragspine/extraction/CLAUDE.md`。IR（`ir.py`）在代码中被描述为*整个项目
+  最稳定的接口*——抽取器向它收敛，而下游一切（颜色
+  语义、摄取、评审、评估）都消费它。
+</Callout>
+
+## 目录结构
+
+<Files>
+  <Folder name="extraction" defaultOpen>
+    <File name="ir.py — StyledGrid IR（StyledCell / StyledGrid）" />
+    <Folder name="extractors">
+      <File name="xlsx_extractor.py — 确定性 Fact" />
+      <File name="xlsx_styled_extractor.py — StyledGrid（主题/tint RGB）" />
+      <File name="pptx_extractor.py — 确定性 Fact（MVP）" />
+      <File name="pptx_styled_extractor.py — StyledGrid + NoteFragment" />
+      <File name="pdf_digital_extractor.py — GridExtractor 接缝（Docling）" />
+      <File name="pdf_scanned_extractor.py — OcrBackend 接缝（OCR/VLM）" />
+    </Folder>
+    <Folder name="color">
+      <File name="color_semantics.py — 聚类、图例、MappingRegistry" />
+    </Folder>
+    <Folder name="routing">
+      <File name="pdf_router.py — 逐页分诊 → RoutingDecision" />
+    </Folder>
+    <Folder name="verification">
+      <File name="dual_channel_verifier.py — 交叉核验 → 评审队列" />
+    </Folder>
+  </Folder>
+</Files>
+
+## StyledGrid IR
+
+`ir.py` 定义两个 dataclass。一个 `StyledGrid` 对应一个工作表或一个表格页面；其
+`cells` 是从 `cell_ref` 到 `StyledCell` 的稀疏映射。
+
+### `StyledCell`
+
+单个感知样式的单元格。
+
+<TypeTable
+  type={{
+    value: { type: 'object', description: '单元格的值。' },
+    cell_ref: { type: 'str', description: "Excel 风格的 'C4' 或网格风格的 'R{row}C{col}'。" },
+    resolved_rgb: {
+      type: 'str | None',
+      default: 'None',
+      description: "填充颜色，形如 'RRGGBB'，或为 None。",
+    },
+    number_format: { type: 'str', default: '"General"', description: 'OOXML 数字格式。' },
+    bold: { type: 'bool', default: 'False' },
+    is_merged_origin: { type: 'bool', default: 'False' },
+    merge_span: { type: 'tuple[int, int] | None', default: 'None' },
+    cf_affected: {
+      type: 'bool',
+      default: 'False',
+      description: '处于条件格式区域内——颜色不可靠。',
+    },
+    confidence: {
+      type: 'float | None',
+      default: 'None',
+      description: '仅 OCR 通道使用；确定性抽取为 None。',
+    },
+  }}
+/>
+
+`StyledCell.rgb_tag_key()` 返回颜色聚类键：`cf_affected` 时为 `None`，
+否则为 `resolved_rgb`。条件格式区域内的单元格被刻意
+排除在颜色语义之外，因为其填充颜色不可信。
+
+### `StyledGrid`
+
+<TypeTable
+  type={{
+    sheet: {
+      type: 'str',
+      description: "工作表标题，或 'page{N}_table{M}' / 'slide{N}_table{M}'。",
+    },
+    source_doc_id: { type: 'str' },
+    source_file_hash: {
+      type: 'str | None',
+      default: 'None',
+      description: '源文件的 sha256——版本链路。',
+    },
+    cells: {
+      type: 'dict[str, StyledCell]',
+      default: '{}',
+      description: '稀疏映射 cell_ref → StyledCell。',
+    },
+    warnings: { type: 'list[str]', default: '[]' },
+    n_rows: { type: 'int', default: '0' },
+    n_cols: { type: 'int', default: '0' },
+  }}
+/>
+
+关键方法：`get(cell_ref)`、`iter_cells()`、`add_warning(message)`，以及
+`cells_by_rgb()`——按 `resolved_rgb` 对颜色可靠的单元格分组，跳过
+`None` 与 `cf_affected` 的单元格。参见 [StyledGrid IR](#styledgrid-ir)。
+
+## 抽取器
+
+按设计存在两类抽取目标：
+
+- **事实抽取器**（`xlsx_extractor`、`pptx_extractor`）针对已知 schema
+  （如五年汇总表）直接产出
+  [`Fact`](/zh/docs/guides/storage#fact-dataclass) 对象——零幻觉、零 LLM。
+- **样式抽取器**（`*_styled_extractor`、`pdf_*`）为通用摄取路径产出
+  `StyledGrid` IR，保留颜色与样式。
+
+<Tabs items={["xlsx", "pptx", "pdf (digital)", "pdf (scanned)"]}>
+<Tab value="xlsx">
+
+`xlsx_styled_extractor.extract_grids(path)` 为每个工作表返回一个 `StyledGrid`。它
+把 OOXML 的 **theme + tint** 解析为真实的 `RRGGBB` 值（`resolve_theme_color`），展开
+合并单元格，保留数字格式，并检测条件格式区域——
+将这些单元格标记为 `cf_affected=True` 并添加网格警告，以便颜色层跳过
+它们。`compute_file_hash(path)` 返回用于版本链路的 sha256（并被
+PDF 路由器复用）。
+
+更简单的 `xlsx_extractor.extract_facts(path) -> tuple[list[Fact], list[str]]` 把
+已知的汇总表 schema 直接映射为 `Fact` 对象（指标名沿 A 列排布、期间表头
+沿第 1 行排布），默认 `channel="TOTAL"`、`unit="USD_M"`。
+
+```python
+from ragspine.extraction.extractors.xlsx_styled_extractor import extract_grids
+
+grids = extract_grids("report.xlsx")        # list[StyledGrid], one per sheet
+for cell in grids[0].iter_cells():
+    print(cell.cell_ref, cell.value, cell.resolved_rgb)
+```
+
+</Tab>
+<Tab value="pptx">
+
+两个并存的模块。`pptx_extractor.extract_facts(path)` 读取原生表格和
+**原生图表数据**（来自图表 XML，绝不来自图片），产出 `Fact` 对象——零 OCR、零
+LLM。较新的 `pptx_styled_extractor` 增加两条路径：
+
+- `extract_grids(path)` — 原生表格 → `StyledGrid`（sheet 为 `'slide{N}_table{M}'`，
+  cell_ref 为 `'R{row}C{col}'`），通过幻灯片主题配色方案解析填充颜色。
+- `extract_note_fragments(path) -> list[NoteFragment]` — **含数字的**文本框 +
+  演讲者备注片段，按幻灯片排序，供叙事层使用。
+
+`NoteFragment` 携带 `slide_no`、`source_kind`（`"textbox"` / `"notes"`）、`locator`
+（如 `'slide2/notes'`）、`text` 和 `glossary_hits`。其版本戳常量是
+`EXTRACTOR_VERSION = "pptx_styled_v0"`。
+
+</Tab>
+<Tab value="pdf (digital)">
+
+`pdf_digital_extractor.extract_grids(path)` 通过包装 **Docling** 抽取_数字版_ PDF 的
+每个表格（每个表格一个 `StyledGrid`）——Docling 在函数体内延迟
+import，绝不在模块顶层。此通道的 `resolved_rgb` 始终为 `None`。扫描版、
+不可读或无表格的 PDF 返回 `[]`，不抛异常、不做 OCR。Docling
+配置为 `do_ocr=False`、`do_table_structure=True`。
+
+该模块还定义了 `GridExtractor` 缝——参见[下文](#protocol-缝)。
+
+</Tab>
+<Tab value="pdf (scanned)">
+
+`pdf_scanned_extractor.extract_grids(path, backend, *, min_confidence=0.85, queue=None)`
+把页面渲染为 PNG（`pypdfium2`，`RENDER_DPI = 200`），调用注入的
+`OcrBackend.recognize`，并为每个识别出的表格构建一个 `StyledGrid`。低置信度
+单元格（`confidence < min_confidence`）仍会进入网格，但会添加网格警告，并且——
+如果提供了 `queue`——以原因 `"low_confidence_ocr"`、
+`priority=30` 入队评审。
+
+中立的结果类型是 `OcrCell`（`row`、`col`、`text`、`confidence`）、`OcrTable`
+和 `OcrPageResult`。真实后端 `PaddleOcrVlBackend`（PaddleOCR `PPStructureV3`，
+GPU）位于 `gpu` pytest marker 之后；与模块无关的逻辑用
+假后端离线测试。版本戳：`EXTRACTOR_VERSION = "pdf_scanned_paddleocrvl_v0"`。
+
+</Tab>
+</Tabs>
+
+## PDF 路由 — 逐页分诊
+
+抽取之前，PDF 会被逐页分诊。`routing/pdf_router.route(path)` 返回
+一个 `RoutingDecision`，携带文件级 `verdict`、每页一个 `PageInfo`，以及——对_混合_
+文件——一个把每个页码映射到管线名称的 `channel_plan`。
+
+`classify_page(page, page_no)` 根据两个信号——可抽取
+文本字符数和图像覆盖率——对照 `TEXT_MIN_CHARS = 50` 和
+`IMG_COVER_SCAN = 0.55` 推导每页的 `kind`：
+
+| 字符数 | 图像覆盖率  | kind       |
+| ------ | ----------- | ---------- |
+| `≥ 50` | `< 0.55`    | `digital`  |
+| `≥ 50` | `≥ 0.55`    | `ocr_scan` |
+| `< 50` | `≥ 0.55`    | `img_scan` |
+| `< 50` | `< 0.55`    | `low_text` |
+
+`route()` 以 90% 阈值把页面聚合为文件级判定（`digital` / `scanned` / `ocr_scan` /
+`mixed` / `unreadable`），把 producer/creator 元数据读入
+`origin_meta`，并在 producer 看起来像 PowerPoint /
+Keynote / Impress 导出时设置 `ask_for_pptx=True`（以便调用方转而索取原生源文件）。加密或
+损坏的文件返回 `verdict="unreadable"` 并设置 `error`——绝不抛异常。
+
+<Callout type="warn">
+  被路由为 `digital` 的页面进入 `digital_extractor` 管线；其他所有类型（扫描 / ocr /
+  低文本）进入 `scanned_extractor`。路由器只*做决定*——实际工作
+  仍由对应的抽取器完成。
+</Callout>
+
+## 颜色语义 — 聚类、图例、版本化注册表
+
+`color/color_semantics.py` 是 **L2 受控推断**层：它把单元格填充
+颜色映射为业务含义，但仅在人工确认映射之后。管线：
+
+<Steps>
+<Step>
+**聚类** — `cluster_colors(grid) -> list[ColorCluster]` 按 RGB 对颜色可靠的单元格
+分组，按 `(-count, rgb)` 排序。
+</Step>
+<Step>
+**检测图例** — `detect_legend(grid) -> list[LegendEntry]` 找到与文本标签相邻的
+色块单元格，产出颜色→含义的*草稿*。
+</Step>
+<Step>
+**确认** — 草稿进入 `MappingRegistry` 并保持 `status="draft"`，直到 SME
+确认。确认新版本会取代（绝不删除）之前的活跃版本。
+</Step>
+<Step>
+**应用** — `apply_mapping(grid, mapping) -> dict[str, dict[str, str]]` 返回
+`{cell_ref: {tag_key: tag_value}}`。若映射**不是** `active`，它返回 `{}` 并
+添加网格警告——未确认的映射永远不能静默地给事实打标签。
+</Step>
+</Steps>
+
+`MappingRegistry` 是独立的 sqlite 存储（`color_mapping` 表，主键
+`(scope, version)`）。其 API：`register_draft(mapping)`（按 scope 自动递增版本）、
+`confirm(scope, version, actor, note=None)`、`reject(...)` 和 `get_active(scope)`。
+事实通过其 `mapping_version` 引用已确认的映射，因此链路能在
+修订后存续。参见[颜色语义](#颜色语义--聚类图例版本化注册表)。
+
+## 双通道校验
+
+`verification/dual_channel_verifier.verify(facts_a, facts_b, queue=None, tolerance=0.0)`
+交叉核对同一表格的两次独立抽取（docstring 中的示例：Docling
+表格解析 vs. 文本层重建）。每一侧都是一个 `ChannelFact` 列表，按
+`dim_key` = `(metric_code, entity, period_type, period, channel)` 对齐：
+
+- **一致**（键相同、值在 `tolerance` 之内）→ 自动通过。
+- **冲突**（键相同、值不同）→ 以原因 `"dual_channel_conflict"`、
+  `priority=10` 入队。
+- **仅单通道**（键只在一侧存在）→ 以原因
+  `"single_channel_only"`、`priority=50` 入队。
+
+它返回一个 `VerificationResult`（`agreed`、`conflicts`、`only_in_a`、`only_in_b`、
+`n_auto_passed`、`n_enqueued`）。当 `queue=None` 时只做分类、不入队。
+冲突比仅单通道更早进入评审，因为其优先级数字更小。这段纯
+逻辑不依赖 Docling。
+
+## Protocol 缝
+
+重量级依赖通过 `@runtime_checkable` 的 `Protocol` 注入，因此可以在
+不触碰摄取调用点的情况下换掉解析器，且该路径可用假实现离线测试。
+
+<Cards>
+  <Card title="GridExtractor" href="/zh/docs/concepts/provenance">
+    `pdf_digital_extractor`。具有 `version: str` + `extract_grids(path)`。默认实现
+    `DoclingGridExtractor`，`version = "pdf_digital@1"` ——即写入每个
+    事实 `extractor_version` 的值。数字版解析器的输出变化时请递增它。
+  </Card>
+  <Card title="OcrBackend">
+    `pdf_scanned_extractor`。`recognize(image_bytes, page_no) -> OcrPageResult`。默认
+    真实实现为 `PaddleOcrVlBackend`；测试注入假实现——离线无需 PaddleOCR。
+  </Card>
+</Cards>
+
+<Callout type="info">
+  **`GridExtractor.version` 是契约的一部分。** 它会成为写入
+  事实链路的 `extractor_version`，使换掉的解析器（Docling → pdfplumber / camelot / …）在
+  溯源中仍可区分。
+</Callout>
+
+## 本领域坚守的不变量
+
+- **确定性优先、零幻觉**——原生表格与图表数据按结构
+  读取；OCR/LLM 是缝之后的回退手段，绝不是默认。
+- **颜色信任**——`cf_affected` 单元格与未确认的映射永远不会产生静默标签。
+- **版本链路**——`source_file_hash` + `extractor_version`（+ `mapping_version`）
+  随每个抽取值一同流转。
+- **可插拔**——重量级解析器是延迟 import 的 `Protocol` 缝；核心可离线运行。
+
+## 相关阅读
+
+<Cards>
+  <Card title="摄取指南" href="/zh/docs/guides/ingestion" />
+  <Card title="存储指南——Fact dataclass" href="/zh/docs/guides/storage" />
+  <Card title="StyledGrid IR" href="/zh/docs/guides/extraction#styledgrid-ir" />
+  <Card title="概念：溯源与链路" href="/zh/docs/concepts/provenance" />
+</Cards>

@@ -1,0 +1,332 @@
+---
+title: 拡張ポイント
+description: プロバイダ、ストア、検索、チャンキング、ルーティング、ワークフローマッチング、コネクタ、サービスエッジのための型付きシーム。
+---
+
+RAGSpine のプラガビリティはプラグインレジストリではなく、単純な構造的型付けです。各外部
+依存は Python の `Protocol` であり、コアは抽象に依存し、ベンダー SDK には決して依存しません。
+プロバイダ、ベクトルストア、リランカー、OCR エンジンの追加は**新規ファイル 1 つ**で済み、
+重い SDK はすべて**遅延インポート**されるため、コアはクリーンにインポートでき、決定論的な
+`MockProvider` で完全にオフラインで動作します。
+
+<Callout type="info">
+  以下のすべてのシームは `@runtime_checkable` な Protocol です — 実装は何かをサブクラス化する
+  必要はなく、正しいメソッドシグネチャを持つだけで十分です。コアは `mypy --strict` でカバーされ、
+  `anthropic` / `openai` / `sentence-transformers` / `paddleocr` の各 SDK は具体的な実装の内部で
+  のみインポートされ、シーム側では決してインポートされません。
+</Callout>
+
+## シーム一覧
+
+<Cards>
+  <Card
+    title="LLMProvider"
+    description="corespine（agent/llm_provider.py 経由で再エクスポート）— chat(messages, tools) が ChatCompletion を返す。OpenAI chat-completions 形式。"
+  ></Card>
+  <Card
+    title="EmbeddingBackend"
+    description="retrieval/lexical/retrieval.py — 注入可能なベクトルチャネルのために、テキストをバッチでベクトルに変換する。"
+  ></Card>
+  <Card
+    title="ListwiseJudge"
+    description="retrieval/rerank/listwise_rerank.py — リストワイズ再ランキング：候補のインデックスを最良順に返す。"
+  ></Card>
+  <Card
+    title="OcrBackend"
+    description="extraction/extractors/pdf_scanned_extractor.py — スキャンされた 1 ページの画像を認識する。"
+  ></Card>
+  <Card
+    title="NarrativeRetriever"
+    description="agent/agent.py — オーケストレータに注入されるナラティブ検索のシーム。"
+  ></Card>
+  <Card
+    title="TaskQueue"
+    description="service/tasks/task_queue.py — 非同期ジョブキュー（テストでは FakeQueue、本番では RQQueue）。"
+  ></Card>
+  <Card
+    title="SourceConnector"
+    description="ingestion/source/connector.py — iter_documents() がナレッジベースのソース（ファイルシステム、HTTP、Notion、インメモリ）から RawDoc を yield する。"
+  ></Card>
+  <Card
+    title="RelationExtractor"
+    description="graph/extractor.py — extract(chunks) がグラフのエッジを返す。build_relation_graph の隣にあるオプトインのナラティブ関係スロット。"
+  ></Card>
+  <Card
+    title="Chunker"
+    description="retrieval/chunking/chunker.py — テキストと DocumentMeta を、系譜を保持するチャンクに変換する。組み込み実装とサードパーティのエントリポイント。"
+  ></Card>
+  <Card
+    title="LibraryRouter / FilterExtractor"
+    description="retrieval/routing および filtering — 決定論的なライブラリ選択と、オプションの構造化メタデータフィルタ抽出。"
+  ></Card>
+  <Card
+    title="TemplateMatcher"
+    description="workflows/matching.py — 自然言語によるひな形生成のために、メタデータのみの実行可能テンプレート参照をランク付けする。"
+  ></Card>
+</Cards>
+
+### 現在の検索およびワークフローのシーム
+
+`Chunker.chunk(text, meta, *, max_chars, overlap_chars) -> list[Chunk]` がチャンク戦略を担います。
+`make_chunker` は、決定論的デフォルト、レイアウト、親子、センテンスウィンドウ、法令、QA、
+書籍、セマンティックの各実装に加え、`ragspine.chunkers` エントリポイントグループをサポートします。
+実装は `doc_id` と `source_locator` を保持しなければなりません。階層/ウィンドウのデータは追加的な
+ものであり、系譜の代替ではありません。
+
+`LibraryRouter` は 1 つ以上の `RoutableLibrary` ID を選択します。`MultiIndexRetriever` は選択された
+各 `NarrativeRetriever` を独立に呼び出し、その結果を RRF で融合します。ルーターの失敗時は全
+ライブラリへフォールバックします。`FilterExtractor` はメタデータの述語を提案できますが、フィルタは
+あくまで検証済みの絞り込み操作にとどまります。
+
+`TemplateMatcher` はマッチ用メタデータを含むカタログ参照を受け取ります。ワークフローのプロンプトや
+認証情報は受け取りません。組み込みのレキシカルマッチャーおよび ONNX マッチャーはランク付けされた
+候補を返し、ひな形生成ポリシーがスコア/マージンのしきい値を適用して、選択されたテンプレートを
+検証します。カスタムマッチャーがファイル書き込み権限や実行権限を得ることはありません。
+
+### `LLMProvider`
+
+[`corespine`](https://pypi.org/project/corespine/) が所有し、
+`src/ragspine/agent/llm_provider.py` から再エクスポートされます — エージェントのツールユース
+ループが駆動する唯一のメソッドです。**OpenAI chat-completions 形式**（`chat` メソッド 1 つ）を
+話します。`AnthropicProvider` は `anthropic` SDK を遅延インポートし、この形式を Anthropic API に
+マッピングします。`MockProvider` はキーもネットワークも必要としません。
+
+<TypeTable
+  type={{
+    chat: {
+      type: '(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion',
+      description:
+        'OpenAI 形式のメッセージ履歴（システムプロンプトは先頭メッセージ）とオプションのツールスキーマを送信し、ChatCompletion を返します（choices → content + tool_calls を持つ ResponseMessage、加えて usage / model / id）。',
+    },
+  }}
+/>
+
+<Callout type="info">
+  **0.3.0 マイグレーション。** これは旧来の `create_message(*, system, messages, tools) ->
+  ProviderResponse` を置き換えたものです。このシームは現在、ファミリー共有コアの `corespine` に
+  置かれており、ragspine とその兄弟パッケージが 1 つのプロバイダ契約を共有します —
+  [ADR 0012](/ja/docs/decisions/adr-0012) を参照してください。
+</Callout>
+
+### `EmbeddingBackend`
+
+`src/ragspine/retrieval/lexical/retrieval.py` — ベクトルチャネルの依存性注入ポイントです。
+デフォルトは `none`（純粋な BM25）で、これを注入するとベクトルチャネルが追加されます。
+
+<TypeTable
+  type={{
+    embed_texts: {
+      type: '(texts: list[str]) -> list[list[float]]',
+      description: 'テキストをバッチでベクトルに変換します。順序は入力と揃います。',
+    },
+  }}
+/>
+
+### `ListwiseJudge`
+
+`src/ragspine/retrieval/rerank/listwise_rerank.py` — オプションの LLM リストワイズリランカーの
+シームです。実際の実装は Claude（`build_listwise_prompt` /
+`parse_listwise_response` 経由）で、テストでは決定論的なフェイクを使います。存在しない場合は RRF の順序にフォールバックします。
+
+<TypeTable
+  type={{
+    judge: {
+      type: '(query: str, candidates: list[str]) -> list[int]',
+      description:
+        '候補のインデックス（0 始まり）を関連度順（最も関連の高いものが先頭）に並べて返します。呼び出し側は RESTRICTED テキストがすでに除去されていることを保証します。',
+    },
+  }}
+/>
+
+### `OcrBackend`
+
+`src/ragspine/extraction/extractors/pdf_scanned_extractor.py` — スキャン PDF の OCR/VLM シームです。
+実際のバックエンド（PaddleOCR）は Ubuntu + GPU 上で動作し、ロジックテストではフェイクを使うため、
+レンダリング → マッピング → しきい値判定 → レビューのフローは GPU なしのマシンでも完全にテスト可能です。
+
+<TypeTable
+  type={{
+    recognize: {
+      type: '(image_bytes: bytes, page_no: int) -> OcrPageResult',
+      description: '1 ページの画像（PNG バイト列）を認識し、OcrPageResult を返します。',
+    },
+  }}
+/>
+
+### `NarrativeRetriever`
+
+`src/ragspine/agent/agent.py` — `answer_question` に注入されるナラティブ検索の実装です。
+ダックタイピングであり、省略された場合、ナラティブ経路は正直に劣化します。
+
+<TypeTable
+  type={{
+    retrieve: {
+      type: '(query: str, *, filters: dict[str, str] | None = None, top_k: int = 50) -> list[dict[str, object]]',
+      description: 'クエリに対してナラティブチャンクを検索します。オプションでメタデータフィルタを指定できます。',
+    },
+  }}
+/>
+
+### `TaskQueue`
+
+`src/ragspine/service/tasks/task_queue.py` — 非同期ジョブキューです。本番では `RQQueue`
+（RQ + Redis）、テストでは `FakeQueue`（同期インライン）を使います。`rq` / `redis` は
+`RQQueue` の内部でのみ遅延インポートされます。
+
+<TypeTable
+  type={{
+    enqueue: {
+      type: '(func: JobFunc | str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
+      description:
+        'ドット区切りパスまたは呼び出し可能オブジェクトで指定したジョブを、シリアライズ可能なペイロードとともにエンキューし、ジョブ id を返します。',
+    },
+    get: {
+      type: '(job_id: str) -> JobStatus | None',
+      description: 'ジョブのステータスを照会します（不明な場合は None）。',
+    },
+  }}
+/>
+
+### `SourceConnector`
+
+`src/ragspine/ingestion/source/connector.py` — ナレッジベースのソースシームです。コネクタは、
+KB がどこにあってもそこから生ドキュメントを yield します。デフォルトの `FilesystemConnector` は
+extra を必要とせず、HTTP / Notion コネクタは `[connectors]` extra の背後で `httpx` を遅延インポートします。
+
+<TypeTable
+  type={{
+    iter_documents: {
+      type: '() -> Iterable[RawDoc]',
+      description:
+        '各ソースドキュメントを凍結された RawDoc（source_doc_id、locator、content: bytes、content_type、metadata）として yield します。',
+    },
+  }}
+/>
+
+組み込みコネクタはモジュールレベルのテーブルに名前で登録され、サードパーティのコネクタは
+`ragspine.source_connectors` エントリポイントグループを通じて発見されます（名前が衝突した場合は
+組み込み名が優先されます）。`make_source_connector(spec=None, **kwargs)` ファクトリ、または
+`RAGSPINE_SOURCE_CONNECTOR` 環境変数（`none` / `None` → `None`）で選択します：
+
+<TypeTable
+  type={{
+    filesystem: {
+      type: "'filesystem' | 'fs' | 'local'",
+      description: 'FilesystemConnector — 依存ゼロのデフォルト。ローカルパスを走査します。',
+    },
+    in_memory: {
+      type: "'in_memory' | 'memory' | 'fixture'",
+      description: 'InMemoryConnector — プロセス内で供給されるドキュメント（テスト / フィクスチャ用）。',
+    },
+    http: {
+      type: "'http' | 'https' | 'url'",
+      description: 'HttpConnector — HTTP 経由で取得します。[connectors] extra（httpx）が必要です。',
+    },
+    notion: {
+      type: "'notion'",
+      description: 'NotionConnector — Notion ソースを読み取ります。[connectors] extra（httpx）が必要です。',
+    },
+  }}
+/>
+
+### `RelationExtractor`
+
+`src/ragspine/graph/extractor.py` — `build_relation_graph(..., relation_extractor=None)` が
+消費するオプトインのナラティブ関係スロットです。デフォルトの `None` の場合、ベースグラフは
+バイト単位で同一です（追加のエッジなし）。[ADR 0015](/ja/docs/decisions/adr-0015) を参照してください。
+
+<TypeTable
+  type={{
+    extract: {
+      type: '(chunks: Iterable[object]) -> tuple[GraphEdge, ...]',
+      description:
+        '与えられたチャンクから抽出されたエッジを返します。DeterministicRelationExtractor はルールベースの co_occurs_with エッジをクリーンな系譜付きで出力します。LLMRelationExtractor（オプトイン、[llm]）はすべてのエッジに derived=model-derived + verified=unverified を刻印し、両エンドポイントを SecurityGate でスクリーニングし、RESTRICTED テキストを決してモデルに到達させません。',
+    },
+  }}
+/>
+
+`make_relation_extractor(spec=None, *, provider=None, profile=None, **kwargs)` または
+`RAGSPINE_RELATION_EXTRACTOR` で選択します（`none` → `None`、`deterministic` / `rule` / `cooccurrence` →
+決定論的デフォルト、`llm` / `on` → LLM 抽出器。プロバイダが利用できない場合は正直に `None` へ
+劣化します）。
+
+<Callout type="warn">
+  モデルが抽出したエッジは**有用だが信頼されない**ものです。`LLMRelationExtractor` は
+  `derived=model-derived` および `verified=unverified` のマーカーをすべてのエッジのメタデータに
+  書き込み、系譜はモデルの自己申告ではなくチャンク（呼び出し側）から取得し、決定論的な
+  `SecurityGate` が拒否したエンドポイントを持つエッジは破棄します。モデルが主張した関係が、
+  管理され検証済みの事実として読まれることは決してありません。
+</Callout>
+
+## Protocol を実装して注入する
+
+シームは構造的であるため、メソッドを実装してインスタンスを渡すだけです — 登録も基底クラスも
+不要です。以下は OpenAI をバックエンドとする `LLMProvider` の例で、実際の `chat` シグネチャと
+`ChatCompletion` の形式に基づいています（データクラスは `corespine` に由来し、
+`ragspine.agent.llm_provider` から再エクスポートされます）：
+
+```python title="my_openai_provider.py"
+from typing import Any
+
+from openai import OpenAI  # lazy: only your file imports the SDK
+from corespine import ChatCompletion, Choice, ResponseMessage, Usage
+
+
+class OpenAIProvider:
+    """A custom LLMProvider — no subclassing, just the chat method."""
+
+    def __init__(self, model: str = "gpt-4o") -> None:
+        self._client = OpenAI()
+        self._model = model
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion:
+        # The messages are already in the OpenAI chat-completions shape, so they pass
+        # through; the SDK response is the same shape, so the mapping back is direct.
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools or [],  # adapt / omit as needed
+        )
+        choice = resp.choices[0]
+        message = ResponseMessage(role="assistant", content=choice.message.content)
+        u = resp.usage
+        usage = (
+            Usage(
+                prompt_tokens=u.prompt_tokens,
+                completion_tokens=u.completion_tokens,
+                total_tokens=u.total_tokens,
+            )
+            if u is not None
+            else None
+        )
+        return ChatCompletion(
+            choices=(Choice(index=0, message=message, finish_reason=choice.finish_reason or "stop"),),
+            usage=usage,
+            model=resp.model,
+            id=resp.id,
+        )
+```
+
+`MockProvider` を渡す場所とまったく同じ場所に注入します：
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.storage.fact_store import SqliteFactStore
+from my_openai_provider import OpenAIProvider
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("...", store, OpenAIProvider())
+```
+
+<Callout type="warn">
+  構造化チャネルの捏造防止ガードは、数値についてプロバイダの散文を信頼しません — 見つかった
+  ファクトはファクト値から決定論的にレンダリングされ、ファクトが見つからなかった結果は、モデルの
+  出力にかかわらず「not found」に書き換えられます。プロバイダを差し替えてもこのガードを回避する
+  ことはできません。
+</Callout>

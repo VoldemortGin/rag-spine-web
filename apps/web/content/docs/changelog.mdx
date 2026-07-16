@@ -7,6 +7,58 @@ This page tracks **user-facing** changes per release: API shapes, configuration 
 packaging, and dependencies. For the reasoning behind a change, follow the linked
 [ADR](/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
 
+<Callout type="info">
+  The documentation follows the current `main` tree, whose package metadata is `0.11.0`. That is not
+  a claim that PyPI has published 0.11.0. Check `ragspine version` and your lockfile for the
+  behavior of an installed distribution.
+</Callout>
+
+## 0.11.0 (current source snapshot)
+
+**Natural-language workflow scaffolding and a safe website preview contract.** This work is present
+on `main`; publication status is deliberately not inferred from source metadata.
+
+### Added
+
+- The installed shorthand `ragspine "description"` and explicit `ragspine workflow create` command,
+  with exact-template selection, reuse opt-out, lexical/ONNX/auto matching, JSON/YAML output, and
+  safe cross-platform file writes.
+- A 1,000-item bundled catalog: 7 manually curated workflows and 993 generated descriptors across
+  exactly 39 industries, 27 use cases, and five archetypes. Dify/n8n marketplace pages may be
+  factual research references, but upstream workflow bodies, prompts, and credentials are neither
+  copied nor downloaded at runtime.
+- JSON, YAML, and TOML workflow ingestion normalized to a JSON-compatible mapping, with duplicate
+  key, size, depth, structural-node, string, YAML-alias, symlink, and special-file guards.
+- Workflow preview schema v1: deterministic redacted nodes/edges/geometry for rendering without
+  prompts, variables, provider configuration, credentials, or executable configuration.
+- Read-only catalog/detail/scaffold HTTP endpoints, page caching/ETags, and matcher fallback.
+
+### Security behavior
+
+- Scaffolding and preview never execute a workflow. Existing Dify/n8n run surfaces remain behind
+  `RAGSPINE_DIFY_RUN_ENABLED=false` by default.
+- The service bounds selected workflow request bodies before buffering and strips echoed validation
+  inputs/context from 422 responses.
+
+## 0.10.0
+
+**Retrieval product presets, history semantics, and persisted small-to-big expansion.**
+
+### Added
+
+- Metadata filters with `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, and `between`, plus an
+  optional automatic extraction seam. Filters only narrow and preserve order.
+- Multi-library routing and `MultiIndexRetriever`: per-library retrieval, RRF fusion,
+  `library_id` provenance, and an all-library fallback when routing fails.
+- Economy retrieval mode (`economy` / `bm25` / `lexical`) that constructs no embedding backend or
+  vector store.
+- Parent-child/small-to-big chunking plus store-level `parent_id`, `heading`, `window_text`, and
+  `parent_locator` persistence/migration. The child remains the citation; expanded `prompt_text` is
+  generation-only, and restricted children cannot leak through their windows.
+- `answer_question(..., history=...)` and HTTP ask history. Prior turns are generation context only,
+  never intent/security/retrieval input or evidence. See [ADR 0017](/docs/decisions/adr-0017) and
+  [ADR 0018](/docs/decisions/adr-0018).
+
 ## 0.9.0
 
 **Source connectors, relation-graph provenance, domain chunking & streaming.** This release
@@ -34,7 +86,7 @@ ergonomics helpers — all default-off and **byte-identical** when unselected.
   streamed token-by-token. The full guard chain (FAQ short-circuit, dual-channel retrieval,
   anti-fabrication rewrite, provenance) runs to completion **before** the first byte is streamed,
   so a fabrication can never be half-streamed and then retracted. See
-  [HTTP API](/docs/reference/http-api#post-v1askstream).
+  [HTTP API](/docs/reference/http-api#engine-routes).
 - **`.txt` narrative ingestion.** Plain-text files join the narrative path
   (`extract_txt_narrative`): UTF-8, blank-line paragraph splitting, one segment per block with a
   `para={N}` locator — zero-dependency and deterministic. See
@@ -54,7 +106,7 @@ ergonomics helpers — all default-off and **byte-identical** when unselected.
 ## 0.8.1
 
 **Extension-seam hardening.** Three governance seams from the breadth backlog are formalized
-so third-party backends can plug in *through* the invariant conformance packs, never around
+so third-party backends can plug in _through_ the invariant conformance packs, never around
 them. Pure structural work — every default path stays **byte-identical**, and the anti-fabrication
 ratchet holds at zero.
 
@@ -62,7 +114,7 @@ ratchet holds at zero.
 
 - **`TraceSink` seam + privacy-trace conformance.** The privacy-aware trace sink is a
   registrable seam (`make_trace_sink` / `RAGSPINE_TRACE_SINK`), so observability can fan out to
-  OpenTelemetry / files *through* a conformance pack that rejects or scrubs any payload carrying
+  OpenTelemetry / files _through_ a conformance pack that rejects or scrubs any payload carrying
   an answer / fact value / chunk text. A real `OtelTraceSink` ships behind the optional `[otel]`
   extra; a lineage-leaking sink **fails** the pack.
 - **`FactStore` Protocol.** The structured store is now a `@runtime_checkable` Protocol with the
@@ -202,7 +254,7 @@ optional active rate limiter. See [ADR 0012](/docs/decisions/adr-0012) for the f
 
 - **Active TPM rate limiting.** Set `RAGSPINE_TOKENS_PER_MINUTE` (int, default `0` = off) and
   the service wraps the provider in corespine's `RateLimitedProvider` — a sliding-window soft
-  limit that stays *under* a tokens-per-minute ceiling, complementary to the SDK's passive
+  limit that stays _under_ a tokens-per-minute ceiling, complementary to the SDK's passive
   `max_retries` 429 backoff. See [Configuration](/docs/reference/configuration).
 - **`[all]` extra** — `pip install "rag-spine[all]"` pulls in every runtime capability
   (`[pdf,ocr,llm,embed,vector,service]`; excludes `[dev]`). See

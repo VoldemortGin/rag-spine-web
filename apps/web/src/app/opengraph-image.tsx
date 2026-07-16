@@ -49,7 +49,7 @@ export default function Image() {
         }}
       >
         <span style={{ color: TEAL }}>●</span>
-        Apache-2.0 · Python 3.10+ · framework-free
+        Apache-2.0 · Python 3.11+ · framework-free
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 40 }}>

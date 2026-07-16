@@ -1,0 +1,105 @@
+---
+title: ADR 0018 — Parent-child store-level expansion
+description: Persist small-to-big context, wire the Chunker seam through ingestion, and expand only after RESTRICTED filtering while keeping child citations honest.
+---
+
+**Status:** accepted
+
+**Date:** 2026-07-14
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+This completes the follow-up deferred by [ADR 0016](/docs/decisions/adr-0016): moving
+parent-child behavior to retrieval-time store expansion. It is constrained by engine ADR 0005
+(isolate new capability from the byte-identical default) and engine ADR 0010 (deterministic
+isolation independent of model output).
+
+## Context
+
+ADR 0016 added `ParentChildChunker`. At chunk time a child carried `window_text` (the parent
+section's full text) and `parent_locator` (the section's real paragraph span). But the `Chunker`
+seam was not wired into narrative ingestion and those fields were not persisted. End-to-end
+small-to-big—hit a fine child, provide parent context for generation—therefore never ran on the
+real stored path.
+
+This record closes the gap: persist hierarchy/window fields, wire the chunker into both ingestion
+paths, and expand at the retrieval exit while preserving byte-identical default behavior,
+anti-fabrication, provenance, and RESTRICTED double-exit isolation.
+
+## Decision
+
+Three additive changes, all opt-in; the default path remains byte-identical.
+
+### Persistence: additive columns, old databases readable
+
+`narrative_chunk` gains `parent_id`, `heading`, `window_text`, and `parent_locator`, each
+`TEXT NOT NULL DEFAULT ''`. `ChunkStore.init_schema` performs an additive migration:
+`PRAGMA table_info`, followed by a per-column `ALTER TABLE ADD COLUMN`. Existing rows receive empty
+defaults and stay readable; there is no destructive rebuild. `StoredChunk` mirrors the four fields
+with empty defaults.
+
+A schema-version rebuild was rejected: additive columns are simpler and keep old libraries live.
+
+### Ingestion wires the `Chunker` seam
+
+Both writers accept `chunker: Chunker | None`, where default `None` delegates to the built-in
+`chunk_document` and remains byte-identical:
+
+- `ingest_narrative(..., chunker=)` for the batch pipeline.
+- `NarrativeIndex(chunker=)` for retrieval-side ingest and embedding.
+
+`ServiceConfig.chunker` selects through `make_chunker`, defaulting to `"none"`, and the narrative
+worker payload carries the selection. With `parent_child`/`small_to_big`, children arrive with
+`window_text`/`parent_locator` and the store persists them.
+
+### Retrieval expands after the A-line isolation exit
+
+In `narrative_link._to_snippet`, a non-empty `window_text` becomes a separate `prompt_text` key. The
+agent's `_snippet_text` already prefers that key as generation context. `text`, `source_locator`,
+and `chunk_id` remain those of the hit child. `parent_locator` is an additional provenance
+backreference to the parent span.
+
+Expansion changes generation context only. It never becomes a hit, changes rank, or adds a result.
+Default chunkers produce empty values, so no keys are added and the snippet mapping remains
+byte-identical. This reuses the `prompt_text` layering established for post-retrieval compression.
+
+### Pinned RESTRICTED-window decision
+
+**`window_text` rides the child's existing RESTRICTED double-exit; when a child is RESTRICTED, the
+entire snippet—including its parent window—is rejected.**
+
+`_to_snippet` runs only after the `link/` exit removes `sensitivity == RESTRICTED` chunks. A
+restricted child never reaches window expansion, and its `window_text` can never become
+`prompt_text`. Of two candidate semantics—remove only the window or reject the entire snippet—we
+choose whole-snippet rejection. Parent context is exposed only through a child that passed both
+exits.
+
+Under the current document-level sensitivity model, child and parent share a sensitivity, so an
+allowed child with a restricted parent section cannot arise from ingestion. The mechanism is still
+pinned defensively. `test_parent_child_isolation.py` supplies a restricted chunk containing a
+window and proves that the entire snippet is rejected with no leakage.
+
+## Alternatives considered (rejected)
+
+- Replace snippet `text` with `window_text`: expanded context would masquerade as hit evidence and
+  break provenance honesty. Child text/locator remain citable; the window is generation-only.
+- Strip the window but keep a restricted child snippet: partial handling is more fragile than
+  rejecting the entire snippet and conflicts with the existing exit semantics.
+- Expand before RESTRICTED filtering: this opens a direct leak path. Expansion occurs strictly in
+  `_to_snippet`, downstream of the strip.
+- Add a schema version and rebuild: additive `ALTER TABLE` keeps old databases readable without
+  migration ceremony.
+
+## Consequences
+
+- Small-to-big works end to end: a precise child hit supplies a parent section for generation while
+  the citation remains pinned to the child's true locator and the parent locator remains a
+  backreference.
+- The offline default is byte-identical: default chunking leaves fields empty, adds no snippet
+  keys, and does not alter scoring or provenance. BM25/vector metadata recording never reads the new
+  fields.
+- `SentenceWindowChunker` also gains persistence through the same path.
+- Changed artifacts include four `ChunkStore`/`StoredChunk` fields and migration, the two
+  `chunker=` ingestion seams, `ServiceConfig.chunker` and worker threading,
+  `narrative_link._to_snippet` window-to-`prompt_text`, and
+  `tests/conformance/test_parent_child_isolation.py` plus persistence/migration tests.

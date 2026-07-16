@@ -1,0 +1,142 @@
+---
+title: HTTP API
+description: FastAPI ルートファミリーの正確な一覧、リクエスト境界、認証、キャッシュ、およびデフォルト無効のワークフロー実行。
+---
+
+ソースチェックアウトからオプションの `[service]` アプリを起動します:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --port 8000
+```
+
+## エンジンルート
+
+| メソッド | パス                                | リクエスト / 挙動                                                         |
+| ------ | ----------------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/healthz`                          | 死活確認                                                                  |
+| `GET`  | `/readyz`                           | ファクトストアとオプションのキューの準備状態。劣化時は `503`              |
+| `POST` | `/v1/ask`                           | `question`、オプションの `reference_date`、オプションの `(role, text)` 形式の `history` |
+| `POST` | `/v1/ask/stream`                    | 同じ完成済みのガード付き回答を SSE で送信                                 |
+| `POST` | `/v1/ingest/structured/jobs`        | `.xlsx`、`.xlsm`、`.pptx`、`.pdf` のジョブ                                |
+| `POST` | `/v1/ingest/narrative/jobs`         | `.pptx`、`.pdf` のジョブ                                                  |
+| `GET`  | `/v1/jobs/{job_id}`                 | キューのステータス/結果/エラー                                            |
+| `GET`  | `/v1/topology?scope=agent\|service` | 静的なエンジントポロジー。無効な scope は `400` を返す                    |
+
+例:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"China FY2024 revenue","history":[["user","Use the annual report"]]}'
+```
+
+`/v1/ask/stream` はまず完全なガード付きレスポンスを計算してから、`start`、0 個以上の
+`delta`、そして `done` の SSE フレームを送信します。そのため、ガードの失敗が途中までストリーミングされてから撤回されることはありません。
+
+## ワークフローカタログ
+
+### `GET /v1/workflow-templates`
+
+クエリフィールドは `offset`（デフォルト 0）と `limit`（1–100、デフォルト 100）です。レスポンスには
+`total`、`offset`、`limit`、null 許容の `next_offset`、およびメタデータのみの `templates` が含まれます。
+ワークフロー YAML とプレビューデータは意図的に省略されています。
+
+このルートはページ固有の弱い `ETag` と
+`Cache-Control: public, max-age=300, stale-while-revalidate=3600` を送信します。一致する `If-None-Match` には
+`304` が返されることがあります。
+
+### `GET /v1/workflow-templates/{template_id}`
+
+カタログメタデータに加えて、正規の `workflow`、決定的な Dify `yaml`、および表示専用の
+`preview`（スキーマバージョン 1）を返します。未知の識別子に対しては、パスを露出することなく `404` を返します。
+
+### `POST /v1/workflow-scaffold`
+
+```json
+{ "description": "invoice extraction and approval", "reuse": true }
+```
+
+`description` は 1–4,096 文字です。オプションの `template_id` は、小文字とハイフンで構成されるカタログ
+識別子である必要があります。余分なフィールドは禁止されています。レスポンスには `workflow`、`yaml`、`preview`、
+`origin`、`template_id`、`confidence`、`matcher`、`warnings`、`compatibility`、`requirements`、および
+オプションの事実ベースの `source` メタデータが含まれます。ワークフローの実行は行いません。
+
+## Dify コンパイラと内部実行
+
+| メソッド | パス                | 挙動                                                                       |
+| ------ | ------------------- | ------------------------------------------------------------------------- |
+| `POST` | `/v1/dify/analyze`  | 静的な提案のみ                                                             |
+| `POST` | `/v1/dify/compile`  | ターゲット `ragspine` または `spineagent` 向けの Python ソースを返す。実行はしない |
+| `POST` | `/v1/dify/run`      | 有効化されている場合にのみコンパイル・ゲート・実行を行う                   |
+| `POST` | `/v1/dify/run/jobs` | 同期的にコンパイル/ゲートを行い、有効化されている場合にキューへ投入する     |
+
+analyze、compile、run は、ドキュメント形式をちょうど 1 つだけ受け付けます:
+
+```json
+{ "workflow": { "app": { "mode": "workflow" }, "workflow": { "graph": {} } } }
+```
+
+または従来のエンベロープ形式:
+
+```json
+{ "yaml": "app:\n  mode: workflow\nworkflow:\n  graph: {}\n" }
+```
+
+未知のフィールド、および両方の形式を指定した場合やどちらも指定しなかった場合は拒否されます。`RAGSPINE_DIFY_RUN_ENABLED` はデフォルトで
+false であり、実行に対しては `403` を返します。プロバイダーはサーバー設定からのみ構築されます。
+
+## n8n 変換と内部実行
+
+| メソッド | パス              | 挙動                                                          |
+| ------ | ----------------- | ------------------------------------------------------------ |
+| `POST` | `/v1/n8n/convert` | 純粋な `n8n_to_dify` または `dify_to_n8n` 変換を警告付きで行う |
+| `POST` | `/v1/n8n/run`     | 変換後、デフォルト無効の Dify 実行パスを再利用する             |
+
+変換はマッピング（または変換エンベロープ内の JSON/YAML 文字列）を受け付けますが、それを実行することは決してありません。
+
+## Dify 互換のパブリック Workflow API
+
+4 つのルートすべてが `Authorization: Bearer <app-key>` を必要とします。アプリキーとサーバー側のワークフローパスは
+`RAGSPINE_DIFY_PUBLIC_APPS` に登録されます。レジストリが存在しない場合は `401` を返します。
+
+| メソッド | パス                                  |
+| ------ | ------------------------------------- |
+| `POST` | `/v1/workflows/run`                   |
+| `GET`  | `/v1/workflows/run/{workflow_run_id}` |
+| `GET`  | `/v1/info`                            |
+| `GET`  | `/v1/parameters`                      |
+
+実行リクエストは `user` を必須とし、`inputs` を受け付け、`response_mode` として `blocking` または
+`streaming` を選択します。キーによってサーバー側のワークフローが選択されるため、クライアントがワークフローや
+プロバイダーをアップロードすることはありません。実行には引き続き `RAGSPINE_DIFY_RUN_ENABLED=true` が必要です。
+
+## n8n 互換のパブリック API
+
+すべての `/api/v1/*` ルートは、`RAGSPINE_N8N_API_KEY` に一致する `X-N8N-API-KEY` を必要とします。サーバーキーが
+未設定の場合、このサーフェスは無効化され `401` を返します。
+
+| メソッド                | パス                                         |
+| ---------------------- | -------------------------------------------- |
+| `GET`, `POST`          | `/api/v1/workflows`                          |
+| `GET`, `PUT`, `DELETE` | `/api/v1/workflows/{workflow_id}`            |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/activate`   |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/deactivate` |
+| `GET`                  | `/api/v1/executions`                         |
+| `GET`, `DELETE`        | `/api/v1/executions/{execution_id}`          |
+| `GET`, `POST`          | `/webhook/{path}`                            |
+
+コレクションのページネーションは `limit`（デフォルト 100、1–250 の範囲で受理/クランプ）とカーソルを使用します。Webhook
+は API キー認証の例外であり、意図的に未認証の GET/POST を受け付け、アクティブなワークフローのみにマッチし、
+デフォルト無効の実行フラグの背後に置かれたままです。
+
+## 制限、エラー、デプロイ時のセキュリティ
+
+ワークフローのひな形生成ルートおよび一部の Dify POST ルートは、バッファリングの前に 2 MiB を超えるボディを拒否します。
+デコード後のワークフロードキュメントは 1 MiB に制限され、さらに深さ/ノード数/文字列/YAML エイリアスに関する追加の制限があります。
+バリデーションレスポンスからは、エコーされた入力/コンテキストが除去されます。内部エラーは不透明なエラーオブジェクトを返し、
+トレースバックは含みません。
+
+エンジン、カタログ、コンパイラ、コンバーター、トポロジー、内部実行の各ルートには組み込みの認証がありません。
+パブリックにデプロイする場合は、ネットワーク分離またはリバースプロキシを追加する必要があります。Webhook ルートは、
+URL の秘匿性が不十分な場合、イングレスでの認証/レートリミットが必要です。

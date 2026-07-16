@@ -1,0 +1,112 @@
+---
+title: 概要
+description: プレーンな Python による二重チャネル RAG、ワークフローの相互運用性、安全なプレビュー、そしてオプションのサービス実行境界。
+---
+
+RAGSpine のエンジンは普通の Python です。型付けされたシーム、dataclass、明示的なストア、読みやすい
+制御フローで構成されています。`answer_question(...)` が Q&A 合成のエントリーポイントです。独立した
+ワークフロードメインが Dify 互換の設定に対して解析、ワークフローのひな形生成、プレビュー、変換、
+コンパイルを行い、オプションの FastAPI サービスがこれらの操作と、意図的にデフォルト無効化された
+エグゼキューターを公開します。
+
+この区別は重要です。RAGSpine は Dify および n8n の**相互交換サーフェス**を備えていますが、どちらの
+プラットフォームのランタイムも組み込まず、実行時にそれらのマーケットプレイスをダウンロードすることも、
+質問に答えるためにグラフフレームワークを必要とすることもありません。
+
+## アーキテクチャ上のコミットメント
+
+<Cards>
+  <Card
+    title="コードで強制されるエビデンス"
+    description="構造化された値はファクトストアから取得され、該当なしの場合は明示的な拒否になります。ナラティブな回答は出典ロケーターを保持します。"
+  />
+  <Card
+    title="ドメインパッケージ"
+    description="15 のトップレベルドメインにより、オーケストレーション、ストレージ、検索、相互運用性、サービス、CLI の責務が可視化されています。"
+  />
+  <Card
+    title="型付けされたエッジ"
+    description="プロバイダー、埋め込み、ストア、チャンカー、リランカー、キュー、コネクター、マッチャーは Protocol の背後に注入されます。"
+  />
+  <Card
+    title="デフォルトで非実行"
+    description="カタログ、ひな形生成、解析、変換、コンパイル、トポロジー、プレビューの各操作はワークフローを実行しません。実行ルートはデフォルトで無効です。"
+  />
+</Cards>
+
+## Q&A リクエストのライフサイクル
+
+```text
+question
+  → deterministic security/intent screening
+  → clarification gateway
+  → optional service-edge FAQ short-circuit
+  → structured | narrative | composite route
+       structured: normalize → query fact store → found/not_found/unrecognized
+       narrative: filter → retrieve/fuse → rerank/postprocess → cited generation
+       composite: execute both evidence paths and merge
+  → anti-fabrication/provenance checks
+  → answer + sources
+```
+
+オプションの `history` は、最終的な生成メッセージシーケンスにのみ挿入されます。決定論的な
+インテント/セキュリティ判定、検索クエリ、そして何をエビデンスとして扱うかを変更することは決して
+ありません。
+
+ナラティブ RAG チャネルのパスでは、メタデータフィルター、RRF 融合によるライブラリ単位のルーティング、
+ストアレベルの親/ウィンドウ拡張を利用できます。引用フィールドは子ヒットのものが維持され、拡張された
+テキストは別個の生成コンテキストとなります。制限された子は拡張前に除去されます。
+
+## ワークフローのライフサイクル
+
+```text
+description or JSON/YAML/TOML
+  → normalize to JSON-compatible mapping
+  → explicit template or catalog match
+  → reuse safe Dify workflow | generate fixed start→llm→end graph
+  → deterministic YAML/JSON + preview schema v1
+  → optional analyze / convert / compile
+  → explicit server-controlled execution gate (off by default)
+```
+
+カタログはパッケージデータであり、7 個のキュレーション済みテンプレートと 993 個の生成された
+ディスクリプターで構成されます。上流の Dify/n8n の URL は調査用メタデータにすぎず、上流の
+ワークフローテキストや認証情報が再配布されることはありません。
+
+## 信頼境界
+
+- 基本ライブラリとカタログに API キーは不要です。
+- サービスの通常のエンジン/カタログ/コンパイラールートには組み込みのアプリケーション認証がなく、
+  デプロイメントインフラによって保護する必要があります。
+- Dify 互換の公開エンドポイントには Bearer アプリキーが必要です。n8n 互換の公開 CRUD には
+  `X-N8N-API-KEY` が必要です。
+- Webhook は意図的に非認証であり、イングレス制御が必要です。
+- ワークフロー実行は、デフォルトで `RAGSPINE_DIFY_RUN_ENABLED=false` によって追加的にゲートされて
+  います。
+- プロセス内の制限レイヤーは OS サンドボックスではありません。サブプロセスのリソース制限は Linux
+  のみで機能します。
+
+## 次に読むべきページ
+
+<Cards>
+  <Card
+    title="チャネル"
+    href="/ja/docs/architecture/channels"
+    description="構造化、ナラティブ、複合、グラフの各エビデンスパス。"
+  />
+  <Card
+    title="パッケージレイアウト"
+    href="/ja/docs/architecture/package-layout"
+    description="15 のトップレベルソースドメイン。"
+  />
+  <Card
+    title="ワークフロー"
+    href="/ja/docs/guides/workflows"
+    description="カタログ、フォーマット、プレビュー、変換、そして実行境界。"
+  />
+  <Card
+    title="リクエストフロー"
+    href="/ja/docs/architecture/request-flow"
+    description="エージェントの詳細な制御フロー。"
+  />
+</Cards>

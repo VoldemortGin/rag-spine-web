@@ -1,0 +1,99 @@
+---
+title: 快速上手
+description: 运行确定性演示、脚手架生成 Dify 兼容工作流、调用 Python API，并启动可选服务。
+---
+
+引用 `scripts/` 的命令是源码检出（source checkout）环境下的命令，必须在
+RAGSpine 仓库根目录运行。已安装的 `ragspine` 命令可在任意目录使用。
+
+## 1. 验证离线引擎
+
+```bash
+ragspine quickstart
+ragspine version
+```
+
+在源码检出环境中，更完整的端到端 fixture 运行方式为：
+
+```bash
+.venv/bin/python scripts/run_demo.py
+```
+
+它会抽取并摄取合成事实、执行查询、检查来源链路，成功时以
+`ALL CHECKS PASSED` 结束。整个过程不需要任何 API key。
+
+## 2. 用一句话创建工作流
+
+最简形式会把未知的第一个位置参数当作 `workflow create` 处理：
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+该命令首先尝试匹配 1,000 个内置模板之一。如果匹配置信度不够，
+则创建一个固定的 `start → llm → end` Dify 0.6 工作流。命令默认写出一个
+新的 YAML 文件，并且不会运行它。等价的显式形式包括：
+
+```bash
+ragspine workflow create "invoice extraction and approval" --stdout
+ragspine workflow create "support triage" --format json -o support.json
+ragspine workflow create --template conditional-response-routing -o routing.yml
+ragspine workflow list
+ragspine workflow show conditional-response-routing --format json
+ragspine workflow preview conditional-response-routing
+```
+
+默认的 `auto` 匹配器在 `[embed-onnx]` 可用时使用 ONNX 匹配器，否则
+回退到确定性的词法匹配。使用 `--matcher lexical` 可获得保证无模型的路径，
+使用 `--no-reuse` 强制生成，`--force` 仅用于替换一个普通的
+已存在文件。符号链接和特殊文件始终会被拒绝。
+
+关于目录（catalog）溯源、格式限制和预览 schema，参见
+[工作流指南](/zh/docs/guides/workflows)。
+
+## 3. 通过 Python 提问
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+print(result.answer)
+print(result.sources)
+```
+
+`answer_question` 返回带引用的证据或明确的拒答。可选的对话
+`history` 仅作为生成上下文：它绝不会被用作检索证据，也不会作为
+意图与安全决策的输入。
+
+## 4. 启动可选的 HTTP 服务
+
+安装 `[service]`，然后在源码检出环境中运行：
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/v1/workflow-templates?limit=10
+curl -s http://127.0.0.1:8000/v1/workflow-scaffold \
+  -H 'content-type: application/json' \
+  -d '{"description":"invoice extraction and approval"}'
+```
+
+目录与脚手架路由是只读、不执行的。Dify 与 n8n 的运行路由默认禁用，
+除非设置 `RAGSPINE_DIFY_RUN_ENABLED=true`。通用引擎路由不包含应用层
+身份认证；在对外暴露之前，请将服务置于带认证的反向代理或
+私有网络之后。
+
+要处理排队中的摄取任务，请运行 Redis 并启动第二个源码检出进程：
+
+```bash
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```

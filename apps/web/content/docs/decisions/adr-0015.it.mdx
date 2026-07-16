@@ -1,0 +1,72 @@
+---
+title: 'ADR 0015: Estrazione di relazioni — uno slot opt-in con marcatori di provenienza model-derived / unverified'
+description: Aggiunge uno slot Protocol RelationExtractor accanto a build_relation_graph; il default resta identico byte per byte, gli archi estratti dall'LLM sono marcati model-derived + unverified, filtrati attraverso la SecurityGate e mai considerati attendibili in modo silente.
+---
+
+> Stato: **accepted** · Data: 2026-07-13
+
+> Record immutabile. Esente dal tracciamento del drift (nessun `covers`). Sostituire con un nuovo record, non modificare.
+
+Fa parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002). Vincolato da
+[0005](/it/docs/decisions/adr-0005) (capacità sperimentale isolata dal percorso predefinito)
+e da [0010](/it/docs/decisions/adr-0010) (il gate di sicurezza deterministico).
+Rilasciato in **rag-spine 0.9.0**.
+
+## Contesto
+
+Il grafo strutturale delle relazioni (`build_relation_graph`) è completamente deterministico e citabile:
+ogni arco deriva da una dimensione controllata — configurazione del profilo, fatti o chunk. Ma alcune
+relazioni utili vivono soltanto nel testo narrativo (_"A collabora con B"_), raggiungibili solo da un
+LLM, che è non deterministico e può inventare. Vogliamo quella capacità **senza** permettere
+che un arco asserito dal modello si spacci per un fatto controllato e verificato, e senza toccare il
+percorso predefinito identico byte per byte.
+
+L'intuizione chiave ha la stessa forma dell'[ADR 0010](/it/docs/decisions/adr-0010): una relazione
+estratta dal modello è _utile ma non attendibile_. Deve essere **etichettata** come tale, e le due
+garanzie forti — l'isolamento RESTRICTED e il rifiuto dei concorrenti — devono valere anche su questo nuovo percorso di input,
+in modo deterministico, indipendentemente da ciò che il modello restituisce.
+
+## Decisione
+
+Aggiungere uno **slot Protocol** `RelationExtractor` (`src/ragspine/graph/extractor.py`), consumato da
+`build_relation_graph(..., relation_extractor=None)`:
+
+- Il default è `None` → il grafo di base è **identico byte per byte** a prima (nessun arco aggiuntivo).
+- L'_extractor_ predefinito (quando se ne vuole uno) è `DeterministicRelationExtractor`: co-occorrenza di entità
+  nello stesso documento basata su regole (`co_occurs_with`), zero LLM, deterministico, con **lineage
+  pulito** (solo fonte documentale, nessun marcatore di modello) — genuinamente distinto dagli archi di base
+  doc→entità `mentions`.
+- `LLMRelationExtractor` è **opt-in** (dietro l'extra `[llm]`) e rispecchia la disciplina di
+  degrado dell'extractor del grafo narrativo. Ogni arco che emette è marcato
+  `derived=model-derived` + `verified=unverified` (mai considerato attendibile in modo silente); il suo lineage è
+  marcato a partire dal **chunk (il chiamante)**, mai dall'auto-dichiarazione del modello; i chunk RESTRICTED
+  **non raggiungono mai l'LLM**; ed **entrambi gli estremi di ogni relazione sono filtrati attraverso la
+  `SecurityGate` deterministica** — un estremo concorrente / esterno fa scartare l'arco. Degrada
+  a nulla in caso di `ProviderError` / JSON malformato, ed è limitato da `max_relations`.
+- La selezione rispecchia `make_narrative_graph`:
+  `make_relation_extractor(spec, *, provider, profile)` / `RAGSPINE_RELATION_EXTRACTOR`
+  (`none` → `None`; `deterministic` / `rule` / `cooccurrence`; `llm` / `on` → degrado onesto
+  a `None` senza un provider).
+
+Principio: **la capacità sta accanto al percorso predefinito, mai al suo interno; gli archi asseriti dal modello sono
+etichettati e filtrati, mai adottati in modo silente.**
+
+## Alternative considerate (respinte)
+
+- **Materializzare gli archi LLM con lo stesso lineage pulito degli archi controllati.** Respinta —
+  permetterebbe a una relazione inventata di apparire come un fatto verificato, vanificando l'invariante di provenienza.
+- **Saltare la `SecurityGate` sugli archi estratti** (fidarsi dell'isolamento dei nodi del grafo di base).
+  Respinta — un modello potrebbe nominare un concorrente che non è mai presente come nodo, introducendo di nascosto
+  una relazione con un concorrente. Filtrare invece al momento dell'estrazione.
+- **Collegare l'estrazione al `build_relation_graph` predefinito in modo incondizionato.** Respinta —
+  rompe il default identico byte per byte e mette un passo non deterministico sul percorso controllato.
+
+## Conseguenze
+
+- Il grafo delle relazioni acquisisce una capacità opt-in di relazioni narrative mentre il percorso predefinito
+  resta identico byte per byte e ogni arco derivato dal modello è auto-etichettante e verificabile.
+- Le due garanzie forti (isolamento RESTRICTED, rifiuto dei concorrenti) valgono ora sul nuovo
+  percorso di input dell'estrazione, applicate in modo deterministico anziché affidate al modello.
+- Nuovi artefatti: un Protocol `RelationExtractor`, un'implementazione predefinita deterministica e una
+  basata su LLM, una factory / selettore da env e le costanti dei marcatori di provenienza
+  (`derived=model-derived`, `verified=unverified`) scritte nei metadati di ogni arco.

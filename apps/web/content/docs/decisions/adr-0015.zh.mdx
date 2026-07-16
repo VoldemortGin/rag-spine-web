@@ -1,0 +1,72 @@
+---
+title: 'ADR 0015: 关系抽取——带 model-derived / unverified 溯源标记的可选插槽'
+description: 在 build_relation_graph 旁新增 RelationExtractor Protocol 插槽；默认路径保持逐字节一致，LLM 抽取的边被标记为 model-derived + unverified，经 SecurityGate 筛查，绝不被默默信任。
+---
+
+> 状态：**accepted** · 日期：2026-07-13
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
+
+属于 [0002](/zh/docs/decisions/adr-0002) 的产品方向。受
+[0005](/zh/docs/decisions/adr-0005)（实验性能力与默认路径隔离）
+与 [0010](/zh/docs/decisions/adr-0010)（确定性安全门控）约束。
+已随 **rag-spine 0.9.0** 发布。
+
+## 背景
+
+结构化关系图（`build_relation_graph`）完全确定且可引用：
+每条边都派生自受控维度——profile 配置、事实或 chunk。但有些
+有用的关系只存在于叙事文本中（_"A 与 B 是合作伙伴"_），只有 LLM 才能触及，
+而 LLM 是非确定性的且可能编造。我们想要这项能力，但**不能**让
+模型断言的边伪装成受控的、已验证的事实，也不能触碰
+逐字节一致的默认路径。
+
+关键洞察与 [ADR 0010](/zh/docs/decisions/adr-0010) 同构：模型抽取的
+关系是_有用但不可信的_。它必须被如此**标记**，并且两条硬
+保证——RESTRICTED 隔离与竞品拒答——在这条新的输入路径上
+也必须确定性地成立，无论模型返回什么。
+
+## 决策
+
+新增一个 `RelationExtractor` **Protocol 插槽**（`src/ragspine/graph/extractor.py`），由
+`build_relation_graph(..., relation_extractor=None)` 消费：
+
+- 默认值为 `None` → 基础图与之前**逐字节一致**（没有额外的边）。
+- 默认的_抽取器_（当需要时）是 `DeterministicRelationExtractor`：基于规则的
+  同文档实体共现（`co_occurs_with`），零 LLM，确定性，带**干净的
+  血缘**（仅文档来源，无模型标记）——与基础图的
+  doc→entity `mentions` 边有实质区分。
+- `LLMRelationExtractor` 是**可选加入的**（位于 `[llm]` extra 之后），并沿用叙事
+  图抽取器的降级纪律。它产出的每条边都被标记为
+  `derived=model-derived` + `verified=unverified`（绝不被默默信任）；其血缘
+  取自 **chunk（即调用方）**，绝不取自模型的自我报告；RESTRICTED chunk
+  **永远不会到达 LLM**；并且**每条关系的两个端点都会经过
+  确定性的 `SecurityGate` 筛查**——出现竞品 / 外部端点则丢弃该边。遇到
+  `ProviderError` / 坏 JSON 时降级为空结果，并受 `max_relations` 约束。
+- 选择方式沿用 `make_narrative_graph`：
+  `make_relation_extractor(spec, *, provider, profile)` / `RAGSPINE_RELATION_EXTRACTOR`
+  （`none` → `None`；`deterministic` / `rule` / `cooccurrence`；`llm` / `on` → 无
+  provider 时诚实降级为 `None`）。
+
+原则：**能力在默认路径之旁，绝不在其之内；模型断言的边要
+标记并筛查，绝不默默采纳。**
+
+## 已考虑并否决的备选方案
+
+- **让 LLM 边与受控边使用同样干净的血缘落库。** 否决——那会
+  让一条编造的关系读起来像已验证的事实，摧毁溯源不变量。
+- **对抽取出的边跳过 `SecurityGate`**（信任基础图的节点隔离）。
+  否决——模型可能提到一个从未作为节点出现的竞品，从而把
+  竞品关系走私进来。改为在抽取时筛查。
+- **把抽取无条件接入默认的 `build_relation_graph`。** 否决——那会
+  破坏逐字节一致的默认路径，并把一个非确定性步骤放到受控路径上。
+
+## 后果
+
+- 关系图获得可选加入的叙事关系能力，同时默认路径
+  保持逐字节一致，且每条模型派生的边都自带标记、可审计。
+- 两条硬保证（RESTRICTED 隔离、竞品拒答）如今在新的
+  抽取输入路径上同样成立，由确定性机制强制执行，而非信任模型。
+- 新增产物：一个 `RelationExtractor` Protocol、一个确定性默认实现和一个 LLM
+  实现、一个工厂 / 环境变量选择器，以及写入每条边元数据的溯源标记
+  常量（`derived=model-derived`、`verified=unverified`）。

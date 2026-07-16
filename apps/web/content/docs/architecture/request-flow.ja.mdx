@@ -1,0 +1,194 @@
+---
+title: リクエストフロー
+description: 質問からインテント解析、確認ゲート、FAQ ショートサーキット、ルーティング、そして捏造防止ガードまでの詳細な制御フローを、コードに基づいてステップごとに解説します。
+---
+
+このページは、[概要](/ja/docs/architecture/overview)にある一行フローの正式な詳細展開です。以下の各ステップはすべて、`agent/agent.py` のオーケストレーター
+`answer_question(...)`、`agent/intent.py` のルールパーサーとゲートウェイ、
+そして `service/faq/faq_cache.py` のサービスエッジキャッシュに対応付けられます。
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`AgentResult` は `answer`、`route`、`clarification`、`tool_results`、`sources` を保持します。
+デフォルトの `decomposer=None` では、通常の単一質問パスは厳密に順序付けられています。その確認と拒否の判定は、このパスのツール・検索・生成呼び出しより先に実行されます。オプションの分解前処理と HTTP FAQ 前処理は通常パスの外側にあり、以下で個別に説明します。
+
+`history` は生成コンテキスト専用です。インテント解析と確認の後に provider メッセージへ正規化され、system メッセージと現在の質問の間へ挿入されます。インテント解析、セキュリティ判定、検索クエリ、証拠・引用の組み立てには一切使われません。分解されたリクエストでは、同じ履歴が完全なガードを通る各サブ質問へ渡されます。
+
+<Steps>
+
+<Step>
+### オプションの分解 — 明示的に有効化する前処理
+
+`decomposer` が注入されている場合、`answer_question` は通常の単一質問向けインテント・確認パスへ入る前にこれを呼び出します。そのため、同梱の `LLMQueryDecomposer` はこの時点で provider を 1 回呼び出すことがあります。この機能はオプトインであり、デフォルトの `None` では呼び出しません。
+
+分解器が複数のサブ質問を返すと、各サブ質問は分解を無効にした状態で完全な
+`answer_question` パスを再帰的に実行し、インテント解析、確認、セキュリティゲート、検索、捏造防止の書き換えを個別に適用します。最終的な `route="decomposed"` の結果は、出典を重複排除して決定的に連結され、合成時にモデルは呼び出されません。1 件だけの結果、不正な応答、provider 障害では元の通常パスへフォールバックします。
+
+</Step>
+
+<Step>
+### インテント解析 — 4 つのスロット
+
+`RuleIntentParser`（`IntentParser` Protocol の背後で差し替え可能、デフォルトは
+`parse_intent` に委譲）は、生の質問を **4 つのスロット**と選択されたルートを持つ
+`ParsedIntent` に変換します。この解析はルールベースで **LLM を一切使わず**、決定的かつオフラインで動作します。
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'str | None',
+      description: '用語集を通じて正規化された指標コード（例：REVENUE）。存在しない場合は None。',
+    },
+    entity: {
+      type: 'str | None',
+      description:
+        '正規化されたエンティティコード（例：ACME_CN）。セキュリティマスク済みテキスト上でマッチング。存在しない場合は None。',
+    },
+    period: {
+      type: '(str, str) | None',
+      description:
+        '(period_type, value) の形式。例：("FY", "2024")、("HY", "2024H1")、("QUARTER", "2025Q1")。',
+    },
+    channel: { type: 'str', description: '販売チャネル。デフォルトは "TOTAL" で、None になることはありません。' },
+  }}
+/>
+
+マッチングの前に、`parse_intent` はセキュリティゲートの `detect(...)` を実行して競合他社への言及をマスクするため、マスクされた外部エンティティが自社エンティティのマッチに漏れ込むことは決してありません。ルートはスロットと語彙的手がかりから、3 つの定数のいずれかに選択されます：`ROUTE_STRUCTURED`、`ROUTE_NARRATIVE`、または `ROUTE_COMPOSITE`（認識された指標**かつ**ナラティブの手がかりがある場合）。
+
+</Step>
+
+<Step>
+### 確認ゲート — 尋ねる・拒否する・仮定する
+
+`clarify_scope(intent, ...)` は、`mode` が 4 つの定数のいずれかである
+`ClarificationResult` を返します。分岐は正確にこの順序でチェックされます：
+
+<Tabs items={['out_of_scope_entity', 'ask_first', 'answer_with_assumptions', 'none']}>
+  <Tab value="out_of_scope_entity">
+    **拒否 — 通常の単一質問パスで最初にチェック。** このゲートは、決定的な
+    `SecurityGate.screen(...)` を（解析後の `external_entity` フィールドではなく）**生の質問**に対して呼び出すため、LLM パーサーに差し替えてもこの拒否を回避することはできません。判定がスコープ外／競合他社であれば、
+    `answer_question` はこのパスから即座に拒否メッセージを返します — ツールも検索も実行せず、追加の LLM 呼び出しも行いません。
+    これが `CLARIFY_OUT_OF_SCOPE_ENTITY` の早期リターンです。
+  </Tab>
+  <Tab value="ask_first">
+    **曖昧 → 尋ねる。** `intent.metric is None` の場合（かつルートがナラティブでない場合）、ゲートはサポートされている指標を列挙した質問とともに `CLARIFY_ASK_FIRST` を返します。指標を推測することは実質的な誤りとなるため、エージェントは仮定せずに尋ねます — そして追加の LLM 呼び出しなしで確認の質問を返します。
+  </Tab>
+  <Tab value="answer_with_assumptions">
+    **エンティティ／期間の欠落 → 仮定して明示する。** `entity` が欠けている場合は `CompanyProfile` の自社エンティティがデフォルトになり、`period` が欠けている場合は直近の完了した会計年度
+    （`("FY", str(year - 1))`）がデフォルトになります。この仮定は `【假设】…（如需收窄：…）` バナーとしてワンクリックの絞り込みオプション付きで提示されます。回答はそのまま続行されます。
+  </Tab>
+  <Tab value="none">
+    **完全に指定済み。** 必要なスロットがすべて揃っている場合（またはルートがナラティブでスロットの確認が不要な場合）— そのままルーティングへ進みます。
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  この非対称性は意図的なものです：**指標**が欠けている場合はフローを止めて尋ねる一方、**エンティティや期間**が欠けている場合は仮定を明示した上で続行します。*どの数値か*を推測することは重大な誤りですが、*誰の*／*いつの*を推測することは回復可能であり、ユーザーが取り消せるからです。
+</Callout>
+</Step>
+
+<Step>
+### FAQ ショートサーキット — サービスエッジ
+
+このステップは、HTTP サービスがエンジンの前面に立つ場合（`POST /v1/ask`）にのみ存在します。これは外側の前処理です。ルートハンドラーが `answer_question` を呼び出したり、ファクトストアやリトリーバーを開いたりする前に、`faq_cache.lookup(question, ...)` を呼び出します。
+検証済みのヒットは、キャッシュされた回答と出典情報を伴う `AskResponse(route="faq", ...)` を返します
+— この場合、**プロバイダー、ファクトストア、リトリーバーには決して到達しません**。
+
+重要なのは、FAQ レイヤーが同じ `parse_intent` / `clarify_scope` の判定を再利用して
+**保守的な除外条件**を適用する点です — 以下のいずれかに該当すると意図的なミスとなり、質問は完全なエージェントへとフォールスルーします：
+
+- 構造化数値系（ルートが `structured`、または指標／エンティティ／期間のいずれかのスロットが埋まっている）、
+- 競合他社／スコープ外エンティティ、
+- リアルタイム／時間依存の手がかり（今天、现在、最新、latest、current、股价 …）、
+- 期限切れ（アイテムの `valid_from`／`valid_until` の期間外）、
+- 無効化済み（`enabled` が false）、
+- `RESTRICTED` 機密度。
+
+<Callout type="info">
+  FAQ キャッシュは捏造防止ガードの**手前**に位置します。その除外条件は、ガードを必要とする質問を決してショートサーキットさせないためにこそ存在します — 詳細は
+  [FAQ ショートサーキット](/ja/docs/concepts/faq-short-circuit)を参照してください。
+</Callout>
+</Step>
+
+<Step>
+### ルーティング — structured / narrative / composite
+
+FAQ がミスした場合（または純 Python パスの場合）、エージェントは `intent.route` に基づいてディスパッチします：
+
+- **`narrative`** → 注入された `NarrativeRetriever` に対して `_run_narrative(...)` を実行。
+- **`structured`** → サブタスクに展開。単一のサブタスクは `query_metric`
+  のツール使用ループ（`_run_tool_loop`、`MAX_TOOL_ITERATIONS = 5` で上限）を実行し、複数のサブタスク
+  （ユーザーが複数の指標／エンティティ／期間を明示的に列挙した場合）は **LLM を使わず決定的に**実行されます（`_run_subtasks` → `_multi_subtask_answer`）。
+- **`composite`** → structured パスを実行した後、さらに `_run_narrative(...)` を実行し、
+  `归因分析：` という見出しの下に帰属分析を追記して出典を連結します。
+
+各ルートが内部で何を実行するかは [チャネル](/ja/docs/architecture/channels)を参照してください。
+
+</Step>
+
+<Step>
+### 捏造防止ガード — 「見つかりません」への書き換え
+
+structured パスでは、数値に関してモデルが最終決定権を持つことは決してありません。`_structured_answer`
+はモデルの文章ではなく、ツール結果を検査します：
+
+- **いずれかが `found`** → モデルのテキストは**完全に破棄され**、各回答行はファクト値とその来歴から決定的に再構築されます（`实体 期间 指标（渠道）：值 单位（来源…）`）。
+  稼働中の LLM は文章の中に捏造した余分な数値を紛れ込ませる可能性があるため、文章は破棄されます。
+- **`not_found`** → 誠実な拒否（`查不到 … 为避免误导，不提供任何推测数字`）に書き換えられます。
+- **`unrecognized_param`** → 正規化できなかったパラメーターの名前を明示します。
+
+ナラティブパスは意図的な例外です：モデルの文章を信頼しつつ、**出典の引用を強制**し、回答が言及し損ねた出典文書があれば追記します。プロバイダーが失敗した場合、どちらのパスも誠実にデグレードします（「AI サービスが一時的に利用できません」というメッセージ）— 決して数値を返しません。完全な不変条件については[捏造防止](/ja/docs/concepts/anti-fabrication)を参照してください。
+
+</Step>
+
+<Step>
+### 回答 + 出典
+
+オーケストレーターは、（書き換えられた可能性のある）`answer`、選択された
+`route`、`tool_results`、そして `sources` を持つ `AgentResult` を返します — すべてのファクトと引用は
+`source_doc_id` + ロケーターを保持します。プライバシーに配慮したトレースは、コード・件数・所要時間のみを記録し、回答・ファクト値・チャンクテキストは決して記録しません。
+
+</Step>
+
+</Steps>
+
+## フロー全体の俯瞰
+
+```text
+HTTP service outer pre-step (before answer_question):
+  faq_cache.lookup → vetted hit returns; else call answer_question
+
+answer_question(question, store, provider, …)
+  0. optional decomposer:
+       >1 subquestions → answer each with full guards, then deterministic route="decomposed"
+       one/failure     → continue through the normal single-question path
+  1. parse → ParsedIntent { metric, entity, period, channel, route }   # no LLM
+  2. clarify_scope(intent):
+       out_of_scope_entity      → return refusal            (no further tool / retrieval / LLM)
+       ask_first (no metric)    → return clarifying question (no further LLM)
+       answer_with_assumptions  → set defaults + banner, continue
+     history → provider generation messages only; never intent/security/retrieval/evidence
+  3. route on intent.route:
+       narrative  → _run_narrative
+       structured → single: _run_tool_loop (query_metric, ≤5 iters)
+                     multi : _run_subtasks (deterministic, no LLM)
+       composite  → structured, then append _run_narrative under 归因分析
+  4. anti-fabrication guard (_structured_answer):
+       found              → discard model text, rebuild from fact value + lineage
+       not_found          → rewrite to honest refusal
+       unrecognized_param → name the bad parameter
+       (narrative path: trust prose, force citations)
+  5. return AgentResult { answer, route, tool_results, sources }
+```

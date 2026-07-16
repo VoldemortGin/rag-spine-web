@@ -1,0 +1,97 @@
+---
+title: Isolamento RESTRICTED
+description: I livelli di sensibilità, e come i contenuti RESTRICTED vengono filtrati in due uscite indipendenti prima che possano mai raggiungere un prompt LLM.
+---
+
+Alcuni contenuti non devono mai lasciare il dominio — note sui rating del consiglio, verbali
+del comitato esecutivo. RAGSpine modella questo con un **livello di sensibilità** su ogni chunk, e garantisce
+che il contenuto `RESTRICTED` venga rimosso in **due** uscite indipendenti prima che possa raggiungere un
+prompt.
+
+<Callout type="warn">
+  **Garanzia.** Il contenuto con sensibilità `RESTRICTED` viene filtrato in due uscite — `retrieval/link` e
+  `retrieval/rerank` — quindi non può mai entrare in un prompt LLM. Entrambi i filtri devono rimanere; uno solo dei due è
+  insufficiente.
+</Callout>
+
+## Livelli di sensibilità
+
+La sensibilità è una colonna di tipo stringa su ogni chunk (`retrieval/chunking/chunk_store.py`,
+con valore predefinito `INTERNAL`). La classificazione è **deterministica** e guidata dalla configurazione
+(`common/sensitivity.py`, `classify_sensitivity` + `SensitivityPolicy`):
+
+<Steps>
+  <Step>Se il nome file / percorso corrisponde a un qualsiasi `restricted_filename_patterns` → `RESTRICTED`.</Step>
+  <Step>Altrimenti, se il corpo del testo corrisponde a un qualsiasi `restricted_keyword` → `RESTRICTED`.</Step>
+  <Step>Altrimenti, se l'interruttore strict `escalate_unknown_to_restricted` è attivo → `RESTRICTED`.</Step>
+  <Step>Altrimenti, il `default_level` della policy (`INTERNAL` per impostazione predefinita).</Step>
+</Steps>
+
+<Callout type="info">
+  Questo è un approccio **fail-safe basato sui segnali**: un documento non etichettato ma portatore di segnali viene elevato a
+  `RESTRICTED`. Una regola generalizzata "tutto ciò che è sconosciuto → RESTRICTED" nasconderebbe i report ordinari e romperebbe
+  il recupero, quindi è un interruttore strict opzionale, disattivato per impostazione predefinita. La policy viene caricata dalla
+  sezione di configurazione `[sensitivity]` — nessuna parola specifica dell'azienda è codificata a livello di codice.
+</Callout>
+
+## Due uscite, non una
+
+Il canale narrativo tocca il contenuto `RESTRICTED` in due punti che conducono verso un LLM,
+e ciascuno filtra in modo indipendente.
+
+<Tabs items={["Uscita 1 — recupero/link", "Uscita 2 — recupero/reranking"]}>
+  <Tab value="Exit 1 — retrieval/link">
+    L'adapter che collega il recupero all'agent (`retrieval/link/narrative_link.py`).
+    L'agent inserisce il **testo** degli snippet recuperati nel prompt di sintesi dell'LLM, quindi
+    l'adapter scarta ogni chunk `RESTRICTED` all'uscita, prima che gli snippet vengano restituiti:
+
+    ```python
+    return [
+        _to_snippet(r)
+        for r in results
+        if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+    ]
+    ```
+
+    La corrispondenza è insensibile alle maiuscole/minuscole. Senza questo filtro, il testo di uno snippet `RESTRICTED`
+    finirebbe direttamente nel prompt di sintesi.
+
+  </Tab>
+  <Tab value="Exit 2 — retrieval/rerank">
+    Il reranker listwise (`retrieval/rerank/listwise_rerank.py`). Il reranking invia il **testo** dei
+    candidati a un giudice LLM, quindi i candidati `RESTRICTED` non vengono **mai inseriti nel
+    prompt del giudice**:
+
+    - Solo il sottoinsieme non-RESTRICTED viene inviato al giudice.
+    - I chunk `RESTRICTED` vengono mantenuti fermi nella loro posizione RRF originale.
+    - Se *ogni* candidato è `RESTRICTED`, il giudice non viene chiamato affatto e il risultato
+      degrada al puro ordine RRF.
+
+    Questa è la "strategia B": mantiene la qualità del reranking per il sottoinsieme non sensibile,
+    garantendo al contempo che zero testo `RESTRICTED` raggiunga il giudice (un test congelato lo vincola).
+
+  </Tab>
+</Tabs>
+
+## Perché sono necessarie entrambe
+
+Le due uscite proteggono due superfici _diverse_ rivolte verso l'LLM: il prompt del giudice di reranking e il
+prompt di sintesi. Un chunk potrebbe sopravvivere a un percorso ed essere comunque diretto verso l'altro.
+
+<Callout type="warn">
+  Difesa in profondità: il filtro di reranking protegge il giudice; il filtro di link protegge la sintesi. Entrambi
+  gli invarianti sono elencati in `retrieval/CLAUDE.md` come "entrambi devono rimanere", e l'escalation
+  fail-safe del classificatore a monte è la prima linea — se un documento `RESTRICTED` fosse etichettato erroneamente come `INTERNAL` durante
+  l'ingestione, entrambi i filtri di uscita lo lascerebbero passare. Un'etichettatura errata equivale a una fuga di informazioni; il classificatore
+  deterministico la previene.
+</Callout>
+
+## La protezione più precoce dell'agent: entità fuori ambito
+
+Separatamente, il gate di sicurezza deterministico rifiuta le domande su **entità fuori ambito / concorrenti**
+_prima che qualsiasi canale, tool, retriever o chiamata LLM venga eseguita_ (`agent/agent.py`:
+`CLARIFY_OUT_OF_SCOPE_ENTITY` risponde per primo). Il gate è intenzionalmente
+**mai sostituibile**: rideriva l'ambito concorrente/esterno dalla domanda grezza e
+maschera gli alias corrispondenti con spazi di uguale lunghezza, quindi sostituire un parser di intenti
+diverso (anche basato su LLM) non può aggirarlo. Il sistema non emette mai un numero dell'azienda di riferimento
+in risposta a una domanda su un'entità esterna.

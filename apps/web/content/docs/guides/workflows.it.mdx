@@ -1,0 +1,140 @@
+---
+title: Flussi di lavoro
+description: Scaffolding in linguaggio naturale, il catalogo di 1.000 template, normalizzazione JSON/YAML/TOML, compatibilità con Dify e n8n, preview v1 e confini di esecuzione.
+---
+
+Il livello dei flussi di lavoro di RAGSpine svolge tre compiti distinti:
+
+1. **Descrivere o selezionare** un flusso di lavoro dalla riga di comando o dall'API HTTP.
+2. **Normalizzare, ispezionare, convertire e compilare** la configurazione senza eseguirla.
+3. **Eseguire** solo attraverso una superficie di esecuzione esplicita, controllata dal server e disattivata per impostazione predefinita.
+
+Mantenere separati questi compiti consente a un sito web di renderizzare i template in sicurezza senza ricevere
+chiavi dei provider né eseguire codice del marketplace.
+
+## Scaffolding da linguaggio naturale
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+ragspine workflow create "invoice extraction and approval" --format json -o invoice.json
+```
+
+`scaffold_workflow(description, ...)` tenta prima una corrispondenza nel catalogo. Un `template_id` esplicito
+seleziona quel template con confidenza `1`. In caso contrario, il riuso richiede sia una soglia di punteggio sia un
+margine del vincitore. Una mancata corrispondenza produce un grafo Dify 0.6 `start → llm → end` fisso e con escape applicato; non
+chiede a un modello di inventare codice eseguibile. Le descrizioni sono limitate a 4.096 caratteri e
+l'input con Unicode non valido/NUL viene rifiutato.
+
+Il fallback include i requisiti del modello che devono essere configurati dopo l'importazione. Non riceve mai
+una chiave API, un URL base del provider o una credenziale dalla descrizione.
+
+### Matcher
+
+- `lexical`: BM25 deterministico più alias tassonomici bilingui controllati.
+- `onnx`: corrispondenza semantica tramite FastEmbed; richiede `[embed-onnx]` e può scaricare/mettere in cache un
+  modello al primo utilizzo.
+- `auto`: tenta ONNX quando disponibile e ripiega sulla corrispondenza lessicale.
+
+## Cosa significano i 1.000 template
+
+Il catalogo incluso contiene **7 template curati manualmente e 993 template generati**. I
+descrittori generati coprono esattamente **39 settori**, **27 casi d'uso** e cinque archetipi:
+`analysis`, `extraction`, `routing`, `synthesis` e `transformation`.
+
+Il catalogo è redatto nel repository Spine. Le pagine di Dify Marketplace e n8n possono essere registrate
+come riferimenti di ricerca/provenienza delle fonti con metadati di popolarità osservata, ma RAGSpine non copia
+i loro YAML, prompt, credenziali o descrizioni estese. A runtime non scarica né
+esegue un flusso di lavoro upstream. I 993 descrittori generati vengono materializzati in flussi di lavoro Dify
+vincolati a partire dalle risorse del pacchetto.
+
+Il caricamento del catalogo verifica gli identificatori e l'integrità SHA-256, esegue la scansione alla ricerca di segreti, limita le forme di nodi e
+provider/plugin e restituisce copie difensive. Un template dichiarato come eseguibile non ha
+variabili di ambiente/conversazione né funzionalità non supportate; la configurazione esterna del modello resta
+una responsabilità del deployment.
+
+## JSON, YAML e TOML
+
+`parse_workflow` accetta testo o byte più un formato esplicito `json`, `yaml` o `toml`.
+`load_workflow` sceglie in base all'estensione `.json`, `.yaml`, `.yml` o `.toml`. Tutti i formati si normalizzano
+in un unico `dict[str, object]` compatibile con JSON.
+
+Il rilevamento automatico del testo riconosce un `{` iniziale come JSON e altrimenti tenta YAML. TOML deve essere
+esplicito o caricato da un file `.toml`. Le chiavi duplicate in JSON e YAML vengono rifiutate; YAML utilizza un
+loader sicuro. Numeri non finiti, valori non supportati e strutture eccessivamente grandi falliscono
+in modalità fail-closed.
+
+| Limite            |             Valore |
+| ---------------- | ----------------: |
+| byte del documento   |             1 MiB |
+| profondità di annidamento    |                32 |
+| nodi strutturali |            20.000 |
+| singola stringa       | 256 Ki caratteri |
+| alias YAML     |                64 |
+
+Il caricamento dei file rifiuta i symlink, i file speciali e le race condition di sostituzione. `dump_json` e
+`dump_dify_yaml` producono un output validato deterministico; lo YAML emesso è privo di alias.
+
+## Compatibilità con Dify
+
+La configurazione Dify è la forma primaria di interscambio dei flussi di lavoro. Il compilatore segue
+parse → rappresentazione intermedia → ottimizzazione/codegen e supporta i grafi Dify di tipo workflow e
+advanced-chat:
+
+```bash
+ragspine dify analyze workflow.toml
+ragspine dify compile workflow.yml --target ragspine
+```
+
+L'analisi e la compilazione non eseguono il flusso di lavoro. Il confine Pydantic del compilatore richiede
+`[dify]` a meno che non sia già fornito da `[service]`.
+
+## Conversione da n8n
+
+Le superfici di conversione Python e HTTP supportano `n8n_to_dify` e `dify_to_n8n`. La conversione è
+pura e restituisce avvisi per le semantiche che non possono essere rappresentate esattamente. I dati sorgente di n8n vengono
+conservati nei metadati dei nodi `_n8n` e nei dati `x_n8n` di primo livello per il supporto al round-trip. Questo non significa
+che qualsiasi flusso di lavoro n8n arbitrario possa essere eseguito in RAGSpine.
+
+## Protocollo di preview v1
+
+`ragspine workflow preview ID` e le risposte HTTP dei flussi di lavoro espongono una **proiezione di sola visualizzazione**:
+
+```json
+{
+  "preview_schema_version": 1,
+  "nodes": [
+    { "id": "start", "title": "Start", "type": "start", "x": 0, "y": 0, "width": 240, "height": 96 }
+  ],
+  "edges": []
+}
+```
+
+I nodi contengono solo `id`, `title`, `type`, la geometria e un `parent_id` opzionale. Gli archi contengono solo
+`id`, `source`, `target` e un `label` opzionale. La proiezione omette deliberatamente prompt,
+variabili, configurazione dei provider e credenziali. La geometria è deterministica; la validazione rifiuta
+ID duplicati, endpoint mancanti e cicli tra nodi padre. I limiti sono 256 nodi, 512 archi e 512
+caratteri per stringa visualizzata.
+
+Preview v1 non è un formato di flusso di lavoro eseguibile. I consumatori dovrebbero ramificare su
+`preview_schema_version` e trattare le versioni sconosciute come non supportate.
+
+## Catalogo HTTP e scaffolding
+
+- `GET /v1/workflow-templates`: solo metadati paginati, massimo 100 per pagina, con supporto per cache e
+  ETag debole.
+- `GET /v1/workflow-templates/{template_id}`: flusso di lavoro canonico, YAML Dify e preview v1.
+- `POST /v1/workflow-scaffold`: selezione descrizione/template, metadati di corrispondenza, flusso di lavoro, YAML,
+  requisiti, avvisi e preview. Non esegue mai il risultato.
+
+## Confine di esecuzione
+
+Le route di esecuzione Dify e n8n restituiscono `403` finché `RAGSPINE_DIFY_RUN_ENABLED=true`. I provider e
+i percorsi dei flussi di lavoro delle app Dify registrate sono configurati lato server; i client non possono inviare oggetti
+provider o chiavi API. La compilazione supera un gate statico e poi viene eseguita nella modalità di
+isolamento configurata. La modalità `inprocess` predefinita è un confine Python con restrizioni, non un container
+di sicurezza; su Linux è possibile optare per l'isolamento in sottoprocesso.
+
+La route `/webhook/{path}` compatibile con n8n è intenzionalmente non autenticata per rispecchiare la
+semantica dei webhook. Considera solo i flussi di lavoro attivi memorizzati e resta soggetta allo stesso gate di
+esecuzione disattivato per impostazione predefinita. Non esporla mai direttamente senza autenticazione/limiti di frequenza in ingresso adeguati al
+tuo deployment.

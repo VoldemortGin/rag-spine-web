@@ -1,0 +1,82 @@
+---
+title: パッケージレイアウト
+description: src/ragspine 配下の 15 のドメインパッケージとその責務。
+---
+
+現在の `main` には、`src/ragspine/` 配下に **15 のトップレベルドメインパッケージ** が含まれています
+（`__pycache__` を除く）。レイアウトは、controllers/models/utils のような水平分割ではなく、
+機能ごとのパッケージ分割（package-by-feature）を採用しています。
+
+```text
+src/ragspine/
+├── agent/       intent, security, tool loop, provider seam, answer orchestration
+├── cli/         installed ragspine command
+├── common/      profile, glossary, sensitivity, observability, shared constants
+├── dify/        Dify parser, IR, optimizer, code generation, restricted execution support
+├── eval/        QA, extraction, retrieval, faithfulness, and regression gates
+├── extraction/  Office/PDF/text extraction and StyledGrid IR
+├── fixtures/    package fixtures used by demos/tests
+├── graph/       provenance-aware structured/narrative relation graph seams
+├── ingestion/   structured facts, narrative chunks, sources, manifests, review queue
+├── n8n/         pure n8n ↔ Dify conversion
+├── pipeline/    static engine topology values and Mermaid/DOT/JSON export
+├── retrieval/   chunking, filtering, routing, lexical/vector search, rerank, postprocess
+├── service/     FastAPI app, public compatibility APIs, queue, jobs, FAQ, config
+├── storage/     fact-store protocol and SQLite implementation
+└── workflows/   catalog, source policy, formats, matching, scaffold, preview v1
+```
+
+## 責務と境界
+
+### エンジンコア
+
+`common`、`storage`、`extraction`、`ingestion`、`retrieval`、`agent`、`graph`、`eval` が
+エビデンスパスを実装します。重量級の SDK はコアのシーム定義ではなくアダプタ内でインポート
+されます。プレーンなベースインストールと `MockProvider` により、決定論的なオフラインパスが
+維持されます。
+
+`retrieval` には現在、明示的なメタデータ述語のための `filtering/` と、複数ライブラリの
+選択/融合のための `routing/` が含まれています。親子/ウィンドウデータはチャンクストアに
+保存されるため、再起動後も保持され、引用のアイデンティティを変えることなく子ヒット後に
+展開できます。
+
+### ワークフローの相互運用性
+
+`workflows` は、安全な設定の取り込みと、カタログ/ワークフローのひな形生成の振る舞いを
+所有します。preview-v1 表示プロジェクションの唯一の供給元です。`dify` は Dify のセマンティック
+解析/IR/コード生成を所有します。`n8n` は、n8n JSON と Dify 形式のマッピングとの間の変換を、
+警告とラウンドトリップメタデータ付きで行います。
+
+これらのドメインはコードや設定を準備することはできますが、それを暗黙的に実行することは
+ありません。実行は明示的なゲートを備えたサービスの関心事です。
+
+### エッジ
+
+`cli` はインストールされたローカルのエッジです。`service` はネットワーク/合成のエッジであり、
+リソースを組み立てるために幅広くインポートします。`pipeline` は実際のエンジントポロジーの
+ための小さな静的グラフ値/エクスポート層であり、ワークフローのプレビューとは別物です。
+
+## 2 つのグラフ表現
+
+| 表現                | 所有者      | 目的                                                                             |
+| ------------------- | ----------- | -------------------------------------------------------------------------------- |
+| `PipelineGraph`     | `pipeline`  | 組み立てられたエンジントポロジーの検査。Mermaid/DOT/JSON                          |
+| ワークフロープレビュー v1 | `workflows` | 単一ワークフローの安全な UI プロジェクション。ノード/エッジ/ジオメトリのみ |
+
+いずれの表現もノードを実行しません。
+
+## インポートと依存関係の経験則
+
+ドメインコードは小さな契約と値に依存し、アダプタはそれらの契約に対して内向きに依存します。
+`service` と `cli` は合成のルート（composition root）です。新しいベンダー SDK は、遅延インポートと
+適合性テストを備えたオプションのアダプタに配置します。ワークフローのクライアントは、
+ソースポリシー、フォーマット制限、プレビューの秘匿化、サーバー実行ゲートを迂回してはなりません。
+
+<Cards>
+  <Card title="共通（Common）" href="/ja/docs/guides/common" />
+  <Card title="インジェスト" href="/ja/docs/guides/ingestion" />
+  <Card title="検索" href="/ja/docs/guides/retrieval" />
+  <Card title="評価" href="/ja/docs/guides/evaluation" />
+  <Card title="ワークフロー" href="/ja/docs/guides/workflows" />
+  <Card title="サービス" href="/ja/docs/guides/service" />
+</Cards>

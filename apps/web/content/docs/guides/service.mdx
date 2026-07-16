@@ -1,244 +1,125 @@
 ---
 title: Service
-description: The HTTP + async-queue layer — a FastAPI app factory with dependency injection, the RQ task queue behind a TaskQueue Protocol, worker-owned ingestion jobs, the FAQ short-circuit cache, and ServiceConfig (env RAGSPINE_*).
+description: FastAPI composition, async ingestion, workflow catalog and compatibility APIs, authentication boundaries, and default-off execution.
 ---
 
-The `service` domain (`src/ragspine/service/`) wraps the engine in an HTTP API and an async
-ingestion pipeline. It owns five things: `ServiceConfig` (env-driven), the FastAPI app, the
-RQ task queue, worker-owned ingestion jobs, and the FAQ short-circuit cache.
+`ragspine.service` is an optional composition root over the engine. Install `[service]` to get
+FastAPI, uvicorn, RQ, and Redis support. The service opens request/job-owned stores, injects
+providers and matchers through typed seams, and returns opaque errors without tracebacks.
 
-One invariant governs the whole layer:
-
-> The FAQ cache sits **in front of** the [anti-fabrication](/docs/concepts/anti-fabrication)
-> guard — so it must conservatively exclude anything a vetted short-circuit could get wrong:
-> structured-numeric / competitor / real-time / expired / disabled / RESTRICTED questions
-> never short-circuit. See [FAQ short-circuit](/docs/concepts/faq-short-circuit).
-
-## Layout
-
-<Files>
-  <Folder name="service" defaultOpen>
-    <File name="config.py" />
-    <Folder name="api">
-      <File name="app.py" />
-      <File name="dependencies.py" />
-      <File name="routes.py" />
-      <File name="schemas.py" />
-    </Folder>
-    <Folder name="faq">
-      <File name="faq_cache.py" />
-    </Folder>
-    <Folder name="tasks">
-      <File name="jobs.py" />
-      <File name="task_queue.py" />
-    </Folder>
-  </Folder>
-</Files>
-
-## ServiceConfig
-
-`config.py` assembles a frozen `ServiceConfig` from the environment via
-`ServiceConfig.from_env()`. Every value is optional; the defaults run the offline,
-deterministic path with no API key. The full variable table lives in
-[Configuration](/docs/reference/configuration); the most-used:
-
-| Field                 | Env var                        | Default                        |
-| --------------------- | ------------------------------ | ------------------------------ |
-| `db_path`             | `RAGSPINE_DB_PATH`             | `data/fact_metric.db`          |
-| `chunk_db_path`       | `RAGSPINE_CHUNK_DB_PATH`       | `None`                         |
-| `provider_type`       | `RAGSPINE_PROVIDER`            | `mock` (`mock` \| `anthropic`) |
-| `redis_url`           | `RAGSPINE_REDIS_URL`           | `redis://localhost:6379/0`     |
-| `faq_source`          | `RAGSPINE_FAQ_SOURCE`          | `None` (→ empty cache)         |
-| `allowed_upload_root` | `RAGSPINE_ALLOWED_UPLOAD_ROOT` | `None`                         |
-
-`config.py` also provides `build_provider(config)` (mock → `MockProvider`, anthropic →
-`AnthropicProvider`), the context managers `open_fact_store(config)` and
-`open_narrative_retriever(config, provider)`, and `validate_ingest_path(path, config, *, suffixes)` — which enforces the `allowed_upload_root` containment (rejecting path traversal)
-and a suffix whitelist, raising `PathNotAllowedError` on violation.
-
-## FastAPI app — factory + dependency injection
-
-`api/app.py` exposes an app factory:
+## App factory
 
 ```python
-def create_app(
-    config: ServiceConfig | None = None,
-    *,
-    provider: LLMProvider | None = None,
-    queue: TaskQueue | None = None,
-    faq_cache: FAQCache | None = None,
-) -> FastAPI: ...
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config=None,
+    provider=None,
+    queue=None,
+    faq_cache=None,
+    workflow_matcher=None,
+)
 ```
 
-Anything not passed is built from config (`ServiceConfig.from_env()`, `build_provider`,
-`RQQueue(config.redis_url)`, and `FAQCache.from_file(config.faq_source)` or
-`FAQCache.empty()`). The assembled instances are stored on `app.state`, and `api/dependencies.py`
-exposes them as FastAPI dependencies (`get_config`, `get_provider`, `get_queue`,
-`get_faq_cache`) — overridable via `app.dependency_overrides` in tests. `routes.py` wires
-them as `Annotated` aliases (`ConfigDep`, `ProviderDep`, `QueueDep`, `FAQCacheDep`).
+Omitted dependencies are assembled from `ServiceConfig.from_env()`. Instances are held on
+`app.state`, which also makes them straightforward to replace in tests. When `studio_dir` points
+to an existing directory, its static build is mounted at `/studio`; an empty or missing directory
+does not add that route.
 
-### Endpoints
+## Endpoint groups
 
-All routes live on a module-level `router` in `api/routes.py`:
+| Group                      | Paths                                                             | Executes work?                         | Authentication                              |
+| -------------------------- | ----------------------------------------------------------------- | -------------------------------------- | ------------------------------------------- |
+| engine                     | `/healthz`, `/readyz`, `/v1/ask*`, ingestion/jobs                 | ask and queue operations               | none built in                               |
+| catalog                    | `/v1/workflow-templates*`, `/v1/workflow-scaffold`                | no                                     | none built in                               |
+| compiler/converter         | `/v1/dify/analyze`, `/compile`, `/v1/n8n/convert`, `/v1/topology` | no                                     | none built in                               |
+| internal execution         | `/v1/dify/run*`, `/v1/n8n/run`                                    | yes, when enabled                      | execution flag; deploy behind your own auth |
+| Dify-compatible public API | `/v1/workflows/run*`, `/v1/info`, `/v1/parameters`                | run route when enabled                 | Bearer app key                              |
+| n8n-compatible public API  | `/api/v1/*`                                                       | CRUD; webhook can run when enabled     | `X-N8N-API-KEY`                             |
+| n8n webhook                | `/webhook/{path}`                                                 | active matching workflow, when enabled | intentionally none                          |
 
-<TypeTable
-  type={{
-    'GET /healthz': { type: 'liveness', description: 'Returns {"status": "ok"}.' },
-    'GET /readyz': {
-      type: 'readiness',
-      description: 'Checks fact_db (and queue.ping if present). 200 "ready" / 503 "degraded".',
-    },
-    'POST /v1/ask': {
-      type: 'AskRequest → AskResponse',
-      description:
-        'FAQ short-circuit first; on miss runs answer_question with per-request stores. Errors become a 500 without leaking traceback.',
-    },
-    'POST /v1/ingest/structured/jobs': {
-      type: 'IngestStructuredJobRequest → JobSubmitResponse',
-      description:
-        'Validates path, enqueues run_structured_ingest_job. 400 PathNotAllowedError on a rejected path.',
-    },
-    'POST /v1/ingest/narrative/jobs': {
-      type: 'IngestNarrativeJobRequest → JobSubmitResponse',
-      description: 'Normalizes inputs, validates each path, enqueues run_narrative_ingest_job.',
-    },
-    'GET /v1/jobs/{job_id}': {
-      type: '→ JobStatusResponse',
-      description: 'queue.get(job_id); 404 JobNotFound if unknown.',
-    },
-  }}
-/>
+The general engine and internal `/v1/dify/*` routes do not provide user authentication. Bind to
+localhost/private networks or add an authenticated reverse proxy before public exposure.
 
-Request/response models (`api/schemas.py`, Pydantic v2) include `AskRequest(question, reference_date)`, `AskResponse(request_id, answer, route, answer_kind, clarification, sources, tool_status_summary, cache)`, the two ingest-job request models, `JobSubmitResponse(job_id)`,
-and `JobStatusResponse(id, status, result, error)`.
+## Engine and ingestion
 
-<Callout type="info">
-  The two ingest routes only accept whitelisted suffixes — structured: `.xlsx / .xlsm / .pptx /
-  .pdf`; narrative: `.pptx / .pdf`.
-</Callout>
+`POST /v1/ask` and `/v1/ask/stream` run the FAQ gate, intent/security decisions, retrieval,
+anti-fabrication rewrite, and provenance assembly. The SSE endpoint finishes all guards before it
+opens the stream. `AskRequest.history` is optional generation context only and cannot become
+retrieval evidence.
 
-## Task queue — the `TaskQueue` Protocol
+Structured ingestion accepts `.xlsx`, `.xlsm`, `.pptx`, and `.pdf`; narrative jobs accept
+`.pptx` and `.pdf`. `RAGSPINE_ALLOWED_UPLOAD_ROOT` constrains resolved paths. The API enqueues a
+dotted job reference; the worker revalidates paths and owns its own SQLite connections.
 
-`tasks/task_queue.py` defines the queue seam:
+`FakeQueue` is synchronous/in-memory for tests. `RQQueue` is the Redis-backed production adapter.
+Queue statuses are `queued`, `started`, `finished`, and `failed`; reports contain counts/statuses,
+not raw fact values or chunk text.
 
-```python
-class TaskQueue(Protocol):
-    def enqueue(self, func_path: str, payload: dict, *, job_id=None,
-                timeout=None, max_retries=0, result_ttl=None,
-                failure_ttl=None) -> str: ...
-    def get(self, job_id: str) -> JobStatus | None: ...
+## Workflow catalog and compiler
+
+Catalog list pages contain metadata only. Detail and scaffold responses add the canonical workflow,
+Dify YAML, and preview v1. Scaffolding may match semantically, fall back to lexical matching, or
+generate a fixed graph; it never executes the output.
+
+Dify analyze/compile bodies contain exactly one of a canonical `workflow` object or legacy `yaml`
+string; unknown fields are rejected. Analyze is static only. Compile returns a Python code string
+and never runs it. n8n conversion is also pure and returns explicit compatibility warnings.
+
+Selected workflow POST request bodies are bounded to 2 MiB before FastAPI buffers them:
+`/v1/workflow-scaffold` and `/v1/dify/{analyze,compile,run,run/jobs}`. The decoded workflow document
+has the tighter 1 MiB parser limit. Validation-error responses remove Pydantic's echoed `input` and
+`ctx` fields so a rejected secret is not reflected.
+
+## Default-off execution
+
+`RAGSPINE_DIFY_RUN_ENABLED` defaults to `false`. Until explicitly enabled,
+`/v1/dify/run`, `/v1/dify/run/jobs`, `/v1/n8n/run`, Dify-compatible workflow execution, and n8n
+webhook execution fail closed. The provider, model, base URL, and Dify app workflow files come from
+server configuration; clients cannot inject a provider expression or key.
+
+Execution is compiled and checked by the L0 static gate. The default `inprocess` isolation applies
+restricted builtins/imports and a timeout, but is not an OS sandbox. `subprocess` adds Linux resource
+limits; on macOS and Windows it falls back to the in-process restrictions. Treat untrusted workflow
+execution as a separate hardened service boundary.
+
+## Dify-compatible public API
+
+`RAGSPINE_DIFY_PUBLIC_APPS` is a semicolon-separated registry such as
+`app-key=/srv/workflows/support.yml;other-key=/srv/workflows/report.yml`. Requests use
+`Authorization: Bearer app-key`. If the registry is absent, invalid, or the key is unknown, these
+routes return `401`.
+
+The API supports `POST /v1/workflows/run`, `GET /v1/workflows/run/{id}`, `GET /v1/info`, and
+`GET /v1/parameters`. Run requests supply `inputs`, `user`, and `response_mode`; they do not supply
+the workflow. Streaming uses SSE after execution and replays trace events. Run-detail data is a
+process-local LRU of the latest 100 runs and is isolated per app key; it is not durable history.
+
+## n8n-compatible public API and webhooks
+
+Set `RAGSPINE_N8N_API_KEY`; clients send `X-N8N-API-KEY`. If no key is configured, every
+`/api/v1/*` request returns `401`. Workflow CRUD and activation, plus execution list/get/delete,
+are backed by the filesystem root `RAGSPINE_N8N_STORE_PATH` (default `data/n8n_store`). List limits
+default to 100, clamp to 1–250, and use cursors.
+
+`GET|POST /webhook/{path}` deliberately has no API-key check, matching webhook behavior. It matches
+only an active workflow's webhook node and still requires execution to be enabled. Query parameters
+and a JSON-object body form inputs, with body keys winning. Put ingress controls, TLS, rate limiting,
+and request-size policy in front of this route.
+
+## Run the service
+
+From the repository root:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+
+# separate process; Redis required
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
 ```
 
-<Cards>
-  <Card
-    title="FakeQueue"
-    description="Synchronous, in-memory. enqueue runs the job inline (failures recorded as JOB_FAILED, not re-raised). Used in tests and offline demos — no Redis needed."
-  ></Card>
-  <Card
-    title="RQQueue"
-    description="Production queue over RQ + Redis (both lazy-imported). enqueue maps to rq.Queue.enqueue; get fetches via rq.job.Job.fetch and maps status. Adds ping() for /readyz."
-  ></Card>
-</Cards>
-
-Status constants: `JOB_QUEUED`, `JOB_STARTED`, `JOB_FINISHED`, `JOB_FAILED`. A `JobStatus`
-carries `id`, `status`, `result`, `error` (error shape `{type, message, stage, retryable}`).
-
-## Ingestion jobs — worker-owned stores
-
-`tasks/jobs.py` holds the two job functions the queue resolves by dotted path
-(`run_structured_ingest_job`, `run_narrative_ingest_job`). Each one is **self-contained**:
-it builds a `ServiceConfig` from its payload, defensively re-validates the file path(s) (a
-violation raises `JobError(stage="validation")`), opens its **own** SQLite stores, runs the
-ingest, and closes everything in `finally`.
-
-<Callout type="warn">
-  Jobs never reuse the caller's database connections — they own their stores so they can run
-  out-of-process in a worker. Their report serializers (`ingest_report_to_dict`,
-  `narrative_report_to_dict`) emit counts and statuses only, never raw fact values or chunk text.
-</Callout>
-
-## FAQ short-circuit cache
-
-`faq/faq_cache.py` is the SME-vetted Q→A cache that can bypass the LLM entirely. `FAQCache`
-builds a normalized index over questions and aliases (NFKC + casefold + whitespace fold +
-trailing-punctuation strip); construct it with `FAQCache.from_file(path)` or
-`FAQCache.empty()`. The core method is a pure function:
-
-```python
-def lookup(self, question: str, *, reference_date=None) -> FAQHit | None: ...
-```
-
-Its exclusion rules are front-loaded — any match returns `None` (a miss) — in this order:
-
-<Steps>
-  <Step>
-    **Out-of-scope / competitor** — `clarify_scope` mode is `out_of_scope_entity`, or
-    `intent.external_entity` is set.
-  </Step>
-  <Step>
-    **Structured-numeric** — `intent.route == "structured"`, or any of `metric / entity / period`
-    (single or multi-value) is present.
-  </Step>
-  <Step>
-    **Real-time** — the normalized question contains a real-time cue (e.g. time words, “股价”,
-    “price now”).
-  </Step>
-  <Step>**No exact match** — after all the above, an exact normalized lookup misses.</Step>
-  <Step>
-    **Expired / disabled** — the item is disabled or outside its `[valid_from, valid_until]` window.
-  </Step>
-  <Step>**RESTRICTED** — the item's sensitivity (case-insensitively) equals `RESTRICTED`.</Step>
-</Steps>
-
-Only when none of these fire does `lookup` return a `FAQHit` (`item_id`, `version`,
-`answer`, `source`, `cache_type="faq"`). In `routes.py`, `/v1/ask` runs the FAQ lookup
-**first**; a hit returns immediately with `route="faq"` and never touches the provider, fact
-store, or retriever — so it sits cleanly in front of the anti-fabrication guard, and its
-conservative exclusions are what keep that safe.
-
-## Run it
-
-<Tabs items={['API server', 'worker']}>
-  <Tab value="API server">
-    ```bash
-    RAGSPINE_DB_PATH=data/fact_metric.db \
-    RAGSPINE_CHUNK_DB_PATH=data/narrative.db \
-    .venv/bin/python scripts/run_server.py --host 0.0.0.0 --port 8000
-    ```
-  </Tab>
-  <Tab value="worker">
-    ```bash
-    # needs Redis; --queue defaults to "ragspine-ingest" (matches RQQueue)
-    RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
-    ```
-  </Tab>
-</Tabs>
-
-Both require the `[service]` extra (`pip install -e ".[service]"`). The server-side enqueue
-queue name and the worker-side consume queue name share the same default
-(`ragspine-ingest`), so they agree out of the box.
-
-## See also
-
-<Cards>
-  <Card
-    title="FAQ short-circuit"
-    href="/docs/concepts/faq-short-circuit"
-    description="Why the cache excludes structured / competitor / real-time / expired / RESTRICTED."
-  />
-  <Card
-    title="HTTP API"
-    href="/docs/reference/http-api"
-    description="Full endpoint reference and request/response shapes."
-  />
-  <Card
-    title="Configuration"
-    href="/docs/reference/configuration"
-    description="Every RAGSPINE_* variable ServiceConfig reads."
-  />
-  <Card
-    title="Extension points"
-    href="/docs/reference/extension-points"
-    description="TaskQueue, LLMProvider, and the other Protocols."
-  />
-</Cards>
+See [HTTP API](/docs/reference/http-api) for exact routes and [Configuration](/docs/reference/configuration)
+for the environment surface.

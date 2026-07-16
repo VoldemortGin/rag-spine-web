@@ -1,154 +1,99 @@
 ---
 title: Quickstart
-description: Run the offline demo, ask a question with the deterministic MockProvider, use the Python API, and start the HTTP service plus async worker.
+description: Run the deterministic demo, scaffold a Dify-compatible workflow, call the Python API, and start the optional service.
 ---
 
-RAGSpine ships four entry points — an end-to-end demo, a one-shot CLI, a Python API, and an
-HTTP service. They all work offline against the bundled synthetic data, no API key required.
+Commands that reference `scripts/` are source-checkout commands and must be run from the
+RAGSpine repository root. The installed `ragspine` command works from any directory.
 
-<Callout type="info">
-  Always run scripts and tests **from the repo root**. The scripts anchor on a `.project-root`
-  marker; running from a subfolder breaks path resolution.
-</Callout>
+## 1. Verify the offline engine
 
-<Steps>
+```bash
+ragspine quickstart
+ragspine version
+```
 
-<Step>
+In a source checkout, the larger end-to-end fixture run is:
 
-## Run the end-to-end demo
-
-This generates synthetic data, extracts it, ingests it into the fact store, runs parameterized
-queries, and asserts every result against ground truth — fully offline.
-
-```bash title="run the demo"
+```bash
 .venv/bin/python scripts/run_demo.py
 ```
 
-It prints per-check output and, on success, ends with:
+It extracts and ingests synthetic facts, queries them, checks source lineage, and ends with
+`ALL CHECKS PASSED` on success. No API key is required.
 
-```text
-ALL CHECKS PASSED (… facts ingested)
+## 2. Create a workflow from one sentence
+
+The shortest form treats an unknown first positional argument as `workflow create`:
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
 ```
 
-Any mismatch exits non-zero. This proves the structured/numeric channel: figures are
-extracted deterministically from PPTX/Excel structure into `fact_metric`, queries return a
-definite value plus lineage, and a missing fact is reported as `not_found` — never invented.
+The command first tries to match one of the 1,000 bundled templates. If the match is not
+confident enough, it creates a fixed `start → llm → end` Dify 0.6 workflow. The command writes a
+new YAML file by default and does not run it. Equivalent explicit forms include:
 
-</Step>
-
-<Step>
-
-## Ask a question offline
-
-The `ask.py` script runs the full path — intent parse → clarification gate → tool-use loop →
-definite value + lineage — against the deterministic `MockProvider`. No API key needed.
-
-```bash title="a question the data can answer"
-.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db "中国内地FY2024的REVENUE是多少"
-# → ACME_CN FY2024 REVENUE 为 1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```bash
+ragspine workflow create "invoice extraction and approval" --stdout
+ragspine workflow create "support triage" --format json -o support.json
+ragspine workflow create --template conditional-response-routing -o routing.yml
+ragspine workflow list
+ragspine workflow show conditional-response-routing --format json
+ragspine workflow preview conditional-response-routing
 ```
 
-Ask for something the data doesn't have and you get an honest refusal, never a guess — this
-is the anti-fabrication invariant in action:
+The default `auto` matcher uses the ONNX matcher when `[embed-onnx]` is available and otherwise
+falls back to deterministic lexical matching. Use `--matcher lexical` for a guaranteed
+no-model path, `--no-reuse` to force generation, and `--force` only when replacing a normal
+existing file. Symlinks and special files are always rejected.
 
-```bash title="honest refusal on missing data"
-.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db "中国内地FY2025的REVENUE是多少"
-# → 查不到：REVENUE / ACME_CN / 2025 …未在事实表中找到。为避免误导，不提供任何推测数字。
-```
+See the [Workflow guide](/docs/guides/workflows) for catalog provenance, format limits, and the
+preview schema.
 
-</Step>
+## 3. Ask through Python
 
-<Step>
-
-## Use the Python API
-
-The same flow is one function call. `answer_question` takes the question, a `FactStore`, and a
-provider, and returns a result with a deterministic `answer` plus `sources` lineage:
-
-```python title="python API"
+```python
 from ragspine.agent.agent import answer_question
 from ragspine.agent.llm_provider import MockProvider
 from ragspine.storage.fact_store import SqliteFactStore
 
-# FactStore is a @runtime_checkable Protocol; SqliteFactStore is the default impl.
-store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
-result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
-print(result.answer)     # deterministic value, or an honest "not found"
-print(result.sources)    # [{'doc': ..., 'locator': ...}]
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+print(result.answer)
+print(result.sources)
 ```
 
-</Step>
+`answer_question` returns cited evidence or an explicit refusal. Optional conversation
+`history` is generation context only: it is never used as retrieval evidence or as input to the
+intent and security decisions.
 
-<Step>
+## 4. Start the optional HTTP service
 
-## Start the HTTP service
+Install `[service]`, then in a source checkout:
 
-The FastAPI app and the RQ worker run as separate processes. The API answers questions and
-enqueues ingestion jobs; the worker consumes those jobs out-of-process (and needs Redis).
-Both require the `[service]` extra.
-
-<Tabs items={['API server', 'Worker', 'Endpoints']}>
-
-<Tab value="API server">
-
-```bash title="run the server"
-RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
 ```
 
-```bash title="ask over HTTP"
-curl -s localhost:8000/v1/ask -H 'content-type: application/json' \
-     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
+```bash
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/v1/workflow-templates?limit=10
+curl -s http://127.0.0.1:8000/v1/workflow-scaffold \
+  -H 'content-type: application/json' \
+  -d '{"description":"invoice extraction and approval"}'
 ```
 
-`scripts/run_server.py` accepts `--host` (default `127.0.0.1`) and `--port` (default `8000`).
-Configuration is injected entirely via `RAGSPINE_*` environment variables.
+Catalog and scaffold routes are read-only/non-executing. Dify and n8n run routes are disabled
+unless `RAGSPINE_DIFY_RUN_ENABLED=true`. The general engine routes do not include application
+authentication; place the service behind an authenticated reverse proxy or a private network
+before exposing it.
 
-</Tab>
+To process queued ingestion jobs, run Redis and a second source-checkout process:
 
-<Tab value="Worker">
-
-Ingestion jobs run out-of-process via an RQ queue backed by Redis:
-
-```bash title="run the worker"
-RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
+```bash
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
 ```
-
-The worker opens and closes its own stores per job (it does not share a sqlite connection
-with the API process). The queue name defaults to `ragspine-ingest` and can be overridden
-with `--queue`.
-
-</Tab>
-
-<Tab value="Endpoints">
-
-| Method | Path                         | Purpose                            |
-| ------ | ---------------------------- | ---------------------------------- |
-| `GET`  | `/healthz`                   | liveness check                     |
-| `GET`  | `/readyz`                    | readiness check                    |
-| `POST` | `/v1/ask`                    | ask a question                     |
-| `POST` | `/v1/ingest/structured/jobs` | enqueue a structured ingestion job |
-| `POST` | `/v1/ingest/narrative/jobs`  | enqueue a narrative ingestion job  |
-| `GET`  | `/v1/jobs/{id}`              | poll a job's status                |
-
-</Tab>
-
-</Tabs>
-
-</Step>
-
-</Steps>
-
-## Next steps
-
-<Cards>
-  <Card
-    title="CLI & scripts"
-    href="/docs/getting-started/cli-and-scripts"
-    description="Full reference of make targets and the ask.py / server / worker flags."
-  />
-  <Card
-    title="Configuration"
-    href="/docs/reference/configuration"
-    description="Every RAGSPINE_* environment variable and what it controls."
-  />
-</Cards>

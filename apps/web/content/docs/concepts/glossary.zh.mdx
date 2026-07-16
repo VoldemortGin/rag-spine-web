@@ -1,0 +1,142 @@
+---
+title: 术语表
+description: RAGSpine 术语——每个词条一条精确定义，全部以代码库为依据。
+---
+
+项目术语，按字母顺序排列。每个词条均按其在代码库中的实际用法定义；深入了解请参阅所链接的概念页面。
+
+### 防编造机制守卫（Anti-fabrication guard）
+
+当结构化通道未返回 `found` 事实时，编排器中将答案改写为"未找到"的那个步骤。它在控制流（`agent/agent.py`）中强制执行，而不是靠提示词。参见[防编造机制](/zh/docs/concepts/anti-fabrication)。
+
+### Chunk store
+
+基于 sqlite 的叙事文档 chunk 存储（`retrieval/chunking/chunk_store.py`）。每个 chunk 携带 `doc_id` + `source_locator`（NOT NULL）以及元数据（`title`、`entity`、`period`、`sensitivity` 等）。当前行还持久化 `parent_id`、`heading`、`window_text` 和 `parent_locator`，用于仅供生成使用的 small-to-big/窗口扩展。
+
+### Economy 检索模式
+
+`economy` / `bm25` / `lexical` 服务预设。它既不构造 embedding 后端也不构造向量库，仅执行词法检索。
+
+### 澄清网关（Clarification gateway）
+
+该步骤（`clarify_scope`，`agent/intent.py`）通过一种刻意的不对称来决定：是_先追问_（缺失指标）、_带着显式假设作答_（缺失实体/期间），还是_拒绝_（作用域之外的实体）。
+
+### 复合（路由）
+
+一个既是数值型又是叙事型的问题（识别出的指标 + 叙事线索）。agent 先运行结构化路径，再追加一个叙事归因部分。
+
+### 双通道
+
+结构化数值路径 + 叙事 RAG 路径，二者确定性地运行，并且——对复合问题——进行比较与合并。参见[双通道](/zh/docs/concepts/dual-channel)。
+
+### `dim_key`
+
+对事实的_身份_维度（`metric`、`entity`、`channel`、`period`）计算出的规范化排序 JSON 自然键。它是事实存储中 `UNIQUE` upsert 的冲突键；仅存在于存储层，写入时重新计算——绝不是 `Fact` 的字段。
+
+### `fact_metric`
+
+存放所有结构化数值事实的 sqlite 表，每行对应一个指标 × 实体 × 期间 × 渠道组合，并带有完整血缘（`source_doc_id`、`source_locator`）。由 `storage/fact_store.py` 支撑。
+
+### FAQ 短路
+
+一个经 SME 审核的问题→答案缓存（`service/faq/`），绕过 LLM，位于防编造机制守卫之前、保守排除规则之后。参见 [FAQ 短路](/zh/docs/concepts/faq-short-circuit)。
+
+### `found` / `not_found` / `unrecognized_param`
+
+`query_metric` 工具返回的三态：存在值（`found`）、无匹配行（`not_found`），或某个参数无法归一化为受控代码（`unrecognized_param`）。结构化通道绝不返回猜测值。
+
+### 术语表（同义词归一化）
+
+将中/英/缩写同义词归一化为受控指标 / 实体 / 期间代码的映射层（`common/glossary.py`）。对任何无法识别的输入返回 `None` 而不是猜测——它是结构化通道的入口。
+
+### 本方公司 / `CompanyProfile`
+
+部署方自己的公司身份、指标、实体和竞争对手列表，从配置（`config/company.example.toml`）加载。任何地方都没有硬编码的公司；"ACME" 只是虚构的演示 profile。
+
+### 意图槽位（Intent slots）
+
+由意图解析器从问题中提取、用于路由和查询的四个解析槽位——`metric`、`entity`、`period`、`channel`（`agent/intent.py`）。
+
+### 历史轮次（History turn）
+
+传给 `answer_question(history=...)` 或 `/v1/ask` 的 `(role, text)` 元组。历史仅作为 LLM 生成上下文；它被排除在意图/安全决策、检索查询和证据之外。
+
+### IR / StyledGrid
+
+文档在被摄取进事实存储和 chunk 存储之前，被抽取成的冻结中间表示（感知样式与颜色）。
+
+### `IntentParser`（Protocol）
+
+意图提取的可插拔缝（ADR 0010）。默认是零 LLM、配置驱动的 `RuleIntentParser`。**安全不可插拔**——安全门独立于解析器，从原始问题重新推导作用域。
+
+### Listwise 重排
+
+可选的第二遍重排器（`retrieval/rerank/listwise_rerank.py`），将头部候选发送给 LLM 评审进行相关性排序，任何失败都回退到 RRF 顺序。`RESTRICTED` 候选绝不进入评审提示词。
+
+### MockProvider
+
+确定性、离线的 `LLMProvider` 实现（`agent/llm_provider.py`）。让核心在没有 API key 的情况下完全离线运行——演示和测试的默认选择。
+
+### 叙事通道
+
+面向"为什么 / 发生了什么"类问题的 RAG 路径：混合检索 → 可选重排 → 带引用的合成。默认链是纯 BM25 + RRF（未接入向量后端）。
+
+### 元数据过滤器
+
+对 chunk 元数据的经过校验的收窄谓词。支持的运算符为 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte` 和 `between`；过滤保持传入结果的顺序。
+
+### 多索引检索
+
+逐库检索后进行 RRF 融合。每个结果保留 `library_id` 来源；路由失败时回退到所有已配置的库。
+
+### 父子扩展
+
+Small-to-big 检索：由子块决定排名和引用，而持久化的父块/窗口文本成为单独的、仅供生成使用的 `prompt_text`。受限子块与其窗口一起被丢弃。
+
+### 来源溯源（Provenance）
+
+每个事实、chunk 和答案携带的 `source_doc_id`（chunk 为 `doc_id`）+ `source_locator`。端到端携带，绝不丢弃。参见[来源溯源](/zh/docs/concepts/provenance)。
+
+### `Protocol` 缝
+
+一个类型化的 `Protocol` 边界，在此注入外部依赖（LLM provider、embedding 后端、listwise 评审、OCR 后端、叙事检索器、任务队列）。核心不 import 任何 SDK，只依赖这些抽象。
+
+### 预览协议 v1
+
+仅用于展示的工作流投影，包含版本、脱敏后的节点/边和确定性几何信息。它不包含任何提示词、变量、provider、凭据或可执行配置。
+
+### `query_metric`
+
+结构化通道的 function-calling 工具（`agent/query_tools.py`）。通过术语表归一化其参数，查询 `fact_metric`，并返回带血缘的三态结果——绝不返回编造的数字。
+
+### Reciprocal Rank Fusion（RRF）
+
+在混合检索中融合 BM25 与向量排名的排名融合方法（`rrf_fuse`，`k=60`）；每个排名为条目的融合得分贡献 `1 / (k + rank)`。
+
+### RESTRICTED 隔离
+
+`RESTRICTED` 级内容在到达提示词之前，会在两个出口（`retrieval/link` 和 `retrieval/rerank`）被剥离的不变量。参见 [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)。
+
+### 审核队列
+
+面向低置信度或存在冲突的已摄取条目的人工（SME）审核队列状态机（`ingestion/review/`）。与异步作业队列不同；事实的 `review_status`（如 `pending`、`approved`、`rejected`、`blocked`）控制其查询可见性。
+
+### 安全门
+
+确定性、永不可插拔的前门（`agent/security_gate.py`，ADR 0010），通过最长匹配检测外部/竞争对手实体，用等长空格掩码它们，并在任何工具 / 检索器 / LLM 调用之前拒绝作用域之外的问题。
+
+### 敏感级别
+
+逐 chunk 的分级（`common/sensitivity.py`）：默认 `INTERNAL`，由确定性、配置驱动、失败安全的信号升级为 `RESTRICTED`。
+
+### 结构化通道
+
+确定性的数值路径：术语表归一化 → 对 `fact_metric` 存储执行 `query_metric` → 从事实值渲染答案，并附带血缘。绝不臆造数字。
+
+### 工作流目录
+
+由包持有、供 scaffold 命令和网站使用的模板。它包含 7 个精选工作流和 993 个生成的描述符，覆盖 39 个行业、27 个用例和五种原型。上游 Dify/n8n 页面仅作为来源元数据；其工作流配置既不再分发，也不会在运行时下载。
+
+### 工作流脚手架
+
+一个纯配置操作：显式选择或语义匹配目录模板，否则生成固定的 Dify 0.6 `start → llm → end` 图。它返回配置，但既不写入也不执行；CLI 单独负责安全的文件输出。

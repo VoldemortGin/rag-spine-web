@@ -1,0 +1,140 @@
+---
+title: 工作流
+description: 自然语言脚手架、1,000 模板目录、JSON/YAML/TOML 归一化、Dify 与 n8n 兼容、preview v1，以及执行边界。
+---
+
+RAGSpine 的工作流层承担三项彼此独立的职责：
+
+1. 从命令行或 HTTP API **描述或选择**一个工作流。
+2. 在不执行的前提下对配置进行**归一化、检查、转换与编译**。
+3. 仅通过一个显式的、由服务端控制的、默认关闭的执行面来**运行**。
+
+让这三项职责彼此分离，网站就可以安全地渲染模板，而无需接收 provider
+密钥或执行来自市场的代码。
+
+## 从自然语言生成脚手架
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+ragspine workflow create "invoice extraction and approval" --format json -o invoice.json
+```
+
+`scaffold_workflow(description, ...)` 会先尝试匹配目录。显式指定 `template_id`
+则以置信度 `1` 选中该模板。否则，复用模板需要同时满足分数阈值和
+胜出者差距。未匹配时会产出一个固定的、经转义的 Dify 0.6 `start → llm → end` 图；它
+不会让模型去发明可执行代码。描述限制为 4,096 个字符，
+无效的 Unicode/NUL 输入会被拒绝。
+
+回退产物包含导入后必须配置的模型要求。它绝不会从描述中接收
+API 密钥、provider base URL 或任何凭据。
+
+### 匹配器
+
+- `lexical`：确定性的 BM25，外加受控的双语分类法别名。
+- `onnx`：经 FastEmbed 的语义匹配；需要 `[embed-onnx]`，首次使用时可能下载/缓存
+  模型。
+- `auto`：ONNX 可用时优先使用，否则回退到词法匹配。
+
+## 1,000 个模板意味着什么
+
+内置目录包含 **7 个人工精选模板和 993 个生成模板**。生成的
+描述符恰好覆盖 **39 个行业**、**27 个用例**，以及五种原型：
+`analysis`、`extraction`、`routing`、`synthesis` 与 `transformation`。
+
+目录在 Spine 仓库中编写。Dify Marketplace 与 n8n 页面可以作为
+研究/溯源参考被记录，并附带观察到的热度元数据，但 RAGSpine 不会复制
+它们的 YAML、提示词、凭据或长描述。运行时既不下载也不
+执行任何上游工作流。这 993 个生成描述符由包资源物化为
+受约束的 Dify 工作流。
+
+目录加载会校验标识符与 SHA-256 完整性、扫描机密、限制节点与
+provider/插件的形态，并返回防御性副本。标注为可运行的模板不含
+环境/会话变量或不支持的特性；外部模型配置
+仍然是部署方的责任。
+
+## JSON、YAML 与 TOML
+
+`parse_workflow` 接受文本或字节，外加显式的 `json`、`yaml` 或 `toml` 格式。
+`load_workflow` 按 `.json`、`.yaml`、`.yml` 或 `.toml` 扩展名选择格式。所有格式都归一化
+为一个 JSON 兼容的 `dict[str, object]`。
+
+自动文本检测把以 `{` 开头的内容识别为 JSON，否则尝试 YAML。TOML 必须
+显式指定或从 `.toml` 文件加载。JSON 与 YAML 的重复键会被拒绝；YAML 使用
+安全加载器。非有限数值、不支持的值以及过大的结构都会安全地失败
+关闭。
+
+| 限制             |              取值 |
+| ---------------- | ----------------: |
+| 文档字节数       |             1 MiB |
+| 嵌套深度         |                32 |
+| 结构节点数       |            20,000 |
+| 单个字符串       | 256 Ki characters |
+| YAML 别名        |                64 |
+
+文件加载会拒绝符号链接、特殊文件与替换竞争。`dump_json` 与
+`dump_dify_yaml` 产出确定性的、经校验的输出；生成的 YAML 不含别名。
+
+## Dify 兼容
+
+Dify 配置是主要的工作流交换形态。编译器遵循
+解析 → 中间表示 → 优化/代码生成的流程，支持 Dify workflow 与
+advanced-chat 图：
+
+```bash
+ragspine dify analyze workflow.toml
+ragspine dify compile workflow.yml --target ragspine
+```
+
+分析与编译都不会执行工作流。编译器的 Pydantic 边界需要
+`[dify]`，除非它已由 `[service]` 提供。
+
+## n8n 转换
+
+Python 与 HTTP 两个转换面都支持 `n8n_to_dify` 与 `dify_to_n8n`。转换是
+纯函数式的，对无法精确表达的语义会返回警告。n8n 源数据
+保留在 `_n8n` 节点元数据与顶层 `x_n8n` 数据中，以支持往返转换。这并不
+意味着任意 n8n 工作流都能在 RAGSpine 中执行。
+
+## Preview 协议 v1
+
+`ragspine workflow preview ID` 与工作流 HTTP 响应暴露的是一个**仅供展示的投影**：
+
+```json
+{
+  "preview_schema_version": 1,
+  "nodes": [
+    { "id": "start", "title": "Start", "type": "start", "x": 0, "y": 0, "width": 240, "height": 96 }
+  ],
+  "edges": []
+}
+```
+
+节点只包含 `id`、`title`、`type`、几何信息与可选的 `parent_id`。边只包含
+`id`、`source`、`target` 与可选的 `label`。该投影刻意省略提示词、
+变量、provider 配置与凭据。几何信息是确定性的；校验会拒绝
+重复 ID、缺失端点与父级环。上限为 256 个节点、512 条边，以及每个
+展示字符串 512 个字符。
+
+Preview v1 不是可执行的工作流格式。消费方应当依据
+`preview_schema_version` 分支处理，并把未知版本视为不受支持。
+
+## HTTP 目录与脚手架
+
+- `GET /v1/workflow-templates`：仅分页元数据，每页最多 100 条，支持缓存与
+  弱 ETag。
+- `GET /v1/workflow-templates/{template_id}`：规范化工作流、Dify YAML 与 preview v1。
+- `POST /v1/workflow-scaffold`：描述/模板选择、匹配元数据、工作流、YAML、
+  配置要求、警告与预览。它绝不执行结果。
+
+## 执行边界
+
+Dify 与 n8n 的运行路由在 `RAGSPINE_DIFY_RUN_ENABLED=true` 之前返回 `403`。provider 与
+注册的 Dify 应用工作流路径在服务端配置；客户端无法提交 provider
+对象或 API 密钥。编译先通过静态闸门，再在配置的
+隔离模式下运行。默认的 `inprocess` 模式是受限的 Python 边界，不是安全
+容器；Linux 可选择启用子进程隔离。
+
+n8n 兼容的 `/webhook/{path}` 路由有意不做认证，以匹配 webhook
+语义。它只考虑已存储的激活工作流，并仍然受同一个默认关闭的
+执行闸门约束。切勿在没有与你的部署相称的入口认证/限流的情况下
+直接暴露它。

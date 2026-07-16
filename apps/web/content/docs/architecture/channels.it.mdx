@@ -1,0 +1,74 @@
+---
+title: Canali
+description: Fatti strutturati, recupero narrativo, risposte composite e utilità per grafi consapevoli della provenienza.
+---
+
+RAGSpine utilizza meccanismi di evidenza diversi per i fatti numerici e per il testo esplicativo. L'agente
+seleziona `structured`, `narrative` o `composite`; le utilità per grafi rimangono una superficie di supporto
+esplicita anziché un quarto ramo di instradamento nascosto.
+
+## Canale strutturato
+
+`query_metric` normalizza metrica, entità, periodo e canale tramite glossari controllati e
+interroga `FactStore`. Il suo risultato è esattamente uno tra `found`, `not_found` o
+`unrecognized_param`.
+
+- In caso di `found`, la prosa numerica finale viene ricostruita a partire dal fatto memorizzato e riporta
+  `source_doc_id`/locator.
+- In caso di `not_found`, il risultato è un rifiuto fisso privo di numeri.
+- In caso di parametro non riconosciuto, la risposta identifica l'input non supportato invece di tirare a indovinare.
+
+Il modello non può fornire un numero sostitutivo per una ricerca fallita.
+
+## Canale narrativo
+
+```text
+question
+  → optional deterministic/automatic metadata filters
+  → optional library router
+  → per-library lexical and optional vector search
+  → reciprocal-rank fusion
+  → optional rerank / postprocess
+  → child-hit expansion for parent/window prompt context
+  → cited generation
+```
+
+Le modalità di recupero `economy`, `bm25` e `lexical` non costruiscono alcun backend di embedding né alcun vector store.
+Le modalità hybrid/auto possono utilizzare embedding ONNX quando installati. Gli operatori di filtro sui metadati sono `eq`,
+`ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte` e `between`; il filtraggio si limita a restringere i risultati e preserva
+l'ordine in ingresso.
+
+`MultiIndexRetriever` effettua ricerche indipendenti nelle librerie instradate, fonde i loro risultati tramite RRF e conserva
+la provenienza `library_id`. Se l'instradamento fallisce, effettua la ricerca in tutte le librerie registrate anziché
+restituire silenziosamente nulla.
+
+### Evidenza parent-child e a finestra di frasi
+
+I chunk piccoli producono corrispondenze precise, mentre un elemento padre o una finestra possono migliorare il contesto di generazione. Lo
+store dei chunk persiste `parent_id`, `heading`, `window_text` e `parent_locator`. Uno snippet restituito
+mantiene i valori `text`, `chunk_id` e `source_locator` del **figlio**; l'espansione viene collocata in
+`prompt_text` separati, con `parent_locator` come riferimento a ritroso. Le citazioni puntano quindi al
+figlio corrispondente, non a un aggregato inventato.
+
+I figli soggetti a restrizioni vengono scartati prima della costruzione dello snippet. Il contenuto del loro padre/finestra viene
+scartato insieme a essi, quindi l'espansione non può aggirare l'isolamento.
+
+## Percorso composito
+
+Una domanda composita esegue separatamente i percorsi dei fatti strutturati e dell'attribuzione narrativa,
+quindi unisce le loro risposte e i relativi elenchi di fonti. La prosa narrativa non può promuoversi a evidenza
+numerica strutturata. La cronologia della conversazione è esclusivamente contesto di generazione e, allo stesso modo, non può diventare
+evidenza.
+
+## Utilità per grafi
+
+Il dominio `graph` fornisce grafi di relazioni strutturate deterministici per aggregazioni (roll-up), confronti
+e tracciamento delle derivazioni, oltre all'estrazione opzionale di relazioni narrative. Gli archi derivati dal modello sono contrassegnati
+come `model-derived` e `unverified`, preservano la lineage fornita dal chiamante e sono vagliati dallo stesso
+confine di sicurezza. Gli helper GraphRAG non sostituiscono il router a doppio canale.
+
+## I grafi dei flussi di lavoro sono separati
+
+L'anteprima dei flussi di lavoro v1 è una proiezione UI redatta di un grafo compatibile con Dify. Descrive esclusivamente nodi,
+archi, etichette e geometria; non è evidenza narrativa, né una topologia del motore, né un formato
+eseguibile. Vedi [Flussi di lavoro](/it/docs/guides/workflows#protocollo-di-preview-v1).

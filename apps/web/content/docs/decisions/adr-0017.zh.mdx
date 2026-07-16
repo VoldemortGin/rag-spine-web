@@ -1,0 +1,99 @@
+---
+title: ADR 0017 — 对话历史只作为生成上下文
+description: 新增一等公民的历史参数，同时不允许先前轮次进入意图解析、检索、安全决策或证据。
+---
+
+**状态：** accepted
+
+**日期：** 2026-07-14
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
+
+受引擎 ADR 0005（新能力位于逐字节一致的默认路径之旁）与引擎
+ADR 0010（确定性意图/安全独立于面向模型的上下文）约束。它服务于
+spinestudio ADR 0006 暴露出的多轮对话产品缺口。
+
+<Callout type="info">
+  ADR 编号是仓库本地的。本源记录中的引用指向 RAGSpine 引擎 ADR；
+  网站历史上的 [ADR 0012](/zh/docs/decisions/adr-0012) 是另一份家族级记录。
+</Callout>
+
+## 背景
+
+`answer_question(question, store, provider, ...)` 曾是单次且无状态的，没有历史
+参数。当产品层加入多轮聊天时，给模型提供先前上下文的唯一办法
+就是把历史拼接进 `question` 字符串。
+
+这污染了确定性意图解析。前一个回答中的数字（比如 `1320`）可能
+被解析成期间 `FY1320`，悄悄把单指标查询变成错误的比较，破坏
+确定性路由与防编造机制的正确性。因此产品层一直让历史
+注入保持默认关闭，等待引擎暴露一个一等公民参数，在
+结构上把解析输入与生成上下文分开。
+
+## 决策
+
+为 `answer_question` 新增可选的 `history: Sequence[tuple[str, str]] | None = None`
+关键字参数。每一轮是 `(role, text)`，预期角色为 `user` 或 `assistant`。同样的
+形状与语义贯通到服务端的 `/v1/ask` 与 `/v1/ask/stream`，作为 `AskRequest.history`。
+
+### 默认 `None` 时逐字节一致
+
+`_history_messages(None) == []`。没有历史时，工具循环与叙事消息序列
+不变。`tests/agent/test_history.py::test_default_none_is_byte_identical` 中的参数化回归
+覆盖了结构化命中、未命中、多子任务与叙事行为。
+
+### 历史绝不进入确定性意图解析
+
+解析器只看到当前的 `question`：`intent = parser.parse(question, …)`。安全
+门控同样只对该原始问题重新筛查。`_history_messages` 把先前轮次转换为 OpenAI 形状的
+消息，插入到 `_run_tool_loop` 与 `_run_narrative` 中系统提示词与当前用户轮次
+之间。当前问题始终是最后一条用户消息，因此 MockProvider 的"取最后一条
+用户轮次"解析不受污染。
+
+对外的历史形状是扁平的 `(role, text)` 元组。它无法携带 system/tool 角色，也
+无法走私 `tool_calls`；未知角色归一化为 user。这种解析输入与
+生成上下文之间的结构性切分解决了产品痛点。
+
+### 防编造机制在历史面前依然成立
+
+结构化通道依旧从工具事实确定性地渲染命中答案，或把
+未命中改写为 not-found。历史不产生任何证据；溯源仍然只指向真实的工具/检索
+命中。一个反向测试把一条编造的事实——`Shanghai FY2099 REVENUE = 999`——放进历史，
+并断言知识库未命中时仍然拒答、绝不引用 `999`，且 `sources` 为空。
+
+叙事检索查询仍然只是当前问题。历史绝不进入检索。
+
+### RESTRICTED 双出口隔离保持不变
+
+历史只新增生成上下文消息。它从不触碰检索，因此 `link/` 与
+`rerank/` 两个出口仍会移除 RESTRICTED 内容。`tests/conformance/test_history_isolation.py`
+绑定了两种历史形式，并包含一个非空洞的泄漏检索器反向证明。
+
+签名仍在引擎的上手复杂度预算之内：`history` 是仅限关键字且带
+默认值的参数，所以首次回答的上手成本不变。对应的引擎记录是
+[`docs/adr/0012-onboarding-complexity-budget.md`](https://github.com/VoldemortGin/ragspine/blob/main/docs/adr/0012-onboarding-complexity-budget.md)，
+而不是网站上同编号的家族 ADR。
+
+## 已考虑并否决的备选方案
+
+- 继续把历史拼接进 `question`：这正是缺陷本身；它污染确定性解析
+  与防编造机制。
+- 接受任意 OpenAI `list[dict]` 消息：调用方可能注入 `system`、`tool_calls` 或
+  编造的工具结果。扁平的 `(role, text)` 元组被刻意设计为无法承载那种形状。
+- 把历史交给意图解析器做指代/省略消解：这会重新打开污染
+  路径。确定性解析只依赖当前问题；可选的 `ConversationSession`
+  槽位前传是另一回事。
+- 把历史喂给叙事检索：历史会变成一个未被引用的证据来源。
+  检索查询仍然只是当前问题。
+
+## 后果
+
+- 引擎拥有了一等公民的多轮上下文参数；产品可以启用历史而不
+  破坏确定性路由或防编造机制。
+- 逐字节一致的默认行为、解析/上下文分离、防编造机制以及 RESTRICTED
+  隔离都由测试绑定。
+- 新增产物为 `answer_question(history=)`、`_history_messages`、两条 ask 路由上的
+  `AskRequest.history`、`tests/agent/test_history.py`、`tests/conformance/test_history_isolation.py`，以及
+  `tests/service/api/test_api_ask_history.py`。
+- `ConversationSession` 保持不动。它是正交的，将来可以从被记住的
+  轮次构建历史列表。

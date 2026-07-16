@@ -1,0 +1,92 @@
+---
+title: 'ADR 0012: Adottare la giunzione LLM di corespine — chat / ChatCompletion al posto di create_message / ProviderResponse'
+description: Spostare il Protocol LLMProvider nel core condiviso della famiglia (corespine) e adottare la forma chat-completions di OpenAI; aggiungere un throttle TPM attivo opzionale tramite RateLimitedProvider di corespine.
+---
+
+> Stato: **accettato** · Data: 2026-06-20
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire con un nuovo ADR, non modificare.
+
+Correlato a [0009](/it/docs/decisions/adr-0009) (politica su framework/dipendenze)
+e a [0011](/it/docs/decisions/adr-0011) (adozione del python-project-standard).
+Rilasciato in **rag-spine 0.3.0**.
+
+## Contesto
+
+RAGSpine ha sempre isolato ogni SDK esterno dietro un `Protocol` tipizzato, con un
+core offline privo di SDK e un `MockProvider` predefinito (ADR [0005](/it/docs/decisions/adr-0005) /
+[0009](/it/docs/decisions/adr-0009)). La giunzione `LLMProvider` era definita **all'interno** di ragspine
+(`agent/llm_provider.py`) con un metodo specifico di ragspine:
+
+```python
+def create_message(*, system, messages, tools) -> ProviderResponse: ...
+```
+
+Due pressioni sono confluite:
+
+1. **Una famiglia di pacchetti fratelli ora condivide le stesse primitive.** ragspine,
+   [`spineagent`](https://pypi.org/project/spineagent/) (orchestrazione multi-agente) e il
+   sottile core condiviso [`corespine`](https://pypi.org/project/corespine/) devono tutti comunicare con un
+   LLM attraverso un unico contratto di provider. Duplicare un Protocol di provider su misura per ciascun pacchetto avrebbe
+   frammentato il contratto e le giunzioni di test. corespine è il core condiviso deliberatamente sottile
+   della famiglia, pensato esattamente per queste primitive neutrali rispetto al dominio.
+2. **La forma su misura di `create_message(*, system, messages, tools) -> ProviderResponse` era
+   gratuitamente non standard.** Estrarre il prompt di sistema come argomento separato e
+   inventare un envelope `ProviderResponse` divergeva dalla forma chat-completions di OpenAI, ampiamente
+   compresa, che gli SDK reali (e il modello mentale di ogni autore di adapter) già
+   parlano — attrito senza alcun beneficio.
+
+Separatamente, l'unica difesa contro i rate limit era il backoff **passivo** sui 429 di `max_retries` dell'SDK,
+che reagisce *dopo* che un limite è stato raggiunto. Un client che voglia restare *sotto* un tetto TPM
+contrattuale non aveva alcuna leva interna alla libreria.
+
+## Decisione
+
+**Spostare il Protocol `LLMProvider` in corespine e adottare la forma chat-completions di OpenAI.**
+ragspine assume una dipendenza runtime rigida da `corespine>=0.1.0` (la sua unica non opzionale) e
+**riesporta** la giunzione da `agent/llm_provider.py`, in modo che i punti di import esistenti
+(`from ragspine.agent.llm_provider import LLMProvider, MockProvider, AnthropicProvider`) continuino a
+funzionare. Concretamente:
+
+- Il metodo unico diventa
+  `chat(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion`.
+  Il prompt di sistema è semplicemente il primo messaggio `{"role": "system", ...}` — nessun argomento separato.
+- `ProviderResponse` viene sostituito dall'envelope `ChatCompletion` di corespine: `choices` (ciascuno una
+  `Choice` che incapsula un `ResponseMessage` con `content` + `tool_calls`), più `usage`, `model`
+  e `id` — tutte dataclass frozen, la forma chat-completions standard.
+- `AnthropicProvider` continua a importare in modalità lazy l'SDK `anthropic`, ma ora mappa
+  `messages`/`tools` nella forma OpenAI sull'API Messages di Anthropic e riporta la risposta in un
+  `ChatCompletion`. `ProviderError` diventa una sottoclasse di `corespine.CorespineError`.
+- Il `MockProvider` offline e il loop di tool-use (`provider.chat(messages, tools=tools)`)
+  vengono aggiornati in parallelo; la protezione di prevenzione delle risposte inventate resta intatta (non si è mai fidata della prosa del provider
+  per il numero).
+
+**Aggiungere un throttle TPM attivo opzionale.** Una nuova variabile d'ambiente `RAGSPINE_TOKENS_PER_MINUTE` (int,
+default `0` = disattivato) fa sì che `build_provider` avvolga il provider costruito nel
+`RateLimitedProvider` di corespine — un limite soft a finestra scorrevole che blocca prima di una chiamata `chat` quando la
+finestra non ha budget disponibile. È **complementare** al `max_retries` passivo dell'SDK: uno resta
+proattivamente sotto il tetto, l'altro recupera da uno sforamento.
+
+## Alternative considerate (respinte)
+
+- **Mantenere la giunzione su misura `create_message` / `ProviderResponse` in ragspine.** Respinta — essa
+  frammenta il contratto attraverso la famiglia e resta inutilmente non standard. La giunzione è una
+  primitiva neutrale rispetto al dominio da manuale, che appartiene al core condiviso.
+- **Definire la giunzione in ragspine e far dipendere i pacchetti fratelli da ragspine.** Respinta — inverte
+  la direzione delle dipendenze (un pacchetto RAG diventerebbe una dipendenza di un pacchetto agente
+  generico). corespine è il punto di raccolta concordato per le primitive condivise; le frecce puntano *verso* di esso.
+- **Affidarsi soltanto a `max_retries` dell'SDK per il rate limiting.** Respinta — il backoff passivo non può mantenere
+  un client sotto un tetto TPM contrattuale; i due meccanismi sono complementari, non ridondanti.
+
+## Conseguenze
+
+- **Breaking per i provider personalizzati.** Chiunque abbia implementato `create_message(*, system,
+  messages, tools) -> ProviderResponse` deve migrare a `chat(messages, *, tools=None) ->
+  ChatCompletion` (importando le dataclass da `corespine`, oppure tramite la riesportazione in
+  `ragspine.agent.llm_provider`). La guida [Punti di estensione](/it/docs/reference/extension-points#llmprovider)
+  contiene un esempio OpenAI completo nella nuova forma.
+- ragspine acquisisce esattamente una nuova dipendenza non opzionale (`corespine>=0.1.0`, che a sua volta ha
+  `dependencies` vuote). Il percorso predefinito offline-first e privo di SDK pesanti è preservato.
+- Il contratto di provider è ora condiviso in tutta la famiglia Spine, quindi un provider scritto per un
+  pacchetto funziona per tutti.
+- `RAGSPINE_TOKENS_PER_MINUTE` è l'unica nuova superficie di configurazione; tutto il resto è interno.

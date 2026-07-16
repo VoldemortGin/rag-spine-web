@@ -1,0 +1,110 @@
+---
+title: ADR 0016 — Configurazione della produttizzazione del recupero
+description: Filtraggio dei metadati, instradamento multi-indice, preset parent-child e modalità economica, con la preservazione di ogni invariante del recupero.
+---
+
+**Stato:** accettato
+
+**Data:** 2026-07-14
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Da sostituire, non modificare.
+
+Parte della [direzione di prodotto dell'ADR 0002](/it/docs/decisions/adr-0002). Vincolato da
+[ADR 0005](/it/docs/decisions/adr-0005) (nuova capacità isolata dal percorso predefinito identico byte per byte)
+e da [ADR 0010](/it/docs/decisions/adr-0010) (sicurezza/isolamento deterministici indipendenti dall'output
+del modello). Rispecchia il meta-pattern delle giunzioni dell'[ADR 0015](/it/docs/decisions/adr-0015).
+
+## Contesto
+
+Vogliamo eguagliare la superficie rivolta al prodotto del recupero dei dataset di Dify—filtraggio dei metadati,
+instradamento tra più knowledge base, segmentazione parent-child e modalità economica rispetto a quella di alta qualità—mantenendo
+al contempo intatti i tre invarianti a livello di codice di RAGSpine per ogni nuova modalità: prevenzione delle risposte inventate,
+provenienza delle fonti e isolamento a doppia uscita RESTRICTED (`link/` + `rerank/`). Il percorso predefinito offline
+a zero rete deve rimanere identico byte per byte, e la conformance parametrizzata deve vincolare ogni modalità in modo che
+non possa far regredire silenziosamente un invariante.
+
+## Decisione
+
+Quattro aggiunte, tutte deterministiche offline, opt-in e con predefinito identico byte per byte. Ciascuna segue il
+pattern di giunzione della famiglia: Protocol + implementazione predefinita deterministica a zero dipendenze + factory `make_*` +
+selettore d'ambiente + conformance parametrizzata.
+
+### 1. Filtraggio dei metadati
+
+`retrieval/filtering/` aggiunge `MetadataFilter`/`FilterCondition`: una fase deterministica precedente allo scoring
+con `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte` e `between`. Le stringhe si confrontano
+in ordine lessicografico e un campo mancante non produce corrispondenza. `apply` restituisce sempre una
+sottosequenza che preserva l'ordine, quindi può solo restringere. Poiché entrambe le uscite rimuovono comunque il contenuto RESTRICTED, persino un filtro che
+seleziona contenuto riservato non può farlo emergere.
+
+È collegato tramite `HybridRetriever.search(metadata_filter=)` e
+`NarrativeIndex.retrieve(metadata_filter=)`; il predefinito `None` è identico byte per byte. `automatic.py` è una
+giunzione opt-in: il Protocol `FilterExtractor` più `make_filter_extractor` (predefinito `none` → `None`,
+`ControlledVocabFilterExtractor` offline opt-in, estrattore LLM come adattatore opt-in). Il suo output può
+essere soltanto un `MetadataFilter`, strutturalmente incapace di raggiungere il canale delle risposte, e può solo restringere.
+
+### 2. Instradamento multi-indice e multi-percorso
+
+`MultiIndexRetriever` in `retrieval/routing/multi_index.py` implementa il Protocol
+`NarrativeRetriever` della linea A. Può distribuirsi su più librerie ed eseguire la fusione RRF inter-libreria
+usando `lexical.rrf_fuse`; ogni risultato riceve `library_id` in modo che la provenienza conservi la libreria di origine.
+
+La modalità instradata usa una giunzione `LibraryRouter` e `make_library_router`. Il predefinito `none` si distribuisce su tutte;
+il deterministico `KeywordLibraryRouter` effettua la corrispondenza della query con le descrizioni delle librerie; un router LLM
+è opt-in. Una sovrapposizione nulla ripiega su tutte le librerie, così l'instradamento non impoverisce mai il recall. L'isolamento è
+ereditato: il recuperatore di base di ciascuna libreria ha già rimosso il contenuto RESTRICTED, quindi la fusione può solo
+trasmettere un sottoinsieme a valle.
+
+### 3. Preset di chunk parent-child
+
+`ParentChildChunker` in `chunking/domain_presets.py` (alias `parent_child` e
+`small_to_big`) è una sottile sottoclasse di `LayoutAwareChunker`. Sovrascrive soltanto `_child_extra` per allegare
+`window_text`, il testo completo della sezione padre, e `parent_locator`, l'estensione reale dei paragrafi
+della sezione. Una corrispondenza precisa sul figlio può quindi espandersi in modo deterministico al contesto del padre, con la provenienza
+che punta a un localizzatore reale.
+
+La classe base `Chunk` acquisisce `parent_locator` additivo con un valore predefinito vuoto più un hook sovrascrivibile.
+I chunker predefiniti non impostano nessuno dei due valori e restano identici byte per byte. Ciò utilizza la
+conformance di provenienza `CHUNKER_IMPLS` esistente.
+
+### 4. Modalità economica
+
+`retrieval/mode.py` aggiunge `RetrievalMode` e `make_retrieval_mode`, selezionati da
+`ServiceConfig.retrieval_mode`. Il percorso puro-BM25 esistente (`embedding_backend=None`) diventa il
+preset esplicito `economy`. L'assemblaggio non costruisce alcun backend di embedding né vector store, quindi il costo
+di embedding è zero. `hybrid`/`vector` selezionano la superficie alternativa. Il predefinito `auto` significa ibrido con
+embedding assemblato secondo `ServiceConfig.embedding`, preservando il comportamento precedente.
+
+Ogni modalità è vincolata da conformance parametrizzata con una prova inversa non vacua:
+
+- `tests/conformance/test_metadata_filter_invariants.py`: restringimento/determinismo per singolo operatore e uno
+  stub di ampliamento che deve fallire.
+- `test_multi_index_isolation.py`: isolamento/provenienza per singolo router e una base con perdite che deve fallire.
+- `test_retrieval_mode_invariants.py`: isolamento/provenienza per singola modalità e zero embedding in modalità economica.
+
+Principio: **collocare le capacità rivolte al prodotto in giunzioni opt-in accanto al percorso predefinito, mai al suo interno;
+ereditare e dimostrare deterministicamente tutti e tre gli invarianti del recupero per ogni modalità.**
+
+## Alternative considerate (respinte)
+
+- Consentire all'estrazione automatica dei filtri di emettere qualcosa oltre alle condizioni di filtro, come riscritture delle risposte:
+  questo aprirebbe un canale di fabbricazione. Il suo tipo di ritorno è confinato a `MetadataFilter`.
+- Consentire al filtraggio di aggiungere o riordinare i candidati: l'ampliamento/riordino potrebbe far passare di nascosto contenuto RESTRICTED o
+  perturbare il predefinito identico byte per byte. `apply` è strettamente restrittivo e preserva l'ordine.
+- Rimuovere il contenuto RESTRICTED all'interno di `MultiIndexRetriever`: questo duplicherebbe l'uscita e rischierebbe divergenze.
+  L'uscita esistente di ciascuna libreria è responsabile dell'isolamento; la fusione non legge mai i chunk.
+- Reindirizzare immediatamente il parent-child verso l'espansione dello store al momento del recupero: al momento di questa decisione il
+  chunker non era collegato all'ingestione narrativa e i dati di gerarchia/finestra non erano persistiti. Il
+  preset ha prima introdotto il contesto del padre più un localizzatore reale. [ADR 0018](/it/docs/decisions/adr-0018)
+  completa successivamente quell'espansione a livello di store rimandata.
+- Usare un flag booleano `economy`: una modalità con nome e una factory si adattano al pattern di giunzione della famiglia ed espongono la
+  scelta come configurazione di prima classe.
+
+## Conseguenze
+
+- Il recupero acquisisce filtraggio dei metadati, instradamento multi-libreria, segmentazione parent-child e
+  preset economici/vettoriali, mentre il percorso offline predefinito rimane identico byte per byte e a zero rete.
+- Prevenzione delle risposte inventate, provenienza—inclusa la libreria di origine—e isolamento a doppia uscita RESTRICTED valgono
+  per tutte le nuove modalità e sono garantiti dalla conformance anziché dalla fiducia.
+- I nuovi artefatti sono `retrieval/filtering/`, `retrieval/routing/`, `ParentChildChunker`, `Chunk.parent_locator` e `_child_extra` additivi, `retrieval/mode.py`,
+  `ServiceConfig.retrieval_mode` e tre pacchetti di conformance.

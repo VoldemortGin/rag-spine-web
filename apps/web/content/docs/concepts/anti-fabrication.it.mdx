@@ -1,0 +1,94 @@
+---
+title: Prevenzione delle risposte inventate
+description: Quando il canale strutturato non restituisce alcun fatto trovato, l'orchestratore riscrive deterministicamente la risposta in "non trovato" — nel flusso di controllo, non in un prompt.
+---
+
+La prevenzione delle risposte inventate è l'invariante distintivo di RAGSpine: **il sistema non inventa mai un numero.**
+Quando il canale strutturato non restituisce alcun fatto `found`, l'orchestratore riscrive la risposta
+in un onesto "non trovato" — indipendentemente da ciò che il modello ha prodotto.
+
+<Callout type="warn">
+  **Garanzia.** Sul percorso strutturato, la risposta numerica viene sintetizzata deterministicamente a partire dal
+  valore del fatto. Se nessun fatto è `found`, la risposta è un rifiuto esplicito. La prosa del modello non è
+  mai la fonte di un numero.
+</Callout>
+
+## Vive nel flusso di controllo, non in un prompt
+
+Il prompt di sistema dice effettivamente al modello di chiamare `query_metric` e di rispondere "non trovato" quando
+lo strumento restituisce `not_found`. Ma un prompt è una richiesta, non una garanzia — un modello può
+ignorarlo. Per questo RAGSpine non vi fa affidamento. L'applicazione della regola avviene nel **codice**, in
+`agent/agent.py`:
+
+- `_structured_answer` suddivide i risultati degli strumenti. Se qualcuno è `found`, la risposta viene
+  costruita **a partire dai valori stessi dei fatti** — `实体 期间 指标（渠道）：值 单位（来源…）` —
+  e la risposta a testo libero del modello viene scartata interamente sul percorso "trovato".
+- Se nulla è `found` ma qualcosa è `not_found`, la risposta viene riscritta da
+  `_not_found_answer`.
+- Se un parametro era `unrecognized_param`, viene riscritta da `_unrecognized_answer`.
+
+```python
+# agent/agent.py — _structured_answer (paraphrased shape)
+found = [r for r in tool_results if r.get("status") == "found"]
+if found:
+    # deterministic synthesis from fact values — model prose is NOT used
+    return _render_from_facts(found)
+not_found = [r for r in tool_results if r.get("status") == "not_found"]
+if not_found:
+    return _not_found_answer(not_found[0]), []     # forced refusal
+unrecognized = [r for r in tool_results if r.get("status") == "unrecognized_param"]
+if unrecognized:
+    return _unrecognized_answer(unrecognized[0]), []
+```
+
+<Callout type="info">
+  Scartare la prosa del modello sul percorso **trovato** è di per sé una misura di prevenzione delle risposte inventate: un LLM
+  reale potrebbe altrimenti infilare nella sua prosa una cifra inventata aggiuntiva accanto a quella vera. La
+  risposta trovata viene generata esclusivamente dal valore del fatto. (Test di regressione:
+  `test_found_path_discards_fabricated_extra_number`.)
+</Callout>
+
+## Esempio di rifiuto onesto
+
+Chiedete un valore che i dati non contengono, e otterrete un rifiuto — mai un'ipotesi:
+
+```bash
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db \
+  "中国内地FY2025的REVENUE是多少"
+```
+
+```text
+查不到：REVENUE / ACME_CN / 2025（渠道 TOTAL）未在事实表中找到。
+为避免误导，不提供任何推测数字；可尝试调整期间或实体后重问。
+```
+
+Confrontate con un valore che **è** presente — la risposta contiene il numero deterministico
+e la sua linea di provenienza:
+
+```text
+ACME_CN FY2024 REVENUE：1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```
+
+## Semantica per percorso (non un singolo interruttore)
+
+La protezione viene applicata in modo diverso su ciascun percorso, intenzionalmente:
+
+| Percorso                                     | Meccanismo                                                              | Si fida della prosa del modello? |
+| -------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
+| **strutturato** (`_structured_answer`)        | trovato → generazione dal valore del fatto; non trovato → rifiuto forzato              | No                        |
+| **multi-sotto-attività** (`_multi_subtask_answer`) | ogni sotto-attività viene eseguita deterministicamente; non chiama mai l'LLM          | N/D                       |
+| **narrativo** (`_run_narrative`)             | si fida della sintesi ma **impone la citazione delle fonti**; nessuna riscrittura basata sui fatti trovati | Sì, con citazione forzata |
+
+## Come una richiesta segnala che la protezione è scattata
+
+La traccia rispettosa della privacy (vedere [Provenienza delle fonti](/it/docs/concepts/provenance) e
+`common/observability`) registra un booleano `fabrication_guard_triggered` — vero quando c'erano
+risultati degli strumenti ma **nessuno** era `found` (cioè la richiesta è ricaduta nel
+rifiuto `not_found` / `unrecognized`). Registra il flag, mai il testo della risposta o il
+valore del fatto.
+
+<Callout type="warn">
+  Anche il guasto del provider degrada onestamente. Se la chiamata all'LLM solleva una `ProviderError` (rete / API /
+  timeout), l'agente restituisce un messaggio di degrado fisso che non contiene **né numeri né ipotesi** —
+  non inventa mai nulla per colmare la lacuna.
+</Callout>

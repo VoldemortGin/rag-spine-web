@@ -1,0 +1,178 @@
+---
+title: Doppio canale
+description: Un canale strutturato/numerico deterministico e un canale RAG narrativo, unificati da un unico agente router che scompone le domande composite ed esegue entrambi.
+---
+
+RAGSpine risponde a due tipi di domanda fondamentalmente diversi con due meccanismi
+fondamentalmente diversi — e un singolo agente decide di quale (o di entrambi) una domanda ha bisogno.
+
+- **"Qual è il numero?"** → il **canale strutturato**: una tabella dei fatti più
+  function-calling. Deterministico, nessuna sintesi del valore.
+- **"Perché / cosa è successo?"** → il **canale narrativo**: recupero ibrido sui
+  chunk dei documenti, reranking listwise opzionale, poi sintesi LLM con citazioni.
+
+Il router risiede in `agent/agent.py` (`answer_question`); il parsing dell'intento e il
+gate di chiarimento risiedono in `agent/intent.py`.
+
+<Callout type="info">
+  I due canali non si fondono mai in un unico percorso "chiedi al modello". Il canale strutturato è l'unica
+  cosa autorizzata a produrre un fatto numerico, e lo fa senza fidarsi della prosa del modello — vedi
+  [Prevenzione delle risposte inventate](/it/docs/concepts/anti-fabrication).
+</Callout>
+
+## Come instrada l'agente
+
+Ogni domanda viene prima analizzata in **quattro slot di intento** da un parser a regole
+guidato dalla configurazione e senza LLM (`RuleIntentParser`, sostituibile dietro il Protocol `IntentParser`):
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: 'Codice metrica normalizzato (es. REVENUE) tramite il glossario; None se assente.',
+    },
+    entity: {
+      type: 'string | null',
+      description: 'Codice entità normalizzato (es. ACME_CN); None se assente.',
+    },
+    period: {
+      type: '(period_type, value) | null',
+      description: 'es. ("FY", "2024"), ("HY", "2024H1"), ("QUARTER", "2025Q1").',
+    },
+    channel: {
+      type: 'string',
+      description: 'Il valore predefinito è TOTAL (ad es. AGENCY / BANCA / TOTAL).',
+    },
+  }}
+/>
+
+L'instradamento viene deciso a partire dagli slot analizzati e da indizi lessicali (`parse_intent`):
+
+<Cards>
+  <Card title="strutturato">
+    Un intento numerico — è stato riconosciuto un `metric`, oppure un indizio numerico come “多少” / “what is”. La risposta
+    è il numero, proveniente dal fact store.
+  </Card>
+  <Card title="narrativo">
+    Un intento di attribuzione / regolamentazione / tendenza / “perché”. La risposta è sintetizzata dagli
+    snippet recuperati, ciascuno citato.
+  </Card>
+  <Card title="composito">
+    Entrambi allo stesso tempo — una metrica riconosciuta **e** un indizio narrativo (es. “perché il fatturato è calato?”). L'agente
+    esegue il percorso strutturato, poi aggiunge una sezione di attribuzione.
+  </Card>
+</Cards>
+
+Prima dell'instradamento, un **gateway di chiarimento** (`clarify_scope`) applica un'asimmetria
+deliberata:
+
+- **Metrica** mancante → _chiedi prima_ (indovinare la metrica sarebbe un errore sostanziale).
+- **Entità / periodo** mancanti → _rispondi esplicitando le assunzioni_ (per impostazione predefinita il gruppo
+  di riferimento / l'ultimo esercizio fiscale completo, esplicita l'assunzione, offri un restringimento con un clic).
+- **Entità fuori ambito / concorrente** → rifiuta prima che qualsiasi canale venga eseguito (vedi
+  [Isolamento RESTRICTED](/it/docs/concepts/restricted-isolation) e il gate di
+  sicurezza deterministico).
+
+## Il canale strutturato: uno stato tripartito `found` / `not_found` / `unrecognized`
+
+L'unica primitiva del canale strutturato che produce fatti è lo strumento `query_metric`
+(`agent/query_tools.py`). La sua funzione di esecuzione normalizza ogni parametro tramite il
+glossario, poi interroga lo store `fact_metric`. Restituisce uno di **tre** stati —
+mai una supposizione:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    Il valore esatto esiste. Restituisce il valore, l'unità, tutti i codici di dimensione controllati
+    e la lineage completa:
+
+    ```json
+    {
+      "status": "found",
+      "value": 1320,
+      "unit": "USD_M",
+      "metric_code": "REVENUE",
+      "entity": "ACME_CN",
+      "period_type": "FY",
+      "period": "2024",
+      "channel": "TOTAL",
+      "source": { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="not_found">
+    Ogni parametro è stato normalizzato, ma nessuna riga corrispondente nella tabella dei fatti. **Nessuna
+    interpolazione, nessuna inferenza** — l'agente riscrive questo esito come un rifiuto onesto.
+
+    ```json
+    {
+      "status": "not_found",
+      "normalized": { "metric_code": "REVENUE", "entity": "ACME_CN", "period": "2025", "channel": "TOTAL" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="unrecognized_param">
+    Un parametro non è stato normalizzabile in un codice controllato (il glossario restituisce
+    `None` invece di indovinare). Il parametro incriminato e il suo valore grezzo vengono indicati.
+
+    ```json
+    { "status": "unrecognized_param", "param": "entity", "raw": "some unknown company" }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  I normalizzatori del glossario (`normalize_metric` / `normalize_entity` / `normalize_period`) restituiscono
+  `None` per qualsiasi cosa che non riconoscono. Quel `None` diventa `unrecognized_param` — non viene mai
+  forzato in un codice ipotizzato come "migliore approssimazione".
+</Callout>
+
+## Il canale narrativo
+
+Quando la rotta è `narrative`, l'agente chiama un `NarrativeRetriever` iniettato
+(`_run_narrative`). La catena predefinita (`retrieval/`) è:
+
+<Steps>
+  <Step>
+    **Recupero ibrido** — Okapi BM25 con supporto CJK + un canale vettoriale iniettabile (predefinito: nessuno = puro
+    BM25), fusi con Reciprocal Rank Fusion (`rrf_fuse`, `k=60`), più riscrittura multi-query
+    guidata dal glossario.
+  </Step>
+  <Step>
+    **Reranking listwise** — un giudice listwise LLM opzionale (`listwise_rerank`) riordina i migliori
+    candidati; in caso di qualsiasi errore ripiega sull'ordine RRF.
+  </Step>
+  <Step>
+    **Sintesi con citazioni** — l'LLM risponde solo a partire dagli snippet forniti, e l'agente
+    aggiunge forzatamente il nome di qualsiasi documento sorgente che il modello ha omesso di citare.
+  </Step>
+</Steps>
+
+Se nessun retriever è collegato, o il recupero non restituisce nulla, il canale narrativo degrada
+onestamente ("non recuperato / non ancora collegato") invece di inventare una risposta.
+
+## Il percorso composito: esegui entrambi, confronta, unisci
+
+Per una domanda composita, l'agente esegue prima il percorso strutturato, poi esegue il
+percorso narrativo e unisce i risultati:
+
+```text
+<structured answer, with the number(s) + lineage>
+
+归因分析：
+<narrative answer, synthesized from cited snippets>
+```
+
+Le fonti di entrambi i canali vengono concatenate. Quando il lato strutturato si espande in
+più sotto-task (più metriche / entità / periodi elencati esplicitamente dall'utente),
+l'agente esegue ogni sotto-task `query_metric` **deterministicamente senza l'LLM**
+(`_multi_subtask_answer`) e, per esattamente due periodi comparabili, calcola la
+differenza da sé.
+
+<Callout type="info">
+  La prevenzione delle risposte inventate viene applicata **per percorso**, non in modo unificato: il percorso strutturato sintetizza
+  deterministicamente la risposta dai valori dei fatti, il percorso multi-sotto-task non chiama mai l'LLM, e
+  il percorso narrativo si fida della prosa del modello ma impone la citazione. Questa asimmetria è deliberata.
+</Callout>

@@ -1,0 +1,137 @@
+---
+title: API Python
+description: Orchestrazione core, store, recupero, formati/scaffolding/anteprima dei flussi di lavoro e punti di ingresso per la conversione Dify/n8n.
+---
+
+Questa pagina mette in evidenza le superfici di composizione stabili. Eseguite `make docs` in un checkout dei sorgenti per il
+sito pdoc a livello di simbolo.
+
+## Orchestrazione degli agent
+
+```python
+from collections.abc import Sequence
+from datetime import date
+
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` è `tuple[str, str]`. Solo `assistant` viene riconosciuto come ruolo assistant; gli altri
+ruoli vengono normalizzati a user. La cronologia viene inserita tra il messaggio di sistema e la domanda corrente
+esclusivamente per la generazione. Non viene mai inviata al parsing dell'intento, alle decisioni di sicurezza, alle query di recupero né
+all'assemblaggio di evidenze/citazioni.
+
+`AgentResult` espone `answer`, `answer_plain`, `route`, l'opzionale `clarification`, `tool_results`
+e `sources`. `answer_plain` omette il suffisso di citazione inline per le UI che visualizzano `sources`
+separatamente.
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+```
+
+`FactStore` è un `Protocol` verificabile a runtime; istanziate `SqliteFactStore`, non il Protocol.
+`Fact.metric(...)` è l'helper keyword-only per costruire fatti senza trasporre i campi di identità
+congelati. Ogni fatto memorizzato conserva `source_doc_id` e `source_locator`.
+
+## Archiviazione e recupero narrativi
+
+I record narrativi `Chunk`/`StoredChunk` includono i campi additivi `parent_id`, `heading`, `window_text` e
+`parent_locator`. I database SQLite esistenti migrano in modo additivo. L'espansione parent-child e a finestra di
+frase avviene al livello di store/recupero: l'hit figlio mantiene il proprio testo, l'ID del chunk
+e il locator per la citazione, mentre `window_text` può diventare `prompt_text` separati destinati alla sola generazione.
+Un figlio RESTRICTED viene scartato prima dell'espansione e non può trapelare attraverso un parent/una finestra.
+
+Il recupero supporta gli operatori di filtro sui metadati `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`
+e `between`. I filtri sono restrittivi e preservano l'ordine dei risultati. `MultiIndexRetriever` interroga ogni
+libreria selezionata in modo indipendente, fonde le classifiche con RRF e allega la provenienza `library_id`; un
+errore del router comporta la ricerca in tutte le librerie configurate. La modalità economy non costruisce né un backend di
+embedding né un vector store.
+
+## Documenti di flusso di lavoro
+
+```python
+from ragspine.workflows.formats import (
+    dump_dify_yaml,
+    dump_json,
+    load_workflow,
+    parse_workflow,
+)
+
+workflow = load_workflow("workflow.toml")
+same_shape = parse_workflow('{"app":{"mode":"workflow"}}', format="json")
+json_text = dump_json(workflow)
+yaml_text = dump_dify_yaml(workflow)
+```
+
+Tutti gli input JSON/YAML/TOML accettati vengono normalizzati in una mappatura compatibile con JSON. Il testo TOML richiede il
+formato esplicito, a meno che non venga caricato da un percorso `.toml`. Il parser di formato rifiuta chiavi duplicate,
+numeri non finiti, YAML non sicuro e documenti sovradimensionati o troppo profondi. Il caricatore di file rifiuta inoltre
+link e file non regolari.
+
+## Catalogo e scaffolding
+
+```python
+from ragspine.workflows import scaffold_workflow
+
+result = scaffold_workflow(
+    "invoice extraction and approval",
+    template_id=None,
+    reuse=True,
+)
+print(result.workflow)
+print(result.yaml)
+```
+
+Lo scaffolding è puro rispetto al filesystem: restituisce la configurazione e non la scrive né la
+esegue mai. Le API del catalogo elencano/restituiscono copie difensive. Un template esplicito restituisce confidenza `1`;
+altrimenti la corrispondenza usa le soglie di punteggio/margine configurate e ricade sulla generazione fissa.
+
+La CLI gestisce inoltre la creazione sicura di file in modalità atomica/esclusiva.
+
+## Anteprima v1
+
+Il builder di anteprima del flusso di lavoro restituisce un oggetto compatibile con JSON destinato alla sola visualizzazione, con
+`preview_schema_version: 1`, `nodes` e `edges`. Contiene geometria ed etichette, non prompt,
+variabili, credenziali, configurazione del provider o codice eseguibile. Validate la versione prima
+del rendering; non reimmettete il JSON di anteprima in un executor.
+
+## Dify e n8n
+
+`ragspine.dify` effettua il parsing dello YAML di Dify in una rappresentazione intermedia, la analizza e genera
+codice Python imperativo per il target `ragspine` o `spineagent`. La generazione di codice non è esecuzione.
+
+`ragspine.n8n.n8n_to_dify` e `ragspine.n8n.dify_to_n8n` eseguono una conversione pura e restituiscono la
+mappatura di destinazione insieme agli avvisi. Le semantiche non supportate vengono segnalate anziché essere dichiarate silenziosamente come
+equivalenti. I metadati n8n originali vengono conservati per i round trip, ove possibile.
+
+## Factory dell'app
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config,
+    provider=provider,
+    queue=queue,
+    faq_cache=faq_cache,
+    workflow_matcher=workflow_matcher,
+)
+```
+
+Il pacchetto service è opzionale. La sua superficie di esecuzione dei flussi di lavoro è disabilitata per impostazione predefinita e non può
+accettare un'espressione di provider fornita dal client.

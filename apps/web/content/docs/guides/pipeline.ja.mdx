@@ -1,0 +1,161 @@
+---
+title: パイプライン
+description: 静的なエンジン PipelineGraph のエクスポートと、表示専用のワークフロープレビュー v1 プロトコルとの違い。
+---
+
+`pipeline` ドメイン（`src/ragspine/pipeline/`）は、グラフフレームワーク（Dify、LangGraph）が提供し、素の Python エンジンでは得られない唯一のもの——**パイプラインの視覚的なダイアグラム**——に対する、RAGSpine のコードファーストな回答です。自分で記述したうえで現実と一致していることを祈るしかないグラフ DSL の代わりに、RAGSpine は実際の配線から静的な `PipelineGraph` を _導出_ し、Mermaid、DOT、または JSON として出力します。
+
+このドメインは小さく、リーフレベルで、厳密に読み取り専用です。オーケストレーターからは何も import しない（すべてのイントロスペクションは `getattr` によるダックタイピング）ため、記述対象のシステムを乱すことは決してありません。
+
+<Callout type="info">
+  このエンジントポロジーモデルは [ワークフロープレビュー
+  v1](/ja/docs/guides/workflows#プレビュープロトコル-v1) とは別物です。`PipelineGraph` は組み立てられた RAGSpine
+  コンポーネントを記述し、Mermaid/DOT/JSON をエクスポートします。ワークフロープレビューは、秘匿化されたノード・エッジ・ジオメトリを持つ
+  1 つの Dify 互換ワークフローを記述します。どちらも読み取り専用であり、いずれも実行形式ではありません。
+</Callout>
+
+## レイアウト
+
+<Files>
+  <Folder name="pipeline" defaultOpen>
+    <File name="graph.py" />
+    <File name="topology.py" />
+  </Folder>
+</Files>
+
+`graph.py` は依存ゼロの値レイヤー（frozen dataclass + エクスポーター）で、
+`topology.py` はライブな構成を読み取る 3 つのビルダーを保持します。公開 API は
+`Node`、`Edge`、`PipelineGraph`、`agent_topology`、`retriever_topology`、
+`service_topology` の 6 つの名前を再エクスポートします。
+
+## 値モデル
+
+`graph.py` は 3 つの frozen dataclass を定義します:
+
+<TypeTable
+  type={{
+    Node: {
+      type: 'id, label, kind, domain=None, symbol=None',
+      description:
+        'パイプラインのノード。kind ∈ stage | store | external | gate | channel。symbol はドリフトガードが使用するドット区切りの import パス（概念上のノードでは None）。',
+    },
+    Edge: {
+      type: 'src, dst, label=None, kind="flow"',
+      description:
+        '有向エッジ。kind ∈ flow | conditional | data。label は例えば "route=structured" / "hit" / "miss"。',
+    },
+    PipelineGraph: {
+      type: 'title, nodes: tuple[Node], edges: tuple[Edge]',
+      description: '不変（イミュータブル）なグラフと、そのエクスポーター群。',
+    },
+  }}
+/>
+
+`PipelineGraph` は 3 つのエクスポーターと 1 つの結合メソッドを備えています:
+
+| メソッド                        | 戻り値          | 出力                                                                                                                        |
+| ------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `to_mermaid(*, direction="TD")` | `str`           | `flowchart` — ノードの形状は `kind` によって選択されます（gate は `{}`、store は `[(...)]`、channel は `([...])`、それ以外は長方形）。 |
+| `to_dot()`                      | `str`           | Graphviz の `digraph`（`rankdir=TB`）。                                                                                       |
+| `to_dict()`                     | `dict`          | JSON でラウンドトリップ可能な `{title, nodes[...], edges[...]}`。                                                              |
+| `merge(other, *, group=None)`   | `PipelineGraph` | ノードを id で重複排除し（先勝ち）、すべてのエッジを保持します。オプションで、追加されたノードに `domain=group` をタグ付けします。 |
+
+<Callout type="info">
+  エクスポートは実行間で**決定的かつバイト単位で同一**です（宣言順が安定しているため）。`domain`
+  によるグルーピングは `to_dict` を通じてラウンドトリップしますが、v1 では `to_mermaid` / `to_dot` は
+  subgraph/cluster ブロックを出力しません。
+</Callout>
+
+## 3 つのビルダー
+
+`topology.py` は、ライブでダックタイピングされた構成からグラフを導出します——ノードは、
+そのコンポーネントが実際に配線されている場合にのみ現れます。
+
+<Cards>
+  <Card
+    title="agent_topology(*, narrative_retriever=None)"
+    description="リクエストフローの全体像: parse_intent → clarify_scope（data エッジ経由で SecurityGate に問い合わせ）→ route の分岐（ダイヤモンド）→ structured / narrative / composite の各ブランチ。narrative ノードは narrative_retriever が注入されている場合にのみ現れます。"
+  ></Card>
+  <Card
+    title="retriever_topology(retriever)"
+    description="HybridRetriever のサブパイプライン: prefilter → BM25 [+vector] [+multi-query] → RRF → top_k。vector ノードは retriever.embedding_backend が設定されている場合にのみ、multi-query ノードは query_rewriter が設定されている場合にのみ現れます。再ランキング（rerank）は意図的にこのサブグラフには含めていません。"
+  ></Card>
+  <Card
+    title="service_topology(app)"
+    description="サービスのトポロジー: agent の上流にある FAQ ショートサーキットに加え、非同期インジェスションパス（routes → queue → jobs）。app.state.faq_cache と app.state.queue に対してダックタイピングします。"
+  ></Card>
+</Cards>
+
+<Callout type="info">
+  `HybridRetriever.topology()`（[retrieval（検索）](/ja/docs/guides/retrieval) ドメイン内）は
+  `retriever_topology` への薄い委譲です——これにより、pipeline パッケージがオーケストレーターを import
+  することなく、構成済みの retriever が自分自身を描画できます。
+</Callout>
+
+## CLI — `scripts/topology.py`
+
+`scripts/topology.py` は、3 つのトポロジーのいずれもオフラインかつ決定的に描画します
+（デフォルト/モックのアセンブリを組み立てるため、Redis も API キーも不要です）。プロジェクトルートから
+実行してください:
+
+```bash
+python scripts/topology.py                                  # agent → Mermaid → stdout
+python scripts/topology.py --which retriever --of dot
+python scripts/topology.py --of json --out docs/generated/topology.json
+```
+
+フラグ:
+
+- `--of {mermaid,dot,json}` — 出力形式（デフォルトは `mermaid`）。
+- `--which {agent,retriever,service}` — 対象のトポロジー（デフォルトは `agent`）。
+- `--out PATH` — ファイルへ書き出します（親ディレクトリを作成します）。省略すると stdout に出力します。
+  git-ignore された `docs/generated/` に書き込むことで、再生成したダイアグラムの diff がクリーンに保たれます。
+
+内部では、CLI は各トポロジーをデフォルト/オフラインのアセンブリから組み立てます: `retriever` →
+`retriever_topology(HybridRetriever([]))`（空のコーパス上の純 BM25 スケルトン）、
+`service` → `MockProvider` / `FakeQueue` / 空の `FAQCache` を使った `create_app(...)` の後に
+`service_topology(app)`、`agent` → `agent_topology(narrative_retriever=object())`
+（narrative/composite ブランチを表示させるためのセンチネル）。
+
+## Python API
+
+```python
+from ragspine.pipeline import agent_topology
+
+graph = agent_topology(narrative_retriever=object())
+print(graph.to_mermaid())   # Mermaid flowchart string
+print(graph.to_dot())       # Graphviz digraph string
+
+import json
+print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
+```
+
+## 関連ページ
+
+<Cards>
+  <Card
+    title="エージェント"
+    href="/ja/docs/guides/agent"
+    description="agent_topology が描画するリクエストフロー。"
+  />
+  <Card
+    title="検索"
+    href="/ja/docs/guides/retrieval"
+    description=".topology() がここへ委譲する HybridRetriever。"
+  />
+  <Card
+    title="サービス"
+    href="/ja/docs/guides/service"
+    description="service_topology がイントロスペクトする FastAPI アプリ。"
+  />
+  <Card
+    title="CLI とスクリプト"
+    href="/ja/docs/getting-started/cli-and-scripts"
+    description="topology.py とその他のリポジトリルートのスクリプト。"
+  />
+  <Card
+    title="ワークフロープレビュー"
+    href="/ja/docs/guides/workflows#プレビュープロトコル-v1"
+    description="テンプレートウェブサイトが描画する、バージョン管理され秘匿化されたグラフ投影。"
+  />
+</Cards>

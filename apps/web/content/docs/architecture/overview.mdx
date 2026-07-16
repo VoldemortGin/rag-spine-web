@@ -1,175 +1,107 @@
 ---
 title: Overview
-description: The big picture — a framework-free, deep domain-grouped RAG engine where every external dependency is a Protocol, so the core imports zero SDKs and runs fully offline.
+description: Plain-Python dual-channel RAG, workflow interoperability, safe preview, and optional service execution boundaries.
 ---
 
-RAGSpine is a backend RAG engine you **assemble in plain Python** — not a framework you
-submit to. There is no Dify, no LangGraph, no graph DSL, and no runtime to host. It is a
-coherent, batteries-included library of composable parts — retrieval, agent orchestration,
-document extraction, evaluation, and an HTTP service layer — wired together by ordinary
-functions and typed `Protocol`s.
+RAGSpine's engine is ordinary Python: typed seams, dataclasses, explicit stores, and readable
+control flow. `answer_question(...)` is the Q&A composition entry point. A separate workflow
+domain parses, scaffolds, previews, converts, and compiles Dify-compatible configuration; an
+optional FastAPI service exposes those operations and a deliberately default-off executor.
 
-This page is the map. It explains the three architectural commitments that shape every
-folder, then walks the request lifecycle end to end. The deeper pages drill into the
-[request flow](/docs/architecture/request-flow), the [two channels](/docs/architecture/channels),
-and the [package layout](/docs/architecture/package-layout).
+This distinction matters. RAGSpine has Dify and n8n **interchange surfaces**, but it does not embed
+either platform's runtime, download their marketplaces at runtime, or require a graph framework to
+answer a question.
 
-## Three commitments
+## Architectural commitments
 
 <Cards>
-  <Card title="Framework-free">
-    The core is ordinary Python functions and dataclasses. No orchestration runtime, no DSL, no UI
-    you have to adopt. You call `answer_question(...)` and you own the process.
-  </Card>
-  <Card title="Deep, domain-grouped layout">
-    Code is organized by domain, never by technical layer — the folder path locates a file before
-    you read its name. A package splits the moment it holds a second responsibility.
-  </Card>
-  <Card title="Everything is a Protocol">
-    LLM provider, embeddings, reranker, OCR, retriever, graph store, and task queue are all
-    typed `Protocol`s injected at the edges. The core imports zero SDKs and runs offline.
-  </Card>
+  <Card
+    title="Code-enforced evidence"
+    description="Structured values come from the fact store; a miss becomes an explicit refusal. Narrative answers retain source locators."
+  />
+  <Card
+    title="Domain packages"
+    description="Fifteen top-level domains keep orchestration, storage, retrieval, interoperability, service, and CLI responsibilities visible."
+  />
+  <Card
+    title="Typed edges"
+    description="Providers, embeddings, stores, chunkers, rerankers, queues, connectors, and matchers are injected behind Protocols."
+  />
+  <Card
+    title="Non-executing by default"
+    description="Catalog, scaffold, parse, conversion, compile, topology, and preview operations do not execute workflows. Run routes are disabled by default."
+  />
 </Cards>
 
-### Framework-free
-
-Most stacks force a choice between hand-rolled glue and heavyweight orchestration platforms
-that drag in their own runtime, graph DSL, UI, and lock-in. RAGSpine is the middle path: the
-control flow is plain Python you can read top to bottom. The sole public entry to the engine
-is `answer_question()` in `agent/agent.py` — a function, not a graph you compile.
-
-### Deep, domain-grouped layout
-
-The repository follows a _screaming architecture_ / _package-by-feature_ stance: organize by
-domain/feature, never by technical layer. Find the file by folder first, then read its name.
-There are nine top-level domains under `src/ragspine/`, and each one is itself split as soon
-as it earns a second concern (for example `extraction/` carries `extractors/`, `routing/`,
-`color/`, and `verification/` subtrees). See [Package layout](/docs/architecture/package-layout)
-for the full map and the dependency direction.
-
-### Everything is a Protocol
-
-Every external dependency enters through a typed, `@runtime_checkable` `Protocol` injected at
-the edges — never an SDK imported in the core:
-
-<TypeTable
-  type={{
-    LLMProvider: {
-      type: 'Protocol',
-      description:
-        'corespine, re-exported via agent/llm_provider.py — one method, chat(messages, tools) -> ChatCompletion (OpenAI shape). MockProvider is the offline default; AnthropicProvider is real.',
-    },
-    EmbeddingBackend: {
-      type: 'Protocol',
-      description:
-        'retrieval/lexical/retrieval.py — embed_texts(texts). Default is None = pure BM25, no vector channel.',
-    },
-    ListwiseJudge: {
-      type: 'Protocol',
-      description:
-        'retrieval/rerank/listwise_rerank.py — judge(query, candidates) returns relevance-sorted indices.',
-    },
-    NarrativeRetriever: {
-      type: 'Protocol',
-      description:
-        'agent/agent.py — retrieve(query, filters, top_k). The seam the narrative channel plugs into.',
-    },
-    GraphStore: {
-      type: 'Protocol',
-      description:
-        'graph/store.py — upsert_nodes/edges, neighbors, subgraph, traverse. Zero-dep in-process deterministic default; networkx adapter behind [graph]. Backs the opt-in structured relation graph.',
-    },
-    OcrBackend: {
-      type: 'Protocol',
-      description: 'extraction — OCR for scanned PDFs, behind the [ocr] extra.',
-    },
-    TaskQueue: {
-      type: 'Protocol',
-      description: 'service/tasks — FakeQueue for tests, RQQueue for prod.',
-    },
-  }}
-/>
-
-<Callout type="info">
-  Because the core depends on the abstraction and never the SDK, adding a provider, vector store,
-  reranker, or OCR engine touches **one new file**. A top-level `import ragspine` eagerly loads no
-  domain and pulls no third-party SDK — submodules load lazily (PEP 562), and the `anthropic` SDK is
-  lazy-imported only inside `AnthropicProvider.__init__`.
-</Callout>
-
-The result: the engine runs fully offline with a deterministic `MockProvider`, the default
-narrative retriever is pure CJK-aware BM25, and the bundled demo and 1000+ tests run with no
-API key on any platform.
-
-## The request lifecycle
-
-A question travels a fixed, auditable path. Two guards bracket it: a **clarification gateway**
-up front that can ask or refuse before any model call, and an **anti-fabrication guard** at
-the structured exit that rewrites the answer to "not found" if no fact backs it — regardless
-of what the model produced.
+## Q&A request lifecycle
 
 ```text
 question
-  → intent parse (metric / entity / period / channel slots)
-  → clarification gate ──(ambiguous)→ ask  ──(out-of-scope entity)→ refuse
-  → FAQ short-circuit (service edge) ──(vetted hit)→ cached answer + provenance
-  → route:
-       structured → function-calling over the fact store → found / not_found / unrecognized
-       narrative  → hybrid retrieve → listwise rerank → synthesize with citations
-       composite  → run both, compare, merge
-  → answer + sources   (anti-fabrication guard rewrites to "not found" if no fact)
+  → deterministic security/intent screening
+  → clarification gateway
+  → optional service-edge FAQ short-circuit
+  → structured | narrative | composite route
+       structured: normalize → query fact store → found/not_found/unrecognized
+       narrative: filter → retrieve/fuse → rerank/postprocess → cited generation
+       composite: execute both evidence paths and merge
+  → anti-fabrication/provenance checks
+  → answer + sources
 ```
 
-The same flow as a diagram (the ASCII above is the primary; this Mermaid block is an
-equivalent view for renderers that support it):
+Optional `history` is inserted only into the final generation message sequence. It never changes
+the deterministic intent/security decision, the retrieval query, or what counts as evidence.
 
-```mermaid
-flowchart TD
-  Q[question] --> I[intent parse<br/>metric / entity / period / channel]
-  I --> C{clarification gate}
-  C -->|ambiguous: missing metric| ASK[ask first]
-  C -->|out-of-scope entity| REF[refuse]
-  C -->|ok / assume| F{FAQ short-circuit<br/>service edge}
-  F -->|vetted hit| FA[cached answer + provenance]
-  F -->|miss| R{route}
-  R -->|structured| S[query_metric over fact store<br/>found / not_found / unrecognized]
-  R -->|narrative| N[hybrid retrieve → rerank → synthesize]
-  R -->|composite| B[run both, compare, merge]
-  S --> G[anti-fabrication guard]
-  N --> G
-  B --> G
-  G --> A[answer + sources]
+The narrative path can use metadata filters, per-library routing with RRF fusion, and store-level
+parent/window expansion. Citation fields remain those of the child hit; expanded text is separate
+generation context. A restricted child is removed before expansion.
+
+## Workflow lifecycle
+
+```text
+description or JSON/YAML/TOML
+  → normalize to JSON-compatible mapping
+  → explicit template or catalog match
+  → reuse safe Dify workflow | generate fixed start→llm→end graph
+  → deterministic YAML/JSON + preview schema v1
+  → optional analyze / convert / compile
+  → explicit server-controlled execution gate (off by default)
 ```
 
-<Callout type="warn">
-  The FAQ short-circuit is a **service-edge** optimization (`service/faq/`), not part of the library
-  core. The Python `answer_question(...)` entry begins at intent parsing. When the HTTP service is
-  in front, a vetted FAQ hit returns before the agent runs at all — but it carries the same
-  conservative exclusions, so structured-numeric, competitor, real-time, expired, disabled, and
-  `RESTRICTED` questions never short-circuit.
-</Callout>
+The catalog is package data: 7 curated templates plus 993 generated descriptors. Upstream Dify/n8n
+URLs are research metadata only; no upstream workflow text or credentials are redistributed.
 
-## Where to go next
+## Trust boundaries
+
+- The base library and catalog need no API key.
+- The service's ordinary engine/catalog/compiler routes have no built-in application auth and must
+  be protected by deployment infrastructure.
+- Dify-compatible public endpoints require a Bearer app key; n8n-compatible public CRUD requires
+  `X-N8N-API-KEY`.
+- Webhooks are intentionally unauthenticated and need ingress controls.
+- Workflow execution is additionally gated by `RAGSPINE_DIFY_RUN_ENABLED=false` by default.
+- The in-process restriction layer is not an OS sandbox; subprocess resource limits are Linux-only.
+
+## Where to continue
 
 <Cards>
   <Card
-    title="Request flow"
-    href="/docs/architecture/request-flow"
-    description="The detailed control flow, step by step, grounded in agent/agent.py."
-  />
-  <Card
     title="Channels"
     href="/docs/architecture/channels"
-    description="Structured vs narrative vs composite — what each one runs."
+    description="Structured, narrative, composite, and graph evidence paths."
   />
   <Card
     title="Package layout"
     href="/docs/architecture/package-layout"
-    description="The nine-domain map and the dependency direction between them."
+    description="The fifteen top-level source domains."
   />
   <Card
-    title="Dual-channel (concept)"
-    href="/docs/concepts/dual-channel"
-    description="Why two mechanisms, and how the router splits a composite question."
+    title="Workflows"
+    href="/docs/guides/workflows"
+    description="Catalog, formats, preview, conversion, and execution boundary."
+  />
+  <Card
+    title="Request flow"
+    href="/docs/architecture/request-flow"
+    description="Detailed agent control flow."
   />
 </Cards>

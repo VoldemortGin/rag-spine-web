@@ -1,0 +1,16 @@
+{
+  "title": "ガイド",
+  "icon": "Boxes",
+  "pages": [
+    "extraction",
+    "ingestion",
+    "storage",
+    "retrieval",
+    "agent",
+    "evaluation",
+    "workflows",
+    "service",
+    "pipeline",
+    "common"
+  ]
+}

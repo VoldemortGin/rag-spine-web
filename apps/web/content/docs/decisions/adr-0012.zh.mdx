@@ -1,0 +1,51 @@
+---
+title: 'ADR 0012: 采纳 corespine 的 LLM 缝——用 chat / ChatCompletion 取代 create_message / ProviderResponse'
+description: 将 LLMProvider Protocol 移入家族共享核心（corespine），并采纳 OpenAI chat-completions 形态；经由 corespine 的 RateLimitedProvider 增加可选的主动 TPM 限流。
+---
+
+> 状态：**accepted** · 日期：2026-06-20
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
+
+关联 [0009](/zh/docs/decisions/adr-0009)（框架/依赖策略）与 [0011](/zh/docs/decisions/adr-0011)（采纳 python-project-standard）。已随 **rag-spine 0.3.0** 发布。
+
+## 背景
+
+RAGSpine 一直把每个外部 SDK 隔离在带类型的 `Protocol` 之后，拥有零 SDK 的离线核心和默认 `MockProvider`（ADR [0005](/zh/docs/decisions/adr-0005) / [0009](/zh/docs/decisions/adr-0009)）。`LLMProvider` 这条缝原先定义在 ragspine **内部**（`agent/llm_provider.py`），带有一个 ragspine 专属的方法：
+
+```python
+def create_message(*, system, messages, tools) -> ProviderResponse: ...
+```
+
+两股压力汇聚到一起：
+
+1. **一族兄弟包如今共享同一套原语。** ragspine、[`spineagent`](https://pypi.org/project/spineagent/)（多 agent 编排）以及薄共享核心 [`corespine`](https://pypi.org/project/corespine/) 都需要通过同一份 provider 契约与 LLM 对话。为每个包各自复制一套定制的 provider Protocol 会割裂契约和测试缝。corespine 正是家族刻意保持轻薄的共享核心，专门承载这类领域中立的原语。
+2. **定制的 `create_message(*, system, messages, tools) -> ProviderResponse` 形态是毫无必要的非标准。** 把 system prompt 抽成单独参数、并发明一个 `ProviderResponse` 信封，偏离了真实 SDK（以及每位 adapter 作者的心智模型）早已通行的 OpenAI chat-completions 形态——徒增摩擦，没有收益。
+
+另外，此前唯一的限流防御是 SDK 的**被动** `max_retries` 429 退避，它在触限*之后*才作出反应。想要主动保持在合同 TPM 上限*之下*的客户端，在库内没有任何旋钮可用。
+
+## 决策
+
+**将 `LLMProvider` Protocol 移入 corespine，并采纳 OpenAI chat-completions 形态。** ragspine 增加对 `corespine>=0.1.0` 的硬性运行时依赖（其唯一的非可选依赖），并从 `agent/llm_provider.py` **再导出**这条缝，因此现有 import 位置（`from ragspine.agent.llm_provider import LLMProvider, MockProvider, AnthropicProvider`）继续可用。具体而言：
+
+- 唯一的方法变为 `chat(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion`。system prompt 就是第一条 `{"role": "system", ...}` 消息——不再是单独参数。
+- `ProviderResponse` 被 corespine 的 `ChatCompletion` 信封取代：`choices`（每项是一个 `Choice`，包裹带 `content` + `tool_calls` 的 `ResponseMessage`），外加 `usage`、`model` 和 `id`——全部是 frozen dataclass，即标准的 chat-completions 形态。
+- `AnthropicProvider` 继续惰性 import `anthropic` SDK，但现在把 OpenAI 形态的 `messages`/`tools` 映射到 Anthropic Messages API，并把响应映射回 `ChatCompletion`。`ProviderError` 成为 `corespine.CorespineError` 的子类。
+- 离线的 `MockProvider` 与 tool-use 循环（`provider.chat(messages, tools=tools)`）同步更新；防编造机制守卫不受影响（它从不信任 provider 的文字来获取数字）。
+
+**增加可选的主动 TPM 限流。** 新增环境变量 `RAGSPINE_TOKENS_PER_MINUTE`（整数，默认 `0` = 关闭），使 `build_provider` 把构建出的 provider 包进 corespine 的 `RateLimitedProvider`——一个滑动窗口软限制，当窗口内没有预算时在 `chat` 调用之前阻塞。它与 SDK 的被动 `max_retries` 是**互补**的：一个主动保持在上限之下，另一个从触限中恢复。
+
+## 考虑过的备选方案（已否决）
+
+- **在 ragspine 中保留定制的 `create_message` / `ProviderResponse` 缝。** 否决——它在家族内割裂契约，并且毫无必要地保持非标准。这条缝是教科书式的领域中立原语，理应属于共享核心。
+- **在 ragspine 中定义这条缝，让兄弟包依赖 ragspine。** 否决——这会倒转依赖方向（一个 RAG 包会成为通用 agent 包的依赖）。corespine 是公认的共享原语汇聚点；箭头只*指向*它。
+- **仅依赖 SDK 的 `max_retries` 做限流。** 否决——被动退避无法让客户端保持在合同 TPM 上限之下；两种机制互补而非冗余。
+
+## 影响
+
+- **对自定义 provider 是破坏性变更。** 任何实现了 `create_message(*, system,
+  messages, tools) -> ProviderResponse` 的人都必须迁移到 `chat(messages, *, tools=None) ->
+  ChatCompletion`（从 `corespine` import 这些 dataclass，或经由 `ragspine.agent.llm_provider` 的再导出）。[扩展点](/zh/docs/reference/extension-points#llmprovider)指南提供了新形态下完整的 OpenAI 示例。
+- ragspine 恰好新增一个非可选依赖（`corespine>=0.1.0`，其自身 `dependencies` 为空）。离线优先、零重型 SDK 的默认路径得以保留。
+- provider 契约现在由 Spine 家族共享，为一个包编写的 provider 对所有包都可用。
+- `RAGSPINE_TOKENS_PER_MINUTE` 是唯一新增的配置面；其余全部是内部变更。

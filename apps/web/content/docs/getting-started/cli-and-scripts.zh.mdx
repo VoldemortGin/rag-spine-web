@@ -1,0 +1,82 @@
+---
+title: CLI 与脚本
+description: 已安装的 ragspine 命令，以及源码检出下的 Make/脚本入口。
+---
+
+`ragspine` 控制台命令随 wheel 一起发布。`scripts/` 与仓库根的 `Makefile` 是
+开发便利工具，仅在源码检出中可用。
+
+## 已安装的控制台命令
+
+| 命令                                            | 用途                                                                          |
+| ----------------------------------------------- | ----------------------------------------------------------------------------- |
+| `ragspine quickstart`                           | 确定性的离线演示                                                              |
+| `ragspine ask --db PATH "question"`             | 通过 mock/离线路径回答一个问题                                                |
+| `ragspine version`                              | 已安装的发行版本                                                              |
+| `ragspine dify analyze FILE`                    | 解析并静态分析一个 Dify 工作流；不生成代码也不执行                            |
+| `ragspine dify compile FILE`                    | 把 Dify 工作流配置编译为 Python 源码；不执行它                                |
+| `ragspine workflow list`                        | 列出内置模板元数据                                                            |
+| `ragspine workflow show ID --format yaml\|json` | 打印一个内置工作流                                                            |
+| `ragspine workflow preview ID`                  | 输出带版本的、仅用于展示的图投影                                              |
+| `ragspine workflow create DESCRIPTION`          | 匹配一个模板，或生成基础的 Dify 0.6 工作流                                    |
+
+以下简写等价于 `workflow create`：
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+### Workflow-create 选项
+
+| 选项                            | 含义                                                                             |
+| ------------------------------- | -------------------------------------------------------------------------------- |
+| `--template ID`                 | 精确选择一个目录模板并跳过匹配                                                   |
+| `--no-reuse`                    | 始终生成固定的基础工作流                                                         |
+| `--matcher lexical\|auto\|onnx` | 选择确定性词法匹配、自动 ONNX/回退，或强制 ONNX                                  |
+| `--format yaml\|json`           | 序列化输出格式；默认 YAML                                                        |
+| `-o, --output PATH`             | 输出路径                                                                         |
+| `--stdout`                      | 只把工作流文档写到标准输出                                                       |
+| `--force`                       | 替换已存在的普通文件；链接与特殊文件仍然禁止                                     |
+
+ONNX 匹配器需要 `[embed-onnx]`；首次使用可能会下载并缓存其模型。`auto`
+在 ONNX 不可用时回退到词法匹配，而显式指定 `onnx` 则会报错。
+
+`dify compile` 与 `dify analyze` 接受 `.json`、`.yaml`、`.yml` 与 `.toml` 路径。解析时
+会先把它们归一化为 JSON 兼容的映射，再做 Dify 校验。编译只生成代码；
+只有单独设门控的服务端 run 端点才会执行编译产物。
+
+## 源码检出下的 Make 目标
+
+以下命令全部从仓库根运行。
+
+| 目标                                              | 用途                                                                                 |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `make venv`                                       | 用 uv 创建 `.venv`                                                                   |
+| `make install`                                    | 可编辑的 `[dev,service,vector]` 安装                                                 |
+| `make install-all`                                | 可编辑的 `[dev,service,vector,llm,embed]` 安装；与 `[all]` 不完全相同                |
+| `make test`                                       | 运行 pytest，排除 GPU/网络测试                                                       |
+| `make ci`                                         | 阻塞式八阶段门禁：文档、类型、lint、测试、QA 与演示                                  |
+| `make lint`                                       | 信息性的 `scripts/lint.sh`；CI 门禁会单独调用严格的 mypy 与 ruff                     |
+| `make fmt`                                        | ruff 修复与格式化                                                                    |
+| `make drift`                                      | 文档与代码的漂移检查                                                                 |
+| `make demo`、`make ask Q="…"`                     | 确定性演示与单问题问答                                                               |
+| `make eval-qa`、`make eval-retrieval`             | QA 评估与检索评估                                                                    |
+| `make serve`、`make worker`                       | FastAPI 服务器与基于 Redis 的 RQ worker                                              |
+| `make build`、`make publish-test`、`make publish` | 构建与 Twine 上传流程                                                                |
+
+本地 CI 脚本是权威门禁。八个阶段分别是：文档引用
+完整性、文档漂移、`mypy --strict`、ruff、常规测试套件、隔离的 Docling
+测试、tool 与 agent 两种模式的 QA 棘轮，以及演示冒烟测试。
+
+## 重要脚本
+
+- `scripts/ask.py`：单次问答接口。`--provider mock` 是确定性的；真实的
+  Anthropic 适配器需要 `[llm]` 与凭证。项目作者无法访问
+  Anthropic API，因此该 provider 路径没有得到同等程度的实机集成覆盖。
+- `scripts/run_demo.py`：完全离线的、从 fixture 到答案的冒烟测试。
+- `scripts/run_server.py`：uvicorn 启动器，支持 `--host` 与 `--port`。
+- `scripts/run_worker.py`：RQ 消费者；`--queue` 默认为 `ragspine-ingest`。
+- `scripts/topology.py`：把静态引擎拓扑导出为 Mermaid、DOT 或 JSON。
+
+目前刻意不提供 `ragspine serve`、`ragspine worker` 或 `ragspine topology` 控制台
+子命令；它们仍是源码检出下的脚本。

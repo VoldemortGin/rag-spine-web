@@ -1,278 +1,142 @@
 ---
 title: HTTP API
-description: The FastAPI service endpoints — health, ask, async ingestion jobs, and job status — with exact paths, methods, and representative request/response payloads.
+description: Exact FastAPI route families, request boundaries, authentication, caching, and default-off workflow execution.
 ---
 
-The service layer (`src/ragspine/service/api/`) is a thin HTTP adapter: schema validation,
-dependency injection, resource assembly, the FAQ short-circuit, error shaping, and tracing.
-It never rewrites the agent / retrieval / ingestion logic — it calls the existing workflows.
-
-Start it from the repo root:
+Start the optional `[service]` app from a source checkout:
 
 ```bash
-RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --port 8000
 ```
 
-Ingestion jobs run out-of-process on the worker (needs Redis):
+## Engine routes
+
+| Method | Path                                | Request / behavior                                                       |
+| ------ | ----------------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/healthz`                          | liveness                                                                 |
+| `GET`  | `/readyz`                           | fact-store and optional queue readiness; `503` when degraded             |
+| `POST` | `/v1/ask`                           | `question`, optional `reference_date`, optional `(role, text)` `history` |
+| `POST` | `/v1/ask/stream`                    | same completed guarded answer over SSE                                   |
+| `POST` | `/v1/ingest/structured/jobs`        | `.xlsx`, `.xlsm`, `.pptx`, `.pdf` job                                    |
+| `POST` | `/v1/ingest/narrative/jobs`         | `.pptx`, `.pdf` job                                                      |
+| `GET`  | `/v1/jobs/{job_id}`                 | queue status/result/error                                                |
+| `GET`  | `/v1/topology?scope=agent\|service` | static engine topology; invalid scope returns `400`                      |
+
+Example:
 
 ```bash
-RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
+curl -s http://127.0.0.1:8000/v1/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"China FY2024 revenue","history":[["user","Use the annual report"]]}'
 ```
 
-## Endpoints
+`/v1/ask/stream` first computes the complete guarded response, then sends `start`, zero or more
+`delta`, and `done` SSE frames. A guard failure therefore cannot be half-streamed and retracted.
 
-| Method | Path                         | Purpose                                                                                       |
-| ------ | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `GET`  | `/healthz`                   | Liveness — always returns `{"status": "ok"}`.                                                 |
-| `GET`  | `/readyz`                    | Readiness — checks the fact DB (and queue if it exposes `ping`); `200` ready, `503` degraded. |
-| `POST` | `/v1/ask`                    | Answer a question (FAQ short-circuit → dual-channel workflow).                                |
-| `POST` | `/v1/ask/stream`             | Same answer as `/v1/ask`, streamed token-by-token over SSE — after the guards have run.       |
-| `POST` | `/v1/ingest/structured/jobs` | Enqueue a structured (numeric) ingestion job.                                                 |
-| `POST` | `/v1/ingest/narrative/jobs`  | Enqueue a narrative (chunk) ingestion job.                                                    |
-| `GET`  | `/v1/jobs/{job_id}`          | Poll an ingestion job's status.                                                               |
+## Workflow catalog
 
-## `GET /healthz`
+### `GET /v1/workflow-templates`
 
-```bash
-curl -s localhost:8000/healthz
-```
+Query fields are `offset` (default 0) and `limit` (1–100, default 100). The response contains
+`total`, `offset`, `limit`, nullable `next_offset`, and metadata-only `templates`. It intentionally
+omits workflow YAML and preview data.
+
+The route sends a weak page-specific `ETag` and
+`Cache-Control: public, max-age=300, stale-while-revalidate=3600`. A matching `If-None-Match` may
+receive `304`.
+
+### `GET /v1/workflow-templates/{template_id}`
+
+Returns catalog metadata plus canonical `workflow`, deterministic Dify `yaml`, and display-only
+`preview` schema version 1. An unknown identifier returns `404` without exposing paths.
+
+### `POST /v1/workflow-scaffold`
 
 ```json
-{ "status": "ok" }
+{ "description": "invoice extraction and approval", "reuse": true }
 ```
 
-## `GET /readyz`
+`description` is 1–4,096 characters. Optional `template_id` must be a lowercase hyphenated catalog
+identifier. Extra fields are forbidden. The response contains `workflow`, `yaml`, `preview`,
+`origin`, `template_id`, `confidence`, `matcher`, `warnings`, `compatibility`, `requirements`, and
+optional factual `source` metadata. It does not execute the workflow.
 
-Returns `200` with `status: "ready"` when all checks pass, `503` with `status: "degraded"`
-otherwise. The `queue` check appears only when the configured queue exposes a `ping`.
+## Dify compiler and internal execution
+
+| Method | Path                | Behavior                                                                  |
+| ------ | ------------------- | ------------------------------------------------------------------------- |
+| `POST` | `/v1/dify/analyze`  | static suggestions only                                                   |
+| `POST` | `/v1/dify/compile`  | returns Python source for target `ragspine` or `spineagent`; no execution |
+| `POST` | `/v1/dify/run`      | compile, gate, and execute only when enabled                              |
+| `POST` | `/v1/dify/run/jobs` | synchronously compile/gate, then enqueue when enabled                     |
+
+Analyze, compile, and run accept exactly one document form:
 
 ```json
-{ "status": "ready", "checks": { "fact_db": true, "queue": true } }
+{ "workflow": { "app": { "mode": "workflow" }, "workflow": { "graph": {} } } }
 ```
 
-## `POST /v1/ask`
-
-The README curl example:
-
-```bash
-curl -s localhost:8000/v1/ask -H 'content-type: application/json' \
-     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
-```
-
-**Request** (`AskRequest`)
-
-<TypeTable
-  type={{
-    question: { type: 'string', description: 'The natural-language question.' },
-    reference_date: {
-      type: 'string | null',
-      default: 'null',
-      description:
-        'ISO YYYY-MM-DD anchor for relative periods (last year, H1, …). Falls back to the configured RAGSPINE_REFERENCE_DATE, then today.',
-    },
-  }}
-/>
-
-**Response** (`AskResponse`) — a found structured answer:
+or the legacy envelope:
 
 ```json
-{
-  "request_id": "req_...",
-  "answer": "ACME_CN FY2024 REVENUE 为 1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）",
-  "route": "structured",
-  "answer_kind": "normal",
-  "clarification": null,
-  "sources": [
-    { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
-  ],
-  "tool_status_summary": { "found": 1, "not_found": 0, "unrecognized": 0 },
-  "cache": { "hit": false, "type": null, "faq_id": null, "version": null, "source": null }
-}
+{ "yaml": "app:\n  mode: workflow\nworkflow:\n  graph: {}\n" }
 ```
 
-<Callout type="info">
-  `answer_kind` is derived by the route layer: `"refusal"` when the structured/composite route found
-  no fact (anti-fabrication), `"clarification"` when the agent asks first, `"normal"` otherwise. A
-  FAQ short-circuit hit returns `route: "faq"`, `cache.hit: true`, and never touches the provider,
-  fact store, or retriever.
-</Callout>
+Unknown fields and providing both/neither forms are rejected. `RAGSPINE_DIFY_RUN_ENABLED` defaults
+to false, producing `403` for execution. Providers are built from server configuration only.
 
-A FAQ short-circuit hit:
+## n8n conversion and internal execution
 
-```json
-{
-  "request_id": "req_...",
-  "answer": "...vetted answer...",
-  "route": "faq",
-  "answer_kind": "normal",
-  "clarification": null,
-  "sources": [],
-  "tool_status_summary": { "found": 0, "not_found": 0, "unrecognized": 0 },
-  "cache": { "hit": true, "type": "exact", "faq_id": "faq_001", "version": 1, "source": "..." }
-}
-```
+| Method | Path              | Behavior                                                     |
+| ------ | ----------------- | ------------------------------------------------------------ |
+| `POST` | `/v1/n8n/convert` | pure `n8n_to_dify` or `dify_to_n8n` conversion with warnings |
+| `POST` | `/v1/n8n/run`     | convert then reuse the default-off Dify run path             |
 
-## `POST /v1/ask/stream`
+Conversion accepts a mapping (or a JSON/YAML string in the conversion envelope) and never runs it.
 
-Streams the **same** answer as `/v1/ask`, token-by-token, as
-[Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
-(`Content-Type: text/event-stream`). It accepts the identical `AskRequest` body.
+## Dify-compatible public Workflow API
 
-<Callout type="warn">
-  **The guards run before the stream, not during it.** The full workflow — FAQ short-circuit,
-  the dual-channel retrieval, the anti-fabrication rewrite, and the provenance guard — runs to
-  completion **synchronously** and produces the finished answer string _before_ a single SSE
-  byte is sent. Only then does the endpoint open the stream and replay that already-computed
-  answer in chunks. The stream touches no provider, store, or retriever. So a fabrication can
-  never be "half-streamed" and then retracted: if any guard would rewrite the answer to a
-  refusal, it has already done so, and the refusal is what streams. If the pre-stream
-  computation fails, the endpoint returns a normal JSON `500` (never a half-open stream).
-</Callout>
+All four routes require `Authorization: Bearer <app-key>`. App keys and server-side workflow paths
+are registered in `RAGSPINE_DIFY_PUBLIC_APPS`; an absent registry returns `401`.
 
-The event sequence is three frame types, each a `data: {json}\n\n` line:
+| Method | Path                                  |
+| ------ | ------------------------------------- |
+| `POST` | `/v1/workflows/run`                   |
+| `GET`  | `/v1/workflows/run/{workflow_run_id}` |
+| `GET`  | `/v1/info`                            |
+| `GET`  | `/v1/parameters`                      |
 
-```text
-data: {"type": "start", "request_id": "req_..."}
+A run request requires `user`, accepts `inputs`, and selects `response_mode` as `blocking` or
+`streaming`. The key selects the server-side workflow; clients do not upload a workflow or
+provider. Execution still requires `RAGSPINE_DIFY_RUN_ENABLED=true`.
 
-data: {"type": "delta", "text": "ACME_CN FY2024 REVENUE "}
+## n8n-compatible public API
 
-data: {"type": "delta", "text": "为 1320 USD_M（来源：…）"}
+Every `/api/v1/*` route requires `X-N8N-API-KEY` matching `RAGSPINE_N8N_API_KEY`. If the server key
+is unset, the surface is disabled with `401`.
 
-data: {"type": "done", "request_id": "req_...", "route": "structured", "answer_kind": "normal", "clarification": null, "sources": [{"doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024"}], "tool_status_summary": {"found": 1, "not_found": 0, "unrecognized": 0}, "cache": {"hit": false, "type": null, "faq_id": null, "version": null, "source": null}}
-```
+| Method                 | Path                                         |
+| ---------------------- | -------------------------------------------- |
+| `GET`, `POST`          | `/api/v1/workflows`                          |
+| `GET`, `PUT`, `DELETE` | `/api/v1/workflows/{workflow_id}`            |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/activate`   |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/deactivate` |
+| `GET`                  | `/api/v1/executions`                         |
+| `GET`, `DELETE`        | `/api/v1/executions/{execution_id}`          |
+| `GET`, `POST`          | `/webhook/{path}`                            |
 
-- A `start` frame carries the `request_id`.
-- Zero or more `delta` frames carry successive `text` chunks of the answer.
-- A terminating `done` frame carries the same metadata fields the non-streaming
-  `AskResponse` returns (`route`, `answer_kind`, `clarification`, `sources`,
-  `tool_status_summary`, `cache`).
+Collection pagination uses `limit` (default 100, accepted/clamped to 1–250) and cursors. Webhooks
+are the exception to API-key authentication: they intentionally accept unauthenticated GET/POST,
+match active workflows only, and remain behind the default-off execution flag.
 
-```bash
-curl -N -s localhost:8000/v1/ask/stream -H 'content-type: application/json' \
-     -d '{"question":"中国内地FY2024的REVENUE是多少"}'
-```
+## Limits, errors, and deployment security
 
-## `POST /v1/ingest/structured/jobs`
+The scaffold and selected Dify POST routes reject bodies larger than 2 MiB before buffering; a
+decoded workflow document is limited to 1 MiB and has additional depth/node/string/YAML-alias
+limits. Validation responses remove echoed input/context. Internal failures return opaque error
+objects and no traceback.
 
-Enqueues a structured ingestion job. Accepted suffixes: `.xlsx`, `.xlsm`, `.pptx`, `.pdf`.
-A path outside `RAGSPINE_ALLOWED_UPLOAD_ROOT` (when set) returns `400 PathNotAllowedError`.
-
-**Request** (`IngestStructuredJobRequest`)
-
-<TypeTable
-  type={{
-    file: {
-      type: 'string',
-      description: 'Path to the source file (must resolve inside the allowed upload root).',
-    },
-    dry_run: {
-      type: 'boolean',
-      default: 'false',
-      description: 'Validate/extract without writing facts.',
-    },
-    valid_as_of: {
-      type: 'string | null',
-      default: 'null',
-      description: "Business 'as of' date for the ingested facts.",
-    },
-    batch_id: {
-      type: 'string | null',
-      default: 'null',
-      description: 'Idempotent batch identifier (manifest ledger).',
-    },
-    job_id: {
-      type: 'string | null',
-      default: 'null',
-      description: 'Caller-supplied job id; generated when omitted.',
-    },
-  }}
-/>
-
-```bash
-curl -s localhost:8000/v1/ingest/structured/jobs -H 'content-type: application/json' \
-     -d '{"file":"/data/uploads/ACME_FY2024_Review.pptx"}'
-```
-
-**Response** (`JobSubmitResponse`)
-
-```json
-{ "job_id": "..." }
-```
-
-## `POST /v1/ingest/narrative/jobs`
-
-Enqueues a narrative ingestion job. Accepted suffixes: `.pptx`, `.pdf`. `inputs` may be a
-single path string or a list.
-
-**Request** (`IngestNarrativeJobRequest`)
-
-<TypeTable
-  type={{
-    inputs: {
-      type: 'string | string[]',
-      description:
-        'One path or a list of paths (each must resolve inside the allowed upload root).',
-    },
-    dry_run: { type: 'boolean', default: 'false', description: 'Extract/chunk without writing.' },
-    meta_by_doc: {
-      type: 'object | null',
-      default: 'null',
-      description: 'Per-document metadata keyed by doc id.',
-    },
-    job_id: {
-      type: 'string | null',
-      default: 'null',
-      description: 'Caller-supplied job id; generated when omitted.',
-    },
-  }}
-/>
-
-```bash
-curl -s localhost:8000/v1/ingest/narrative/jobs -H 'content-type: application/json' \
-     -d '{"inputs":["/data/uploads/report.pdf"]}'
-```
-
-```json
-{ "job_id": "..." }
-```
-
-## `GET /v1/jobs/{job_id}`
-
-Polls a job. Returns `404 JobNotFound` when the id is unknown.
-
-**Response** (`JobStatusResponse`) — `status` is one of `queued` / `started` / `finished` /
-`failed`:
-
-```json
-{
-  "id": "...",
-  "status": "finished",
-  "result": { "facts_written": 42 },
-  "error": null
-}
-```
-
-A failed job carries a structured `error`:
-
-```json
-{
-  "id": "...",
-  "status": "failed",
-  "result": null,
-  "error": { "type": "JobError", "message": "...", "stage": "execution", "retryable": false }
-}
-```
-
-## Errors
-
-Errors are shaped uniformly and never leak a traceback:
-
-```json
-{ "error": { "type": "InternalError", "message": "internal error", "request_id": "req_..." } }
-```
-
-| Status | `type`                | When                                                               |
-| ------ | --------------------- | ------------------------------------------------------------------ |
-| `400`  | `PathNotAllowedError` | Ingest path is outside the allowlist or has an unsupported suffix. |
-| `404`  | `JobNotFound`         | `GET /v1/jobs/{id}` for an unknown id.                             |
-| `500`  | `InternalError`       | Any unhandled exception in `/v1/ask` (defensive catch-all).        |
+There is no built-in authentication for engine, catalog, compiler, converter, topology, or internal
+run routes. Public deployments must add network isolation or a reverse proxy. The webhook route
+needs ingress authentication/rate limiting if its URL secrecy is insufficient.

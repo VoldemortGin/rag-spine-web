@@ -1,0 +1,458 @@
+---
+title: 检索
+description: 叙事 RAG 通道——段落粒度分块、感知 CJK 的 Okapi BM25、可注入的向量通道、RRF 融合、LLM listwise 重排，以及在 RESTRICTED 内容触及提示词之前把它剥离的适配器。
+---
+
+`retrieval` 领域（`src/ragspine/retrieval/`）是 RAGSpine 的**叙事 RAG 通道**——
+负责回答_"为什么 / 发生了什么"_类问题的那一半：检索文档 chunk、
+融合词法与（可选的）向量信号、重排，并把带引用的片段交给
+agent。它是确定性结构化通道的对应方；agent 如何在两者间路由，
+参见[双通道](/zh/docs/concepts/dual-channel)。
+
+有两条性质在这里没有商量余地，并由代码强制执行：
+
+- **默认语义混合检索，纯 BM25 作为零依赖回退。** 向量通道是
+  _可注入的_。装有 `[embed-onnx]` extra 时，检索是真正的混合检索
+  （BM25 + ONNX 语义 → RRF），无需任何配置（`RAGSPINE_EMBEDDING=auto`）；未接入 embedding
+  后端时则是纯 Okapi BM25 + RRF——完全离线、确定性、零 SDK。
+- **两个出口处的 RESTRICTED 隔离。** 敏感度为 `RESTRICTED` 的内容在
+  `rerank/` 和 `link/` **两个**出口处都会在触及提示词之前被剥离。参见
+  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)。
+
+## 目录结构
+
+<Files>
+  <Folder name="retrieval" defaultOpen>
+    <Folder name="chunking">
+      <File name="chunking.py" />
+      <File name="chunk_store.py" />
+    </Folder>
+    <Folder name="lexical">
+      <File name="retrieval.py" />
+    </Folder>
+    <Folder name="vector">
+      <File name="embedding_backends.py" />
+      <File name="store.py" />
+    </Folder>
+    <Folder name="filtering">
+      <File name="metadata_filter.py" />
+      <File name="automatic.py" />
+    </Folder>
+    <Folder name="routing">
+      <File name="router.py" />
+      <File name="multi_index.py" />
+    </Folder>
+    <Folder name="rerank">
+      <File name="listwise_rerank.py" />
+    </Folder>
+    <Folder name="link">
+      <File name="narrative_link.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+这条管线从左到右读：`chunking` 产出并版本化 chunk → `lexical`
+（配合可选的 `vector`）打分并融合 → `rerank` 重排头部候选 →
+`link` 把结果适配进 agent 并丢弃 RESTRICTED。
+
+## 当前的检索产品预设
+
+`RAGSPINE_RETRIEVAL_MODE=auto` 保持已配置的混合检索行为。别名 `hybrid` 和
+`vector` 同样允许 embedding/向量路径。`economy`、`bm25` 和 `lexical` 是显式的
+零 embedding 预设：服务组装不会构建 embedding 后端或向量存储。
+
+元数据谓词支持 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte` 和 `between`。
+它们是确定性的、保序的收窄操作。自动过滤器抽取是一个
+独立的可选阶段；抽取失败或缺失时绝不会静默地扩大到未过滤候选
+集之外。
+
+对于多知识库，`MultiIndexRetriever` 向路由器索取知识库 ID，独立运行每个
+被选中的索引，并用 RRF 融合各排名列表。结果携带 `library_id` 溯源信息。
+若路由失败，安全的可用性回退会搜索所有已配置的知识库。
+
+## chunking — 段落粒度分块器 + 版本化存储
+
+`chunking/chunking.py` 把文档的纯文本转换为检索 chunk。token
+预算用**字符数**近似（不用第三方分词器），保持
+离线与确定性。
+
+<TypeTable
+  type={{
+    chunk_document: {
+      type: '(text, meta, *, max_chars=480, overlap_chars=80) -> list[Chunk]',
+      description:
+        '贪心的段落聚合，直到 max_chars，相邻块有重叠。空文本 → []。',
+    },
+    DocumentMeta: {
+      type: 'dataclass',
+      description:
+        "每个 chunk 继承的文档级元数据：doc_id、title、topic、entity、geography、period、language、sensitivity（默认 'INTERNAL'）、source_locator_prefix。",
+    },
+    Chunk: {
+      type: 'dataclass',
+      description:
+        '一个 chunk：chunk_id、doc_id、seq、text、source_locator、段落范围、继承的元数据，以及增量式的 parent_id / heading / window_text / parent_locator 扩展字段。',
+    },
+  }}
+/>
+
+常量：`DEFAULT_CHUNK_CHARS = 480`、`DEFAULT_OVERLAP_CHARS = 80`。超长的单个
+段落先按句子结束符（`。！？；.!?;`）切分，再硬切，子 chunk 之间**没有
+重叠**——因此一个 chunk 的 `text` 始终是源文本的连续子串，这
+保证了引用的诚实性（参见[溯源](/zh/docs/concepts/provenance)）。
+当 `max_chars <= 0`、`overlap_chars < 0` 或
+`overlap_chars >= max_chars` 时，`chunk_document` 抛出 `ValueError`。
+
+`chunking/chunk_store.py` 是**版本化 chunk 存储**（SQLite，与事实
+存储同构：显式 schema、参数化 SQL、只读的 `execute_read` 入口）。
+
+- `StoredChunk` — `Chunk` 的全部字段（含 parent/window 字段），外加摄取元数据：
+  `valid_as_of`、`ingested_at`、`version`（默认 `1`）、`active`（默认 `True`）。较旧的 SQLite
+  schema 会以增量方式迁移。
+- `ChunkStore(db_path)` — `init_schema()` 创建 `narrative_chunk` 表且
+  幂等。`replace_doc_chunks(doc_id, chunks, valid_as_of="") -> int` 做**版本化
+  替换**：把版本提升为 `version = max(version) + 1`、将旧行标记为 `active=0`、以
+  `active=1` 插入新 chunk，并返回写入的行数。重新摄取是
+  幂等的；传入空列表则把该文档从活跃集中撤下。
+- `iter_chunks(*, doc_id=None, topic=None, entity=None, geography=None, period=None, language=None, include_inactive=False) -> list[StoredChunk]` — AND 组合的元数据
+  预过滤（默认只含活跃行），用于在任何打分**之前**收窄候选。
+
+## lexical — Okapi BM25（CJK 单字+双字）+ RRF 融合
+
+`lexical/retrieval.py` 是打分核心。一切都是纯 Python——没有 `rank-bm25`、没有
+SDK。
+
+- `tokenize(text) -> list[str]` — 转小写；ASCII 字母数字连续段成为词；**CJK
+  连续段同时输出为单字（unigram）和相邻双字（bigram）**。正是这种双粒度让
+  BM25 无需分词器就能处理中文。
+- `bm25_scores(query_tokens, docs_tokens, k1=1.5, b=0.75) -> list[float]` — 标准 Okapi
+  BM25（`DEFAULT_BM25_K1 = 1.5`、`DEFAULT_BM25_B = 0.75`）。
+- `rrf_fuse(rankings, k=60) -> dict[str, float]` — Reciprocal Rank Fusion，`score += 1.0 / (k + rank)`，rank 从 1 开始。常量为 `DEFAULT_RRF_K = 60`（标准的 RRF
+  取值）。
+- `GlossaryQueryRewriter(max_queries=5)` — 确定性的、基于规则的多查询改写器，
+  用词表的实体/指标同义词展开查询（零 LLM）。原始
+  查询始终排在第一位。
+
+它们组合成检索器类：
+
+<TypeTable
+  type={{
+    RetrievalResult: {
+      type: 'dataclass',
+      description: 'chunk: StoredChunk | Chunk、bm25_score、vector_score、fused_score。',
+    },
+    HybridRetriever: {
+      type: 'class',
+      description:
+        '元数据预过滤 → (BM25 + 可选向量) × 多查询 → RRF → top_k。embedding_backend=None ⇒ 纯 BM25。',
+    },
+    NarrativeIndex: {
+      type: 'class',
+      description:
+        '端到端入口：摄取（分块 + 幂等存储）→ 混合搜索 → 可选的 listwise 重排。',
+    },
+  }}
+/>
+
+`HybridRetriever.search(...)` 在任何打分或 embedding **之前**应用元数据
+预过滤，只对存活候选惰性计算 chunk 向量（按 `chunk_id` 缓存），
+并按 `(-fused_score, chunk_id)` 确定性地打破平局。
+
+<Callout type="info">
+  `HybridRetriever` 还暴露 `.topology() -> PipelineGraph`，一个到
+  [pipeline](/zh/docs/guides/pipeline) 拓扑导出器的薄委托——因此你可以把已配置
+  检索器的实际组装关系渲染为 Mermaid / DOT / JSON。
+</Callout>
+
+## vector — 可注入的 embedding 后端（默认：无）
+
+向量通道是一个_扩展点_，不是默认。`EmbeddingBackend` Protocol
+（定义在 `lexical/retrieval.py`）只有一个方法：
+
+```python
+class EmbeddingBackend(Protocol):
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+```
+
+你通过 `HybridRetriever`、`NarrativeIndex` 和 `build_narrative_retriever` 上的
+`embedding_backend=` 关键字注入实现。库级别的默认参数是
+`None`——**向量通道关闭，检索是纯 BM25 + RRF**。不过在**服务**
+层，`RAGSPINE_EMBEDDING` 现在默认为 `auto`：当 `[embed-onnx]` 可 import 时
+使用 ONNX 语义后端，否则为 `None`——因此_带该 extra_ 的默认安装开箱即是
+真正的混合检索，而裸安装保持逐字节一致的纯 BM25。
+
+`vector/embedding_backends.py` 附带三个具体后端加一个工厂：
+
+<Cards>
+  <Card
+    title="OnnxEmbeddingBackend"
+    description="推荐的语义默认项（位于 [embed-onnx] 之后，经 fastembed）。模型 paraphrase-multilingual-MiniLM-L12-v2（384 维、多语言——中英跨语言），离线且确定性。由 onnx / auto 选中；权重首次拉取后即可离线。"
+  ></Card>
+  <Card
+    title="DeterministicEmbeddingBackend"
+    description="离线的词法哈希后端（blake2b token 分桶 + L2 归一化）。零网络/SDK。其 docstring 标明它非语义——与 BM25 高度相关，没有真正的语义召回增益。"
+  ></Card>
+  <Card
+    title="SentenceTransformerEmbeddingBackend"
+    description="默认模型 Qwen/Qwen3-Embedding-0.6B；设备自动检测（cuda → mps → cpu，可经 RAGSPINE_EMBEDDING_DEVICE 覆盖）。模型在首次 embed 时惰性加载。"
+  ></Card>
+  <Card
+    title="OpenAIEmbeddingBackend"
+    description="默认模型 text-embedding-3-large；惰性 `import openai`；把 SDK 错误包装为 ProviderError。"
+  ></Card>
+</Cards>
+
+```python
+from ragspine.retrieval.vector.embedding_backends import make_embedding_backend
+
+# spec (case-insensitive; defaults to env RAGSPINE_EMBEDDING_BACKEND):
+#   None / "none"            → None  (pure BM25 + RRF, the zero-dep fallback)
+#   "auto"                   → OnnxEmbeddingBackend if [embed-onnx] importable, else None
+#   "onnx" / "fastembed" / "minilm" → OnnxEmbeddingBackend (semantic, offline, deterministic)
+#   "deterministic"          → DeterministicEmbeddingBackend
+#   "openai"                 → OpenAIEmbeddingBackend
+#   "qwen3" / "st" / "sentence-transformers" → SentenceTransformerEmbeddingBackend
+backend = make_embedding_backend("onnx")
+```
+
+`vector/store.py` 还额外提供了可插拔的 `VectorStore` Protocol
+（`upsert` / `query` / `delete` / `count`），带一个零依赖的 `InProcessVectorStore`
+（暴力余弦、按 id 升序打破平局）。注意其 `query` 尊重 `where` 过滤器，但
+**不会**自动丢弃 RESTRICTED——那次移除仍发生在下面两个权威出口。
+
+## rerank — LLM listwise 重排器（RRF 回退）
+
+`rerank/listwise_rerank.py` 用一个 LLM 判定器重排头部候选，位于
+`ListwiseJudge` Protocol 之后：
+
+```python
+class ListwiseJudge(Protocol):
+    def judge(self, query: str, candidates: list[str]) -> list[int]: ...
+```
+
+入口是 `listwise_rerank(query, results, judge, *, top_n=10)`（`DEFAULT_TOP_N = 10`）。两个行为很关键：
+
+1. **RESTRICTED 出口 #1。** `chunk.sensitivity`（不区分大小写）
+   等于 `"RESTRICTED"` 的候选会被排除在发给判定器的集合之外，并保持在其
+   原始 RRF 位置——RESTRICTED 文本**绝不**触及判定器提示词。若所有
+   候选都是 RESTRICTED，则根本不调用判定器。
+2. **RRF 回退。** 判定器抛出任何异常或输出畸形时，开放子集降级为
+   恒等（RRF）顺序。`listwise_rerank` 绝不抛出。
+
+配套的纯函数——`build_listwise_prompt(query, candidates)` 和
+`parse_listwise_response(text, n_candidates)`（稳健地解析为长度为 `n` 的置换，
+失败则回退为恒等）——让重排在没有真实模型的情况下也确定且可测试。
+
+## link — 通往 agent 的适配器（在出口剥离 RESTRICTED）
+
+`link/narrative_link.py` 是本领域（检索"B 线"）与
+[agent](/zh/docs/guides/agent)（"A 线"）之间的缝。它把 `NarrativeIndex` 适配到 agent 的
+`NarrativeRetriever` 契约（该契约定义在 agent 一侧的 `agent/agent.py`）。
+
+- `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — 其
+  `retrieve(query, *, filters=None, top_k=50) -> list[dict]` 把 `filters` 映射为元数据
+  关键字参数、调用底层索引、在过滤结果为空时不带过滤器
+  重试一次，并返回片段字典。
+
+  **RESTRICTED 出口 #2。** 返回值由一个推导式构建，在产生任何片段字典
+  _之前_丢弃所有敏感度等于 `"RESTRICTED"` 的 chunk：
+
+  ```python
+  return [
+      _to_snippet(r)
+      for r in results
+      if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+  ]
+  ```
+
+  因此 RESTRICTED 文本永远不会触及 LLM 合成提示词——同一个常量
+  （`RESTRICTED_SENSITIVITY = "RESTRICTED"`）守卫着两个出口。
+
+- `ProviderListwiseJudge(provider)` — 由 agent 的
+  `LLMProvider` 支撑的具体 `ListwiseJudge`。它构建提示词、发起一次 `provider.chat(...)` 调用并解析
+  响应；provider 错误向上传播并由 `listwise_rerank` 的降级机制捕获。
+- `build_narrative_retriever(chunk_db, provider=None, *, embedding_backend=None) -> tuple[NarrativeIndexRetriever, ChunkStore]` — CLI/服务的组装入口。它打开
+  chunk 存储、调用 `init_schema`，并组装默认链：**纯 BM25 + RRF**
+  （默认无向量后端）+ `GlossaryQueryRewriter` 多查询 +（当给定 `provider` 时）
+  一个 `ProviderListwiseJudge` 重排。关闭存储由调用方负责。
+
+片段字典携带完整溯源：`text`、`doc_id`、`title`、`source_locator`、
+`chunk_id`、各元数据字段、`sensitivity`，以及嵌套的 `scores` 字典
+（`{"bm25", "vector", "fused"}`）。
+
+## 组装示例
+
+```python
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Default: pure BM25 + RRF + glossary multi-query + (with a provider) listwise rerank.
+retriever, store = build_narrative_retriever("data/chunks.db")
+try:
+    snippets = retriever.retrieve("为什么营收下滑", filters={"entity": "ACME_CN"}, top_k=10)
+    # snippets is RESTRICTED-free and carries full lineage per item
+finally:
+    store.close()
+```
+
+<Callout type="warn">
+  两个 RESTRICTED 出口（`rerank/` 与 `link/`）必须都保留。它们是
+  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)不变量由代码强制执行的那一半；移除任何一个都会
+  让受限内容触及提示词。
+</Callout>
+
+## 可选启用的能力栈（0.7.0+）
+
+以上一切都是**默认循环**：离线、确定性、BM25 + RRF（存在
+`[embed-onnx]` 时自动启用稠密向量）。0.7.0 和 0.8.0 两个版本在既有 Protocol 缝上
+以**可选启用层**的形式加入了一大批主流 RAG 技术。每一层都
+**默认关闭、未选中时逐字节一致**，通过 `make_*` 工厂或
+对应的 `RAGSPINE_*` 环境变量选择，且每一层都继承 RESTRICTED 双出口
+隔离与溯源不变量——新层绝不弱化防编造机制。它们按
+所作用的阶段分组。
+
+<Callout type="info">
+  默认保持确定性与离线；选择某一层是一次刻意的启用。数字
+  始终留在[结构化通道](/zh/docs/architecture/channels)——下面的每一层都只
+  塑造*叙事*检索。按版本的清单见[更新日志](/zh/docs/changelog)。
+</Callout>
+
+### 索引与分块
+
+- **Contextual Retrieval**（`RAGSPINE_CONTEXTUAL` / `make_index_text_fn`）——只在**索引/embed 文本**上
+  前置一个确定性上下文头（`title · entity · period · heading`，受控词表、零
+  编造）。`chunk.text`、`source_locator` 与引用
+  保持逐字节一致。
+- **版式感知与父子分块**（`RAGSPINE_CHUNKER=layout|parent_child`）——按
+  结构边界切分而非固定字符预算。子块携带 `parent_id`、`heading`、
+  `window_text` 和 `parent_locator`；存储持久化它们，检索把选中的
+  子块展开为仅供生成使用的独立 `prompt_text`。
+- **句子窗口与语义分块**（`RAGSPINE_CHUNKER=sentence_window|semantic`）——每句
+  一个 chunk 并带合成时窗口，或按 embedding 边界切分（semantic 使用
+  `[embed-onnx]`）。
+- **领域预设——laws / qa / book**（`RAGSPINE_CHUNKER=laws|qa|book`）——薄的
+  版式感知分块器，各自只改变一类文档族的标题检测：**laws**
+  在每个条款（`第N条/款/项`）处开新节，**book** 在每个章节（`第N章/节/篇`，或
+  markdown / 编号标题）处开新节，**qa** 把每个问题（`Q:` / `问：` / 以 `?` 结尾的行）
+  与其后的回答段落配对在共享的 `parent_id` 之下。其余一切——
+  预算、`parent_id` 和定位符——都继承自基础分块器。
+
+<Callout type="warn">
+  父块/窗口展开绝不改变引用身份。`text`、`chunk_id` 和 `source_locator`
+  始终是命中的子块；展开的上下文使用 `prompt_text`。`RESTRICTED` 子块
+  在 `_to_snippet` 之前连同其窗口一起被丢弃，因此看似安全的父块无法重新引入
+  受限文本。
+</Callout>
+- **RAPTOR 多粒度树**（`make_raptor_retriever` / `RAGSPINE_RAPTOR*`）——递归的
+**确定性**阈值聚类；每簇的 `is_synthesis` 摘要携带其
+成员溯源的并集，**永远不是可引用的事实**。检索可以取叶子（细节）或
+内部节点（主题）。
+
+### 表示与重排
+
+- **语义稠密默认项**（`RAGSPINE_EMBEDDING=onnx|auto`，`[embed-onnx]`）——即上文的
+  `OnnxEmbeddingBackend`；`auto` 在可 import 时解析为 ONNX，否则为纯 BM25，因此
+  开箱即用的循环无需配置就成为真正的 BM25 + 稠密 → RRF 混合检索。
+- **本地 cross-encoder 重排**（`RAGSPINE_RERANKER=cross_encoder|ce|auto`，`[rerank]`）——
+  离线重排大脑（`CrossEncoderReranker`，ms-marco MiniLM）；选中时优先于
+  LLM listwise 判定器。
+- **ColBERT 后期交互**（`RAGSPINE_RERANKER=colbert`，`[colbert]`）——token 级
+  多向量 **MaxSim** 打分，以重排器形式提供。
+- **SPLADE 学习型稀疏**（`RAGSPINE_RERANKER=splade`，`[splade]`）——神经稀疏
+  词项扩展打分（像 BM25 一样可解释、但更强），以重排器形式提供。
+
+<Callout type="info">
+  cross-encoder、ColBERT 和 SPLADE 重排器全部运行在 `listwise_rerank` **内部**，因此它们
+  免费继承 **RESTRICTED 出口 #1**——RESTRICTED 候选永远不会触及重排器。
+  ColBERT / SPLADE 以**重排器**形式提供；它们的多向量 / 稀疏*检索后端*（索引）
+  是诚实的后续计划。
+</Callout>
+
+### 查询变换
+
+- **LLM 分解**（`RAGSPINE_QUERY_DECOMPOSE=llm`）——多子问题扇出；每个
+  子问题都重新走完整的受守卫管线，其答案被确定性地合并。
+- **HyDE · RAG-Fusion · step-back**（`RAGSPINE_QUERY_TRANSFORM=hyde|rag_fusion|step_back`）——
+  基于基础检索器的 LLM 查询变换。RAG-Fusion 复用 `rrf_fuse`；HyDE 的
+  假设文档是一个**检索探针，永远不是可引用的事实**。
+- **Adaptive-RAG**（`RAGSPINE_ADAPTIVE`）——确定性启发式（或可选 LLM）
+  复杂度分类器在单发路径与分解之间路由。
+- **纠错检索 / CRAG**（`RAGSPINE_CORRECTIVE`）——把单一的
+  `retry_without_filters` 回退升级为有界（≤2）的确定性 grade→act 循环
+  （去过滤器 → 改写 → 拒答）；拒绝薄弱上下文是防编造安全的选择。
+
+每个生成的查询变体都会在**检索之前**重新经过确定性安全门——
+竞争对手子查询会被拒绝，因此本方数字绝不外泄。
+
+### 检索后处理
+
+- **MMR · lost-in-the-middle · 压缩**（`RAGSPINE_POSTPROCESSOR`，如
+  `"mmr,lost_in_middle"`）——一条确定性的 `NodePostprocessor` 链，运行于重排_之后_、
+  提示词组装_之前_：MMR 多样性去重、lost-in-the-middle 重新排序（最佳命中
+  放到首尾），以及抽取式上下文压缩。压缩写入一个独立的
+  `prompt_text` 键，agent 组装提示词时优先使用它，而 `text` 与所有引用
+  字段保持逐字节一致。LLMLingua-2 / LLM 压缩器是缝上的后续计划。
+
+### 图与多跳
+
+- **结构化关系图**（`graph/` 领域）——在受控维度之上的确定性类型化图，用于
+  **子公司汇总、同业比较与派生追溯**
+  （完整引用），外加一个 `GraphStore` Protocol（`RAGSPINE_GRAPH_STORE`，进程内默认 +
+  `[graph]` `networkx` 适配器）和一个**可选启用**的叙事 GraphRAG 抽取 / 社区
+  骨架（位于 `[graph]` + `[llm]` 之后）。它是独立的多跳表面，不是路由器
+  分支——参见[通道](/zh/docs/architecture/channels)。
+- **关系抽取器插槽**（`RAGSPINE_RELATION_EXTRACTOR`，`make_relation_extractor`）——
+  `build_relation_graph` 旁边的可选插槽，用于只存在于叙事文本中的关系。
+  默认（`None`）让基础图逐字节不变；确定性的共现
+  抽取器添加链路干净的 `co_occurs_with` 边；LLM 抽取器（位于 `[llm]` 之后）
+  给每条边盖上 `model-derived` + `unverified` 戳、把两端都经过
+  `SecurityGate` 筛查，并且绝不让 RESTRICTED 文本触及模型。参见
+  [ADR 0015](/zh/docs/decisions/adr-0015)。
+
+### 多模态
+
+- **ColPali 视觉文档检索**（`RAGSPINE_VISUAL_EMBEDDER=colpali`，`[colpali]`）——
+  页面即图像的后期交互（对视觉 patch 做 MaxSim，复用 ColBERT 打分器），适用于
+  OCR→文本会丢失版式的图表密集报告。**可选启用且需 GPU**；视觉
+  命中是一条页面引用线索（`is_visual`），永远不是可引用的事实，RESTRICTED 页面在
+  索引构建时即被丢弃。真实 GPU 端到端是后续计划（`colqwen2` 是许可证
+  更宽松的模型替代）。
+
+启用方式是统一的——注入一个工厂结果，或设置环境变量让服务来组装：
+
+```python
+from ragspine.retrieval.rerank.cross_encoder import make_reranker
+from ragspine.retrieval.postprocess import make_postprocessor
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Offline cross-encoder rerank + an MMR / lost-in-the-middle post-chain.
+retriever, store = build_narrative_retriever(
+    "data/chunks.db",
+    reranker=make_reranker("cross_encoder"),                  # or RAGSPINE_RERANKER=cross_encoder
+    postprocessor=make_postprocessor("mmr,lost_in_middle"),   # or RAGSPINE_POSTPROCESSOR="mmr,lost_in_middle"
+)
+```
+
+## 相关阅读
+
+<Cards>
+  <Card
+    title="双通道"
+    href="/zh/docs/concepts/dual-channel"
+    description="agent 如何在结构化与叙事通道之间路由。"
+  />
+  <Card
+    title="RESTRICTED 隔离"
+    href="/zh/docs/concepts/restricted-isolation"
+    description="本领域强制执行的双出口过滤不变量。"
+  />
+  <Card
+    title="Agent"
+    href="/zh/docs/guides/agent"
+    description="消费 NarrativeRetriever 并合成带引用回答的编排器。"
+  />
+  <Card
+    title="扩展点"
+    href="/zh/docs/reference/extension-points"
+    description="EmbeddingBackend、ListwiseJudge、NarrativeRetriever 及其他 Protocol。"
+  />
+</Cards>

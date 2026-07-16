@@ -1,0 +1,101 @@
+---
+title: クイックスタート
+description: 決定論的なデモを実行し、Dify 互換ワークフローのひな形を生成し、Python API を呼び出し、オプションのサービスを起動します。
+---
+
+`scripts/` を参照するコマンドはソースチェックアウト用のコマンドであり、RAGSpine リポジトリのルートから
+実行する必要があります。インストール済みの `ragspine` コマンドは任意のディレクトリから動作します。
+
+## 1. オフラインエンジンを検証する
+
+```bash
+ragspine quickstart
+ragspine version
+```
+
+ソースチェックアウトでは、より大規模なエンドツーエンドのフィクスチャ実行は次のとおりです：
+
+```bash
+.venv/bin/python scripts/run_demo.py
+```
+
+このスクリプトは合成ファクトを抽出・取り込みし、それらにクエリを実行し、出典の系譜を確認し、成功時には
+`ALL CHECKS PASSED` で終了します。API キーは不要です。
+
+## 2. 一文からワークフローを作成する
+
+最短の形式では、未知の最初の位置引数を `workflow create` として扱います：
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+このコマンドはまず、同梱されている 1,000 個のテンプレートのいずれかとのマッチングを試みます。マッチの
+確信度が十分でない場合は、固定の `start → llm → end` 構成の Dify 0.6 ワークフローを作成します。コマンドは
+デフォルトで新しい YAML ファイルを書き出し、それを実行することはありません。同等の明示的な形式には次の
+ものがあります：
+
+```bash
+ragspine workflow create "invoice extraction and approval" --stdout
+ragspine workflow create "support triage" --format json -o support.json
+ragspine workflow create --template conditional-response-routing -o routing.yml
+ragspine workflow list
+ragspine workflow show conditional-response-routing --format json
+ragspine workflow preview conditional-response-routing
+```
+
+デフォルトの `auto` マッチャーは、`[embed-onnx]` が利用可能な場合は ONNX マッチャーを使用し、それ以外の
+場合は決定論的な字句マッチングにフォールバックします。モデルを一切使わない経路を保証するには
+`--matcher lexical` を、生成を強制するには `--no-reuse` を使用し、`--force` は通常の既存ファイルを
+置き換える場合にのみ使用してください。シンボリックリンクと特殊ファイルは常に拒否されます。
+
+カタログの出所、フォーマットの制限、プレビュースキーマについては、
+[ワークフローガイド](/ja/docs/guides/workflows) を参照してください。
+
+## 3. Python から質問する
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+print(result.answer)
+print(result.sources)
+```
+
+`answer_question` は引用付きのエビデンス、または明示的な拒否を返します。オプションの会話 `history` は
+生成コンテキストとしてのみ使用されます。すなわち、検索エビデンスとして、あるいはインテント判定と
+セキュリティ判定への入力として使われることは決してありません。
+
+## 4. オプションの HTTP サービスを起動する
+
+`[service]` をインストールし、その後ソースチェックアウトで次を実行します：
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/v1/workflow-templates?limit=10
+curl -s http://127.0.0.1:8000/v1/workflow-scaffold \
+  -H 'content-type: application/json' \
+  -d '{"description":"invoice extraction and approval"}'
+```
+
+カタログおよびひな形生成のルートは読み取り専用であり、実行は行いません。Dify と n8n の実行ルートは、
+`RAGSPINE_DIFY_RUN_ENABLED=true` が設定されていない限り無効です。汎用エンジンのルートには
+アプリケーション認証が含まれていません。外部に公開する前に、認証付きリバースプロキシまたは
+プライベートネットワークの背後にサービスを配置してください。
+
+キューに入った取り込みジョブを処理するには、Redis を起動し、ソースチェックアウトで 2 つ目のプロセスを
+実行します：
+
+```bash
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```

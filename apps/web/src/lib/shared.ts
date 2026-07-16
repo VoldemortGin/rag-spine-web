@@ -13,3 +13,11 @@ export const gitConfig = {
   repo: 'ragspine',
   branch: 'main',
 };
+
+// The content is maintained in the documentation repository, not the engine repository.
+export const docsGitConfig = {
+  user: 'VoldemortGin',
+  repo: 'rag-spine-web',
+  branch: 'main',
+  contentRoot: 'apps/web/content/docs',
+};

@@ -1,0 +1,267 @@
+---
+title: 評価
+description: QA と抽出の評価ハーネス — 4 ゲートの QA メトリクス、チャネル別の抽出精度、そして上方向にのみラチェットし決して黙って下がらないベースライン回帰ゲート。
+---
+
+`eval` ドメイン（`src/ragspine/eval/`）は RAGSpine の評価クローズドループです。バージョン管理された
+ゴールデンセットに対してエンジンを採点する 2 つのハーネス（QA と抽出）に加えて、回帰時に CI を
+失敗させる**ベースラインゲート**で構成されます。その指針となる不変条件は次のとおりです。
+
+> ベースラインゲートは**上方向にのみラチェットし、決して下がりません** — 回帰は必ずゲートを
+> 失敗させるものであり、黙ってゲートを下げてはいけません。ケースを通すためにゴールデンやベース
+> ラインを弱めることは決してしないでください。
+
+## レイアウト
+
+<Files>
+  <Folder name="eval" defaultOpen>
+    <File name="qa_eval.py" />
+    <File name="extraction_eval.py" />
+  </Folder>
+</Files>
+
+ゴールデンとベースラインのデータは `data/golden/` 配下（強制的にバージョン管理）にあり、抽出の
+グラウンドトゥルースフィクスチャは `data/fixtures/` 配下にあります。
+
+## QA 評価 — 4 つのゲート
+
+`qa_eval.py` は Q&A のクローズドループハーネスです。エントリーポイント：
+
+```python
+def run_qa_eval(
+    golden_path: str | Path,
+    mode: str = "tool",
+    kb_dir: str | Path | None = None,
+) -> QAEvalReport: ...
+```
+
+ゴールデンセットを読み込んで検証し、決定的な合成ナレッジベースを構築し（`build_eval_kb`、
+モジュールの `_EVAL_FACT_ROWS` + `_EVAL_NARRATIVE_DOCS` から）、すべてのケースを 2 つのモード
+（`EVAL_MODES = ("tool", "agent")`）のいずれかで実行して、4 ゲートのレポートを返します。
+
+<Cards>
+  <Card
+    title="tool モード"
+    description="LLM を使わずツールを直接呼び出します：parse_intent → clarify_scope → execute_query_metric / ナラティブ retrieve。決定的です。"
+  ></Card>
+  <Card
+    title="agent モード"
+    description="完全なオーケストレーター：決定的な MockProvider(reference_date=...) を用いた answer_question。"
+  ></Card>
+</Cards>
+
+各ケース（`GoldenCase`：`id`、`question`、`case_type`、`expected`、`tags`、
+`reference_date`）は正規化された `CaseOutcome`（ルート、確認質問モード、検出された値/単位/出典、
+拒否フラグ、出典一覧、ツールステータス）へと実行され、その後 **4 つのゲート**に対して採点され
+ます — 4 つの合格率は個別に保たれ、決して 1 つの数値に統合されません。
+
+<TypeTable
+  type={{
+    NUMERIC_ACCURACY: {
+      type: '"numeric_accuracy"',
+      description:
+        '完全一致：found_value == expected.value かつ found_unit == expected.unit（構造化パス）。',
+    },
+    CITATION_VALIDITY: {
+      type: '"citation_validity"',
+      description:
+        '正しい答え + 誤った出典 = 不合格。期待される出典が一致し、かつそのドキュメントが回答テキストに現れなければなりません。',
+    },
+    REFUSAL_APPROPRIATENESS: {
+      type: '"refusal_appropriateness"',
+      description:
+        '双方向：expected.refuse の場合は refused かつ found_value が None であること。そうでない場合は拒否しないこと。',
+    },
+    CLARIFICATION_APPROPRIATENESS: {
+      type: '"clarification_appropriateness"',
+      description:
+        '双方向：clarification_mode == expected.clarification（完全な質問が確認質問を引き起こしてはなりません）。',
+    },
+  }}
+/>
+
+`GATE_METRICS` はこの 4 つすべてのタプルです。5 つ目の独立したメトリクスが、拒否ケースにおける
+捏造を追跡します。
+
+<Callout type="warn">
+  `FABRICATION = "fabrication"` は拒否ケースに対してのみ
+  `detect_fabricated_numbers(answer)` で計算されます。期間トークン（アクティブなプロファイルの
+  時間ディメンションからホワイトリスト化）を取り除き、残った数字はすべて捏造とみなします。目標は **0** です。
+  意図的に 4 つのゲートには統合*されていません*。
+</Callout>
+
+レポートの型：
+
+- `GateMetric` — `name`、`total`、`passed`、`pass_rate`（`total == 0` なら `1.0`、それ以外は
+  `passed / total`）、`failures`、`by_tag`。
+- `QAEvalReport` — `mode`、`n_cases`、`metrics: dict[str, GateMetric]`、および独立した
+  `fabrication: GateMetric`（`fabrication_count` プロパティ付き）。`evaluate(cases, outcomes, mode)` はケースごとに 4 つのゲートルールすべてを適用します。
+
+## 忠実性と根拠性のゲート（0.7.0+）
+
+上記の 4 つのゲートは出典一致・拒否・確認質問を採点しますが、**ナラティブ**な回答が実際に検索
+されたスニペットから_含意されている_かどうかは一切チェックしていませんでした — まさにハルシ
+ネーションが起きる場所です。`eval/groundedness.py` は **2 つの新しいラチェット式ゲート**でこの
+穴を塞ぎます。
+
+<TypeTable
+  type={{
+    FAITHFULNESS: {
+      type: '"faithfulness"',
+      description:
+        'ナラティブ回答内のすべての主張は、検索されたコンテキストから含意されていなければなりません。よくある捏造の形 — スニペットに存在しないエンティティ / 数値 / 断定を持ち込む主張 — を捕捉します。',
+    },
+    ANSWER_ACCURACY: {
+      type: '"answer_accuracy"',
+      description:
+        '自由記述のナラティブ回答は、期待されるドキュメントの実質的な内容をカバーしていなければなりません。以前はナラティブケースに内容の正しさのスコアはなく、出典 / 拒否 / 確認質問のみでした。',
+    },
+  }}
+/>
+
+`GROUNDEDNESS_METRICS = (faithfulness, answer_accuracy)` は**同じ `report.metrics` 内の新しい
+キー**であり、4 つのゲートと**同じベースラインラチェット**（後述）に組み込まれます —
+`1.0` で再ベースライン化され、`--mode tool` と `--mode agent` の両方でゲートされます。4 つの
+`GATE_METRICS` は**厳密に**同じセマンティクスを保ち、何も統合されません。
+
+デフォルトの手法は**オフラインで決定的な語彙重複による含意判定**です
+（`LexicalOverlapJudge`：主張は、そのコンテンツトークンがコンテキストにカバーされる割合が閾値を
+超える場合に限り含意されるとみなされます）— モデルもネットワークも不要なので、`make ci` は完全に
+オフラインでゲートできます。コンテキストの観測は**評価側のみ**で行われ、デフォルトの
+`answer_question` ループはバイト単位で無変更です。
+
+<Callout type="warn">
+  デフォルトのジャッジは**語彙的な代理であり、本物の NLI ではありません** — 言い換え、否定、
+  数値の逆転には無力です。最も一般的な捏造の形（コンテキストに存在しない新しいトークン）を捕捉し、
+  含意されない主張がゲートを**失敗**し、忠実なエコーが合格することを逆方向テストで実証済みです。
+  `EntailmentJudge` の縫い目（`make_entailment_judge`）の背後にある本物の ONNX-NLI ジャッジ
+  （`[eval]`）と LLM ジャッジ（`[llm]`）、さらに context-precision / recall /
+  answer-relevance は、正直なフォローアップ課題です。
+</Callout>
+
+これにより、捏造防止はナラティブチャネル上で単に主張されるだけのものではなく、**計測される**
+回帰ロックになります — 不変条件は、実際に破られる場所でチェックされるようになりました。
+
+## QA ベースライン回帰ゲート
+
+`qa_eval.py` はベースライン比較も担います。
+
+- `make_baseline_entry(report) -> dict` → `{"metrics": {name: pass_rate}, "fabrication_count": int, "n_cases": int}`。
+- `compare_to_baseline(report, baseline) -> BaselineComparison` — **いずれかのゲートの
+  `pass_rate` がベースライン閾値を下回るか、`fabrication_count` がベースラインを上回るとゲートを
+  失敗させます。** チェックされるのはベースラインに列挙されたメトリクスのみで、完全に等しい場合は
+  合格です。各回帰は `metric`、`baseline`、`current`、`delta` を記録します。
+
+**ハードコードされた閾値はありません** — 閾値は `data/golden/qa_baseline.json` に以前保存された
+モード別の合格率です。ベースラインは観測された実行を通じて上方向にラチェットします。
+
+## QA ハーネス — CLI
+
+`scripts/run_qa_eval.py` がプロジェクトルートからハーネスを駆動します。
+
+<Tabs items={['実行', 'レポートを保存', 'ベースラインを更新']}>
+  <Tab value="実行">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool
+    ```
+  </Tab>
+  <Tab value="レポートを保存">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode agent --report out/qa_report.json
+    ```
+  </Tab>
+  <Tab value="ベースラインを更新">
+    ```bash
+    .venv/bin/python scripts/run_qa_eval.py --mode tool --update-baseline
+    ```
+  </Tab>
+</Tabs>
+
+フラグ：`--mode {tool,agent}`（デフォルト `tool`）、`--golden`（デフォルト
+`data/golden/qa_golden_set.jsonl`）、`--report`、`--baseline`（デフォルト
+`data/golden/qa_baseline.json`）、`--update-baseline`。ゲートはモードごとにキー付けされます。
+ベースラインのないモードは初回実行時に自動生成して合格します（exit 0）。ベースラインがある場合、
+いずれかのゲートの回帰または捏造の増加で exit 1 になります。
+
+## ゴールデンデータの形式
+
+`data/golden/qa_golden_set.jsonl` は 1 行につき 1 つの JSON オブジェクトです。各ケースは `id`、
+`question`、`case_type`（`numeric` / `clarification` / `refusal` / `narrative` /
+`composite` のいずれか）、`expected`（常に `clarification` ∈ `{none, ask_first, answer_with_assumptions}`
+と `refuse: bool` を持ち、numeric/composite は `value` + `unit` +
+`source` を、narrative/composite は `narrative_doc` を追加）、`tags`、`reference_date` を持ちます。
+
+```json
+{
+  "id": "num-001",
+  "question": "香港FY2025的REVENUE是多少",
+  "case_type": "numeric",
+  "expected": {
+    "clarification": "none",
+    "refuse": false,
+    "value": 1702.0,
+    "unit": "USD_M",
+    "source": { "doc": "ACME_FY2025_Results.pptx", "locator": "slide=5,table=1,row=2,col=3" }
+  },
+  "tags": { "topic": "FIN", "scope": "ACME_HK", "qtype": "must_not_clarify" },
+  "reference_date": "2026-06-12"
+}
+```
+
+<Callout type="info">
+  ゴールデンセットは架空の ACME 社と合成された数値を使用します。`data/golden/` は強制的に
+  トラッキングされているため、ベースラインがバージョン管理から漏れることはありません。
+</Callout>
+
+## 抽出評価
+
+`extraction_eval.py` はオフィスドキュメント抽出をチャネル別に採点します。
+
+```python
+def run_eval(
+    facts: list[dict[str, object]],
+    ground_truth: dict[str, object] | list[dict[str, object]],
+) -> EvalReport: ...
+```
+
+抽出された `facts` を `sheet!cell_ref` でグラウンドトゥルースと突き合わせ、両側に存在するセルのみを
+評価して、**3 つのチャネル**で精度を計算します。
+
+| チャネル       | 定数                                        | 比較されるファクトフィールド |
+| -------------- | ------------------------------------------- | ---------------------------- |
+| セル値         | `CELL_VALUE = "cell_value"`                 | `value`                      |
+| 色マッピング   | `COLOR_MAPPING = "color_mapping"`           | `tags`                       |
+| ヘッダー帰属   | `HEADER_ATTRIBUTION = "header_attribution"` | `merge_span`                 |
+
+型：`ChannelMetric`（`name`、`total`、`correct`、`accuracy`、`mismatches`）、`EvalReport`
+（`channels: dict[str, ChannelMetric]`、`n_facts`）。回帰ゲートは
+`compare_to_baseline(metrics, baseline) -> BaselineComparison` です。`accuracy` が閾値を
+下回ったチャネルは不合格（`passed=False`）となり、チェックされるのはベースラインに列挙された
+チャネルのみで、完全に等しい場合は合格です。グラウンドトゥルースのフィクスチャは
+`data/fixtures/` 配下にあります（例：`fixtures_ground_truth.json`、`pdf/pdf_ground_truth.json`、
+`pptx/pptx_ground_truth.json`）。
+
+## 関連ページ
+
+<Cards>
+  <Card
+    title="捏造防止"
+    href="/ja/docs/concepts/anti-fabrication"
+    description="拒否メトリクスと捏造メトリクスが守る振る舞い。"
+  />
+  <Card
+    title="出典追跡"
+    href="/ja/docs/concepts/provenance"
+    description="出典妥当性ゲートがチェックする系譜。"
+  />
+  <Card
+    title="エージェント"
+    href="/ja/docs/guides/agent"
+    description="agent モード評価で動かされるオーケストレーター。"
+  />
+  <Card
+    title="CLI とスクリプト"
+    href="/ja/docs/getting-started/cli-and-scripts"
+    description="run_qa_eval.py およびその他のリポジトリルートのスクリプト。"
+  />
+</Cards>

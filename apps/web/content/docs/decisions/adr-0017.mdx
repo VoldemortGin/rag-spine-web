@@ -1,0 +1,99 @@
+---
+title: ADR 0017 — Conversation history is generation-only context
+description: Add first-class history without allowing previous turns into intent parsing, retrieval, security decisions, or evidence.
+---
+
+**Status:** accepted
+
+**Date:** 2026-07-14
+
+> Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
+
+Constrained by engine ADR 0005 (new capability beside the byte-identical default path) and engine
+ADR 0010 (deterministic intent/security independent of model-facing context). It serves the
+multi-turn product gap surfaced by spinestudio ADR 0006.
+
+<Callout type="info">
+  ADR numbers are repository-local. References in this source record point to RAGSpine engine ADRs;
+  the website's historical [ADR 0012](/docs/decisions/adr-0012) is a different, family-level record.
+</Callout>
+
+## Context
+
+`answer_question(question, store, provider, ...)` was single-shot and stateless, with no history
+parameter. When the product layer added multi-turn chat, the only way to give a model prior context
+was to splice history into the `question` string.
+
+That poisoned deterministic intent parsing. A previous answer number such as `1320` could be read
+as period `FY1320`, silently turning a single-metric lookup into a wrong comparison and breaking
+deterministic routing and anti-fabrication correctness. The product layer therefore kept history
+injection default-off while waiting for the engine to expose a first-class parameter that
+structurally separates parse input from generation context.
+
+## Decision
+
+Add an optional `history: Sequence[tuple[str, str]] | None = None` keyword to
+`answer_question`. Each turn is `(role, text)` with intended roles `user` or `assistant`. Thread the
+same shape and semantics through service `/v1/ask` and `/v1/ask/stream` as `AskRequest.history`.
+
+### Default `None` is byte-identical
+
+`_history_messages(None) == []`. Tool-loop and narrative message sequences are unchanged without
+history. A parametrized regression in `tests/agent/test_history.py::test_default_none_is_byte_identical`
+covers structured found, not found, multi-subtask, and narrative behavior.
+
+### History never enters deterministic intent parsing
+
+The parser sees only the current `question`: `intent = parser.parse(question, …)`. The security
+gate likewise rescreens that raw question. `_history_messages` converts prior turns to OpenAI-shaped
+messages inserted between the system prompt and the current user turn in `_run_tool_loop` and
+`_run_narrative`. The current question stays the final user message, so MockProvider's last-user-turn
+parse is unpolluted.
+
+The public history shape is a flat `(role, text)` tuple. It cannot carry a system/tool role or
+smuggle `tool_calls`; unknown roles normalize to user. This structural split between parse input
+and generation context fixes the product pain point.
+
+### Anti-fabrication survives history
+
+The structured channel still renders a found answer deterministically from tool facts or rewrites a
+miss to not-found. History produces no evidence; provenance still points only to real tool/retrieval
+hits. A negative test places a fabricated fact—`Shanghai FY2099 REVENUE = 999`—in history and
+asserts that a knowledge-base miss remains a refusal, never cites `999`, and has empty `sources`.
+
+The narrative retrieval query remains only the current question. History never enters retrieval.
+
+### RESTRICTED double-exit isolation is unchanged
+
+History adds generation-context messages only. It never touches retrieval, so the `link/` and
+`rerank/` exits still remove RESTRICTED content. `tests/conformance/test_history_isolation.py`
+binds both history forms and includes a non-vacuous leaky-retriever reverse proof.
+
+The signature remains within the engine's onboarding-complexity budget: `history` is keyword-only
+with a default, so first-answer onboarding cost does not change. The corresponding engine record is
+[`docs/adr/0012-onboarding-complexity-budget.md`](https://github.com/VoldemortGin/ragspine/blob/main/docs/adr/0012-onboarding-complexity-budget.md),
+not the website's same-numbered family ADR.
+
+## Alternatives considered (rejected)
+
+- Keep splicing history into `question`: this is the exact defect; it poisons deterministic parsing
+  and anti-fabrication.
+- Accept arbitrary OpenAI `list[dict]` messages: callers could inject `system`, `tool_calls`, or
+  fabricated tool results. Flat `(role, text)` tuples are deliberately not capable of that shape.
+- Give history to the intent parser for coreference/ellipsis resolution: this reopens the poisoning
+  path. Deterministic parsing depends only on the current question; optional `ConversationSession`
+  slot carry-forward remains separate.
+- Feed history into narrative retrieval: history would become an uncited evidence source. The
+  retrieval query remains the current question only.
+
+## Consequences
+
+- The engine has a first-class multi-turn context parameter; a product can enable history without
+  corrupting deterministic routing or anti-fabrication.
+- Byte-identical default behavior, parse/context separation, anti-fabrication, and RESTRICTED
+  isolation are bound by tests.
+- New artifacts are `answer_question(history=)`, `_history_messages`, `AskRequest.history` on both
+  ask routes, `tests/agent/test_history.py`, `tests/conformance/test_history_isolation.py`, and
+  `tests/service/api/test_api_ask_history.py`.
+- `ConversationSession` is untouched. It is orthogonal and could later construct the history list
+  from remembered turns.

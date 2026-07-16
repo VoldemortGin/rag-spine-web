@@ -1,6 +1,6 @@
 ---
 title: Extension points
-description: Every external dependency is a typed Protocol seam — LLM provider, embeddings, listwise judge, OCR, narrative retriever, task queue. Implement the Protocol and inject it; the core imports zero SDKs and runs offline with MockProvider.
+description: Typed seams for providers, stores, retrieval, chunking, routing, workflow matching, connectors, and service edges.
 ---
 
 RAGSpine's pluggability is not a plugin registry — it is plain structural typing. Each
@@ -51,7 +51,37 @@ offline with the deterministic `MockProvider`.
     title="RelationExtractor"
     description="graph/extractor.py — extract(chunks) returns graph edges; the opt-in narrative-relation slot beside build_relation_graph."
   ></Card>
+  <Card
+    title="Chunker"
+    description="retrieval/chunking/chunker.py — text plus DocumentMeta to lineage-preserving chunks; built-ins and third-party entry points."
+  ></Card>
+  <Card
+    title="LibraryRouter / FilterExtractor"
+    description="retrieval/routing and filtering — deterministic library selection and optional structured metadata-filter extraction."
+  ></Card>
+  <Card
+    title="TemplateMatcher"
+    description="workflows/matching.py — rank metadata-only runnable template references for natural-language scaffolding."
+  ></Card>
 </Cards>
+
+### Current retrieval and workflow seams
+
+`Chunker.chunk(text, meta, *, max_chars, overlap_chars) -> list[Chunk]` owns chunk strategy.
+`make_chunker` supports deterministic default, layout, parent-child, sentence-window, laws, QA,
+book, and semantic implementations plus the `ragspine.chunkers` entry-point group.
+Implementations must preserve `doc_id` and `source_locator`; hierarchy/window data is additive,
+not a substitute for lineage.
+
+`LibraryRouter` selects one or more `RoutableLibrary` IDs. `MultiIndexRetriever` invokes the
+selected `NarrativeRetriever`s independently and RRF-fuses their results; a router failure falls
+back to all libraries. `FilterExtractor` can propose metadata predicates, but filters remain
+validated narrowing operations.
+
+`TemplateMatcher` receives catalog references containing match metadata, not workflow prompts or
+credentials. The built-in lexical and ONNX matchers return ranked candidates; scaffold policy
+applies the score/margin threshold and validates the selected template. A custom matcher does not
+gain file-write or execution authority.
 
 ### `LLMProvider`
 
@@ -222,9 +252,9 @@ when no provider is available).
 <Callout type="warn">
   A model-extracted edge is **useful but untrusted**. `LLMRelationExtractor` writes the
   `derived=model-derived` and `verified=unverified` markers into every edge's metadata, takes
-  lineage from the chunk (the caller) rather than the model's self-report, and drops any edge
-  whose endpoint the deterministic `SecurityGate` refuses. A model-asserted relation can never
-  read as a controlled, verified fact.
+  lineage from the chunk (the caller) rather than the model's self-report, and drops any edge whose
+  endpoint the deterministic `SecurityGate` refuses. A model-asserted relation can never read as a
+  controlled, verified fact.
 </Callout>
 
 ## Implement a Protocol and inject it

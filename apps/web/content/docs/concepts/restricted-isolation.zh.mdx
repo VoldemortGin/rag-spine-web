@@ -1,0 +1,72 @@
+---
+title: RESTRICTED 隔离
+description: 敏感级别，以及 RESTRICTED 内容在两个独立出口被过滤、从而永远无法进入 LLM 提示词的机制。
+---
+
+有些内容绝不能离开域内——董事会评级笔记、执委会会议纪要。RAGSpine 用每个 chunk 上的**敏感级别**来建模这一点，并强制 `RESTRICTED` 内容在到达提示词之前于**两个**独立出口被剥离。
+
+<Callout type="warn">
+  **保证。**敏感级别为 `RESTRICTED` 的内容会在两个出口——`retrieval/link` 和
+  `retrieval/rerank`——被过滤，因此它永远无法进入 LLM 提示词。两个过滤器都必须保留；任何单独一个都不够。
+</Callout>
+
+## 敏感级别
+
+敏感级别是每个 chunk 上的一个字符串列（`retrieval/chunking/chunk_store.py`，默认为 `INTERNAL`）。分级是**确定性的**且由配置驱动（`common/sensitivity.py`，`classify_sensitivity` + `SensitivityPolicy`）：
+
+<Steps>
+  <Step>如果文件名 / 路径匹配任一 `restricted_filename_patterns` → `RESTRICTED`。</Step>
+  <Step>否则，如果正文文本匹配任一 `restricted_keyword` → `RESTRICTED`。</Step>
+  <Step>否则，如果严格开关 `escalate_unknown_to_restricted` 已开启 → `RESTRICTED`。</Step>
+  <Step>否则取策略的 `default_level`（默认 `INTERNAL`）。</Step>
+</Steps>
+
+<Callout type="info">
+  这是**基于信号的失败安全**：未标注但带有信号的文档会升级为
+  `RESTRICTED`。一刀切的"所有未知 → RESTRICTED"会把普通报告藏起来并破坏检索，因此它是一个默认关闭、需主动开启的严格开关。策略从
+  `[sensitivity]` 配置节加载——不硬编码任何公司特定的词汇。
+</Callout>
+
+## 两个出口，而不是一个
+
+叙事通道在两处通向 LLM 的位置会接触 `RESTRICTED` 内容，每一处都独立过滤。
+
+<Tabs items={["出口 1 —— retrieval/link", "出口 2 —— retrieval/rerank"]}>
+  <Tab value="出口 1 —— retrieval/link">
+    把检索接入 agent 的适配器（`retrieval/link/narrative_link.py`）。
+    agent 会将检索到的片段**文本**送入 LLM 合成提示词，所以适配器在出口处、片段被交回之前，丢弃任何 `RESTRICTED` chunk：
+
+    ```python
+    return [
+        _to_snippet(r)
+        for r in results
+        if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+    ]
+    ```
+
+    匹配不区分大小写。没有这个过滤器，`RESTRICTED` 片段的文本会直接落入合成提示词。
+
+  </Tab>
+  <Tab value="出口 2 —— retrieval/rerank">
+    Listwise 重排器（`retrieval/rerank/listwise_rerank.py`）。重排会把候选**文本**发送给 LLM 评审，因此 `RESTRICTED` 候选**绝不会被放进评审提示词**：
+
+    - 只有非 RESTRICTED 子集会被发送给评审。
+    - `RESTRICTED` chunk 被固定在其原始 RRF 位置上。
+    - 如果*所有*候选都是 `RESTRICTED`，则完全不调用评审，结果退化为纯 RRF 顺序。
+
+    这是"策略 B"：它为非敏感子集保留重排质量，同时保证零 `RESTRICTED` 文本到达评审（有一个冻结测试钉死了这一点）。
+
+  </Tab>
+</Tabs>
+
+## 为什么两者都必需
+
+这两个出口守护的是两个_不同的_面向 LLM 的表面：重排评审提示词和合成提示词。一个 chunk 可能在一条路径上幸存，却仍在奔向另一条。
+
+<Callout type="warn">
+  纵深防御：重排过滤器保护评审；link 过滤器保护合成。两个不变量都在 `retrieval/CLAUDE.md` 中被列为"both must stay"，而上游分级器的失败安全升级是第一道防线——如果一份 `RESTRICTED` 文档在摄取时被误标为 `INTERNAL`，两个出口过滤器都会放行它。误标即泄漏；确定性分级器正是为了防止这种情况。
+</Callout>
+
+## agent 最早的守卫：作用域之外的实体
+
+另外，确定性安全门会在_任何通道、工具、检索器或 LLM 调用运行之前_拒绝**作用域之外 / 竞争对手实体**的问题（`agent/agent.py`：`CLARIFY_OUT_OF_SCOPE_ENTITY` 最先返回）。这个门被有意设计为**永不可插拔**：它从原始问题重新推导竞争对手/外部作用域，并用等长空格掩码匹配到的别名，因此换上一个不同的（哪怕是基于 LLM 的）意图解析器也无法绕过它。系统绝不会在回答关于外部实体的问题时给出本方公司的数字。

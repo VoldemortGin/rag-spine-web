@@ -1,0 +1,46 @@
+---
+title: 'ADR 0007: Multilingua — progettare per cinque, rilasciarne due; il resto come locale pack'
+description: Far passare una cucitura di locale attraverso ogni livello; rilasciare e testare cinese + inglese nel core; giapponese / italiano / tedesco vengono rilasciati come locale pack della community.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento del drift (nessun `covers`). Sostituire con un nuovo record, non modificare.
+
+Fa parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002). Vincolato da [0003](/it/docs/decisions/adr-0003).
+
+## Contesto
+
+L'obiettivo è una base di utenti mondiale: prima il cinese, poi cinese / inglese /
+giapponese / italiano / tedesco. Il "multilingua" è stratificato — lingua delle risposte, stringhe
+di messaggi deterministiche (attualmente hardcoded in cinese), parsing dell'input, tokenizzazione del
+recupero (BM25 usa uni+bigrammi CJK; il giapponese richiede una vera segmentazione; italiano/tedesco richiedono
+lo stemming) e valutazione per lingua. Rilasciare solo il cinese rischia di sotto-progettare
+l'astrazione necessaria per la successiva espansione a cinque lingue.
+
+## Decisione
+
+**Progettare per cinque, rilasciarne due.** Far passare una cucitura `locale` attraverso _tutti_ i livelli —
+registro dei tokenizer, catalogo dei messaggi, vocabolario degli intenti, template dei prompt — ciascuno
+indicizzato per locale e collegabile via `Protocol` come tutto il resto. Rilasciare e testare **cinese +
+inglese** nel core. L'inglese come seconda lingua è una scelta deliberata: è la lingua
+franca dell'OSS e, non essendo CJK, costringe l'astrazione tokenizer/stemming/delimitazione
+a spazi a essere reale anziché limitata al CJK. Giapponese / italiano / tedesco vengono rilasciati come
+**locale pack** della community con una checklist per i contributori.
+
+## Alternative considerate (respinte)
+
+- **Solo locale di output / i18n minimale (opzione A)**: `locale` controlla la lingua delle risposte + un
+  catalogo dei messaggi; input/tokenizzazione/corpus invariati. Respinta — sotto-progetta la
+  cucitura rispetto all'obiettivo delle cinque lingue.
+- **Localizzazione completa della pipeline per lingua fin da subito (opzione B)**: tutte e cinque le lingue
+  di prima classe immediatamente. Respinta — costruire la cucitura e due locale di riferimento, non cinque.
+
+## Conseguenze
+
+- I locale pack sono un banco di prova concreto della storia di estensione di `Protocol` per gli esterni,
+  rafforzando l'identità di libreria OSS ([0003](/it/docs/decisions/adr-0003)).
+- I template dei prompt indicizzati per locale sono realizzati da [0008](/it/docs/decisions/adr-0008).
+- Il vocabolario degli intenti per lingua interagisce con la decisione sul parser in [0010](/it/docs/decisions/adr-0010).
+- Nuovi artefatti: `LocaleProfile`, un registro dei tokenizer, un catalogo dei messaggi, una guida "come
+  aggiungere un locale".

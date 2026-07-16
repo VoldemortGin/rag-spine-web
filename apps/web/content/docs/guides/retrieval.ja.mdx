@@ -1,0 +1,455 @@
+---
+title: 検索
+description: ナラティブ RAG チャネル — 段落粒度のチャンキング、CJK 対応の Okapi BM25、注入可能なベクトルチャネル、RRF 融合、LLM リストワイズ再ランキング、そして RESTRICTED コンテンツがプロンプトに到達する前に除去するアダプター。
+---
+
+`retrieval` ドメイン（`src/ragspine/retrieval/`）は、RAGSpine の**ナラティブ RAG チャネル**です —
+ドキュメントチャンクを検索し、字句シグナルと（オプションの）ベクトルシグナルを融合し、再ランキングを行い、
+引用付きスニペットをエージェントに渡すことで、「なぜ / 何が起きたのか」という問いに答える側の半分です。
+これは決定論的な構造化チャネルの対になる存在です。エージェントが両者の間をどうルーティングするかは
+[二重チャネル](/ja/docs/concepts/dual-channel) を参照してください。
+
+ここでは 2 つの性質が譲れないものとして、コードレベルで強制されています。
+
+- **デフォルトでセマンティックハイブリッド、依存ゼロのフォールバックとして純粋 BM25。** ベクトルチャネルは
+  _注入可能_です。`[embed-onnx]` extra がインストールされていれば、検索は設定なし（`RAGSPINE_EMBEDDING=auto`）で
+  真のハイブリッド（BM25 + ONNX セマンティック → RRF）になります。埋め込みバックエンドが接続されていなければ、
+  純粋な Okapi BM25 + RRF — 完全オフライン、決定論的、SDK ゼロ — になります。
+- **2 つの出口での RESTRICTED 隔離。** 機密度が `RESTRICTED` のコンテンツは、プロンプトに到達し得る前に
+  `rerank/` と `link/` の**両方**の出口で除去されます。
+  [RESTRICTED 隔離](/ja/docs/concepts/restricted-isolation) を参照してください。
+
+## レイアウト
+
+<Files>
+  <Folder name="retrieval" defaultOpen>
+    <Folder name="chunking">
+      <File name="chunking.py" />
+      <File name="chunk_store.py" />
+    </Folder>
+    <Folder name="lexical">
+      <File name="retrieval.py" />
+    </Folder>
+    <Folder name="vector">
+      <File name="embedding_backends.py" />
+      <File name="store.py" />
+    </Folder>
+    <Folder name="filtering">
+      <File name="metadata_filter.py" />
+      <File name="automatic.py" />
+    </Folder>
+    <Folder name="routing">
+      <File name="router.py" />
+      <File name="multi_index.py" />
+    </Folder>
+    <Folder name="rerank">
+      <File name="listwise_rerank.py" />
+    </Folder>
+    <Folder name="link">
+      <File name="narrative_link.py" />
+    </Folder>
+  </Folder>
+</Files>
+
+このパイプラインは左から右へ読めます: `chunking` がチャンクを生成しバージョン管理する → `lexical`
+（オプションで `vector` を伴う）がスコアリングと融合を行う → `rerank` が上位候補を並べ替える →
+`link` が結果をエージェント向けに適合させ、RESTRICTED を除去する。
+
+## 現在の検索プロダクトプリセット
+
+`RAGSPINE_RETRIEVAL_MODE=auto` は設定済みのハイブリッド動作を維持します。エイリアス `hybrid` と
+`vector` も埋め込み/ベクトル経路を許可します。`economy`、`bm25`、`lexical` は明示的な埋め込みゼロの
+プリセットで、サービス組み立て時に埋め込みバックエンドもベクトルストアも構築しません。
+
+メタデータ述語は `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte`、`between` をサポートします。
+これらは決定論的で順序を保持する絞り込み操作です。自動フィルタ抽出は独立したオプションのステージであり、
+抽出が失敗または不在でも、フィルタなしの候補集合を超えて暗黙に範囲が広がることは決してありません。
+
+複数ライブラリの場合、`MultiIndexRetriever` はルーターにライブラリ ID を問い合わせ、選択された各インデックスを
+独立に実行し、ランク付きリストを RRF で融合します。結果には `library_id` の出典情報が付与されます。
+ルーティングが失敗した場合、安全な可用性フォールバックとして設定済みの全ライブラリを検索します。
+
+## chunking — 段落粒度チャンカー + バージョン管理ストア
+
+`chunking/chunking.py` はドキュメントのプレーンテキストを検索用チャンクに変換します。トークン予算は
+**文字数**で近似され（サードパーティのトークナイザーは不使用）、オフラインかつ決定論的に保たれます。
+
+<TypeTable
+  type={{
+    chunk_document: {
+      type: '(text, meta, *, max_chars=480, overlap_chars=80) -> list[Chunk]',
+      description:
+        'max_chars まで段落を貪欲に集約し、隣接チャンク間にオーバーラップを付与します。空テキスト → []。',
+    },
+    DocumentMeta: {
+      type: 'dataclass',
+      description:
+        "チャンクごとに継承されるドキュメントレベルのメタデータ: doc_id, title, topic, entity, geography, period, language, sensitivity（デフォルト 'INTERNAL'）, source_locator_prefix。",
+    },
+    Chunk: {
+      type: 'dataclass',
+      description:
+        '1 つのチャンク: chunk_id, doc_id, seq, text, source_locator, 段落範囲, 継承されたメタデータ, および加算的な parent_id / heading / window_text / parent_locator 拡張フィールド。',
+    },
+  }}
+/>
+
+定数: `DEFAULT_CHUNK_CHARS = 480`、`DEFAULT_OVERLAP_CHARS = 80`。過大な単一段落は文末記号
+（`。！？；.!?;`）で分割され、その後ハードカットされます。サブチャンク間には**オーバーラップなし**です —
+そのためチャンクの `text` は常にソースの連続部分文字列にとどまり、引用の誠実さが保たれます
+（[出典追跡](/ja/docs/concepts/provenance) を参照）。
+`chunk_document` は `max_chars <= 0`、`overlap_chars < 0`、または `overlap_chars >= max_chars` の場合に
+`ValueError` を送出します。
+
+`chunking/chunk_store.py` は**バージョン管理チャンクストア**です（SQLite。ファクトストアを踏襲:
+明示的スキーマ、パラメータ化 SQL、読み取り専用の `execute_read` エントリポイント）。
+
+- `StoredChunk` — parent/window フィールドを含むすべての `Chunk` フィールドに加え、取り込みメタデータ
+  `valid_as_of`、`ingested_at`、`version`（デフォルト `1`）、`active`（デフォルト `True`）を持ちます。古い SQLite
+  スキーマは加算的にマイグレーションされます。
+- `ChunkStore(db_path)` — `init_schema()` は `narrative_chunk` テーブルを作成し、冪等です。
+  `replace_doc_chunks(doc_id, chunks, valid_as_of="") -> int` は**バージョン付き置換**を行います:
+  `version = max(version) + 1` に更新し、旧行を `active=0` にマークし、新しいチャンクを `active=1` で挿入し、
+  書き込んだ行数を返します。再取り込みは冪等で、空リストを渡すとそのドキュメントはアクティブ集合から
+  取り下げられます。
+- `iter_chunks(*, doc_id=None, topic=None, entity=None, geography=None, period=None, language=None, include_inactive=False) -> list[StoredChunk]` — AND 結合のメタデータ
+  事前フィルタ（デフォルトではアクティブ行のみ）で、いかなるスコアリングよりも**前に**候補を絞り込むために使われます。
+
+## lexical — Okapi BM25（CJK ユニグラム+バイグラム）+ RRF 融合
+
+`lexical/retrieval.py` はスコアリングの中核です。すべてが純粋な Python で、`rank-bm25` も
+SDK も使いません。
+
+- `tokenize(text) -> list[str]` — 小文字化し、ASCII 英数字の連続は単語になります。**CJK の連続は
+  ユニグラムと隣接バイグラムの両方として出力されます**。この二重粒度こそが、分かち書きツールなしで
+  BM25 を中国語に機能させる要因です。
+- `bm25_scores(query_tokens, docs_tokens, k1=1.5, b=0.75) -> list[float]` — 標準的な Okapi
+  BM25（`DEFAULT_BM25_K1 = 1.5`、`DEFAULT_BM25_B = 0.75`）。
+- `rrf_fuse(rankings, k=60) -> dict[str, float]` — Reciprocal Rank Fusion。`score += 1.0 / (k + rank)` で rank は 1 から始まります。定数は `DEFAULT_RRF_K = 60`（標準的な RRF
+  値）です。
+- `GlossaryQueryRewriter(max_queries=5)` — 用語集のエンティティ/指標のシノニムを使ってクエリを展開する、
+  決定論的でルールベースのマルチクエリ書き換え器（LLM ゼロ）。元のクエリは常に先頭に置かれます。
+
+これらが組み合わさって、以下のリトリーバークラスになります。
+
+<TypeTable
+  type={{
+    RetrievalResult: {
+      type: 'dataclass',
+      description: 'chunk: StoredChunk | Chunk, bm25_score, vector_score, fused_score。',
+    },
+    HybridRetriever: {
+      type: 'class',
+      description:
+        'メタデータ事前フィルタ → (BM25 + オプションのベクトル) × マルチクエリ → RRF → top_k。embedding_backend=None ⇒ 純粋 BM25。',
+    },
+    NarrativeIndex: {
+      type: 'class',
+      description:
+        'エンドツーエンドの入口: 取り込み（チャンキング + 冪等な保存）→ ハイブリッド検索 → オプションのリストワイズ再ランキング。',
+    },
+  }}
+/>
+
+`HybridRetriever.search(...)` は、いかなるスコアリングや埋め込みよりも**前に**メタデータ事前フィルタを適用し、
+生き残った候補についてのみチャンクベクトルを遅延計算（`chunk_id` でキャッシュ）し、同点は
+`(-fused_score, chunk_id)` で決定論的に解決します。
+
+<Callout type="info">
+  `HybridRetriever` は `.topology() -> PipelineGraph` も公開しています。これは
+  [パイプライン](/ja/docs/guides/pipeline) のトポロジーエクスポーターへの薄い委譲であり、設定済みリトリーバーの
+  実際の配線を Mermaid / DOT / JSON として描画できます。
+</Callout>
+
+## vector — 注入可能な埋め込みバックエンド（デフォルト: なし）
+
+ベクトルチャネルはデフォルトではなく、_拡張ポイント_です。`EmbeddingBackend` Protocol
+（`lexical/retrieval.py` で定義）はメソッドを 1 つだけ持ちます。
+
+```python
+class EmbeddingBackend(Protocol):
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+```
+
+実装は `HybridRetriever`、`NarrativeIndex`、`build_narrative_retriever` の `embedding_backend=`
+キーワードで注入します。ライブラリレベルのデフォルト引数は `None` — **ベクトルチャネルはオフで、
+検索は純粋な BM25 + RRF** です。ただし**サービス**層では、`RAGSPINE_EMBEDDING` のデフォルトは現在
+`auto` です: `[embed-onnx]` がインポート可能なら ONNX セマンティックバックエンド、そうでなければ `None` —
+つまり extra を_伴う_デフォルトインストールは箱から出してすぐ真のハイブリッドになり、素のインストールは
+バイト単位で同一の純粋 BM25 のままです。
+
+`vector/embedding_backends.py` は 3 つの具象バックエンドとファクトリを同梱します。
+
+<Cards>
+  <Card
+    title="OnnxEmbeddingBackend"
+    description="推奨されるセマンティックデフォルト（[embed-onnx] の背後、fastembed 経由）。モデルは paraphrase-multilingual-MiniLM-L12-v2（384 次元、多言語 — 中英クロスリンガル）で、オフラインかつ決定論的。onnx / auto で選択され、重みは初回のみ取得しその後はオフラインでダウンロード済みを利用。"
+  ></Card>
+  <Card
+    title="DeterministicEmbeddingBackend"
+    description="オフラインの字句ハッシュバックエンド（blake2b トークンバケッティング + L2 正規化）。ネットワーク/SDK ゼロ。docstring で非セマンティックと明記 — BM25 と高い相関があり、真のセマンティック再現率の向上はない。"
+  ></Card>
+  <Card
+    title="SentenceTransformerEmbeddingBackend"
+    description="デフォルトモデルは Qwen/Qwen3-Embedding-0.6B。デバイスは自動検出（cuda → mps → cpu、RAGSPINE_EMBEDDING_DEVICE で上書き可能）。モデルは初回の埋め込み時に遅延ロードされる。"
+  ></Card>
+  <Card
+    title="OpenAIEmbeddingBackend"
+    description="デフォルトモデルは text-embedding-3-large。`import openai` は遅延実行され、SDK エラーは ProviderError にラップされる。"
+  ></Card>
+</Cards>
+
+```python
+from ragspine.retrieval.vector.embedding_backends import make_embedding_backend
+
+# spec (case-insensitive; defaults to env RAGSPINE_EMBEDDING_BACKEND):
+#   None / "none"            → None  (pure BM25 + RRF, the zero-dep fallback)
+#   "auto"                   → OnnxEmbeddingBackend if [embed-onnx] importable, else None
+#   "onnx" / "fastembed" / "minilm" → OnnxEmbeddingBackend (semantic, offline, deterministic)
+#   "deterministic"          → DeterministicEmbeddingBackend
+#   "openai"                 → OpenAIEmbeddingBackend
+#   "qwen3" / "st" / "sentence-transformers" → SentenceTransformerEmbeddingBackend
+backend = make_embedding_backend("onnx")
+```
+
+`vector/store.py` はさらに、プラガブルな `VectorStore` Protocol
+（`upsert` / `query` / `delete` / `count`）と、依存ゼロの `InProcessVectorStore`
+（総当たりコサイン、id 昇順のタイブレーク）を提供します。その `query` は `where` フィルタを尊重しますが、
+RESTRICTED を自動的に除去することは**ない**点に注意してください — その除去は、下記の 2 つの正式な出口に
+置かれたままです。
+
+## rerank — LLM リストワイズリランカー（RRF フォールバック）
+
+`rerank/listwise_rerank.py` は、`ListwiseJudge` Protocol の背後で LLM ジャッジを使って
+上位候補を並べ替えます。
+
+```python
+class ListwiseJudge(Protocol):
+    def judge(self, query: str, candidates: list[str]) -> list[int]: ...
+```
+
+エントリポイントは `listwise_rerank(query, results, judge, *, top_n=10)`（`DEFAULT_TOP_N = 10`）です。重要な挙動が 2 つあります。
+
+1. **RESTRICTED 出口 #1。** `chunk.sensitivity` が（大文字小文字を区別せずに）
+   `"RESTRICTED"` に等しい候補は、ジャッジに送られる集合から除外され、元の RRF の位置に
+   保持されます — RESTRICTED テキストがジャッジのプロンプトに到達することは**決して**ありません。すべての
+   候補が RESTRICTED の場合、ジャッジは一切呼ばれません。
+2. **RRF フォールバック。** ジャッジの例外や不正な形式の出力があった場合、公開部分集合は恒等
+   （RRF）順に劣化します。`listwise_rerank` は決して例外を送出しません。
+
+補助の純粋関数 — `build_listwise_prompt(query, candidates)` と
+`parse_listwise_response(text, n_candidates)`（長さ `n` の順列への頑健なパース、失敗時は恒等順に
+フォールバック）— により、この再ランキングは実モデルなしで決定論的にテスト可能です。
+
+## link — エージェントへのアダプター（出口で RESTRICTED を除去）
+
+`link/narrative_link.py` は、このドメイン（検索の「B ライン」）と
+[エージェント](/ja/docs/guides/agent)（「A ライン」）の間の縫い目です。`NarrativeIndex` をエージェントの
+`NarrativeRetriever` 契約（エージェント側の `agent/agent.py` で定義）に適合させます。
+
+- `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — その
+  `retrieve(query, *, filters=None, top_k=50) -> list[dict]` は `filters` をメタデータの
+  kwargs にマッピングし、下層のインデックスを呼び出し、フィルタ適用後の結果が空ならフィルタなしで
+  一度だけ再試行し、スニペット dict を返します。
+
+  **RESTRICTED 出口 #2。** 戻り値は、いかなるスニペット dict が生成されるよりも_前に_、sensitivity が
+  `"RESTRICTED"` に等しいすべてのチャンクを除外する内包表記として構築されます。
+
+  ```python
+  return [
+      _to_snippet(r)
+      for r in results
+      if str(r.chunk.sensitivity).upper() != RESTRICTED_SENSITIVITY
+  ]
+  ```
+
+  したがって RESTRICTED テキストが LLM の合成プロンプトに到達することは決してありません — 同じ定数
+  （`RESTRICTED_SENSITIVITY = "RESTRICTED"`）が両方の出口を守っています。
+
+- `ProviderListwiseJudge(provider)` — エージェントの `LLMProvider` を裏に持つ具象
+  `ListwiseJudge`。プロンプトを構築し、`provider.chat(...)` を 1 回呼び出し、応答をパースします。
+  プロバイダーのエラーは伝播し、`listwise_rerank` の劣化処理によって捕捉されます。
+- `build_narrative_retriever(chunk_db, provider=None, *, embedding_backend=None) -> tuple[NarrativeIndexRetriever, ChunkStore]` — CLI/サービスの配線エントリ。チャンクストアを開き、
+  `init_schema` を呼び、デフォルトチェーンを組み立てます: **純粋 BM25 + RRF**
+  （デフォルトではベクトルバックエンドなし）+ `GlossaryQueryRewriter` マルチクエリ +（`provider` が
+  与えられた場合）`ProviderListwiseJudge` 再ランキング。ストアを閉じる責任は呼び出し側にあります。
+
+スニペット dict は完全な出典情報を運びます: `text`、`doc_id`、`title`、`source_locator`、
+`chunk_id`、各メタデータフィールド、`sensitivity`、そしてネストされた `scores` dict
+（`{"bm25", "vector", "fused"}`）。
+
+## 配線する
+
+```python
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Default: pure BM25 + RRF + glossary multi-query + (with a provider) listwise rerank.
+retriever, store = build_narrative_retriever("data/chunks.db")
+try:
+    snippets = retriever.retrieve("为什么营收下滑", filters={"entity": "ACME_CN"}, top_k=10)
+    # snippets is RESTRICTED-free and carries full lineage per item
+finally:
+    store.close()
+```
+
+<Callout type="warn">
+  2 つの RESTRICTED 出口（`rerank/` と `link/`）は両方とも残さなければなりません。これらは
+  [RESTRICTED 隔離](/ja/docs/concepts/restricted-isolation) という不変条件のうちコードで強制される側の半分であり、
+  どちらか一方でも取り除けば、制限付きコンテンツがプロンプトに到達し得てしまいます。
+</Callout>
+
+## オプトイン機能スタック（0.7.0+）
+
+ここまでのすべてが**デフォルトループ**です: オフライン、決定論的、BM25 + RRF（`[embed-onnx]` が
+存在すれば dense が自動的にオン）。リリース 0.7.0 と 0.8.0 は、既存の Protocol の縫い目の上に、主流の
+RAG 技法の幅広いセットを**オプトインレイヤー**として追加します。各レイヤーは
+**デフォルトオフで、未選択時はバイト単位で同一**であり、`make_*` ファクトリまたは対応する
+`RAGSPINE_*` 環境変数で選択され、いずれも RESTRICTED の 2 出口隔離と出典追跡の不変条件を継承します —
+新しいレイヤーが捏造防止を弱めることは決してありません。以下、作用するステージごとに
+グループ化しています。
+
+<Callout type="info">
+  デフォルトは決定論的かつオフラインのままです。レイヤーの選択は意図的なオプトインです。数値は
+  常に [構造化チャネル](/ja/docs/architecture/channels) にとどまります — 以下のすべてのレイヤーは
+  *ナラティブ*検索のみを形作ります。リリースごとの一覧は [変更履歴](/ja/docs/changelog) にあります。
+</Callout>
+
+### インデキシングとチャンキング
+
+- **Contextual Retrieval**（`RAGSPINE_CONTEXTUAL` / `make_index_text_fn`）— 決定論的な
+  コンテキストヘッダー（`title · entity · period · heading`、統制語彙、捏造ゼロ）を
+  **インデックス/埋め込み用テキストにのみ**前置します。`chunk.text`、`source_locator`、引用は
+  バイト単位で同一のままです。
+- **レイアウト対応 & 親子**（`RAGSPINE_CHUNKER=layout|parent_child`）— 固定文字数予算ではなく
+  構造的境界で分割します。子チャンクは `parent_id`、`heading`、`window_text`、`parent_locator` を持ち、
+  ストアはそれらを永続化し、検索は選択された子を生成専用の独立した `prompt_text` に展開します。
+- **センテンスウィンドウ & セマンティック**（`RAGSPINE_CHUNKER=sentence_window|semantic`）— 合成時
+  ウィンドウ付きの 1 文 1 チャンク、または埋め込み境界での分割（semantic は
+  `[embed-onnx]` を使用）。
+- **ドメインプリセット — laws / qa / book**（`RAGSPINE_CHUNKER=laws|qa|book`）— それぞれ 1 つの
+  ドキュメントファミリーについて見出し検出だけを変更する、薄いレイアウト対応チャンカーです: **laws**
+  は各条項（`第N条/款/项`）で、**book** は各章（`第N章/节/篇`、または markdown / 番号付き見出し）で
+  セクションを開始し、**qa** は各質問（`Q:` / `问：` / `?` で終わる行）を、後続の回答段落と共有の
+  `parent_id` の下でペアにします。それ以外のすべて — 予算、`parent_id`、ロケーター — は
+  基底チャンカーから継承されます。
+
+<Callout type="warn">
+  親/ウィンドウ展開が引用の同一性を変えることは決してありません。`text`、`chunk_id`、`source_locator`
+  はマッチした子のままであり、展開されたコンテキストは `prompt_text` を使います。`RESTRICTED` の子は
+  `_to_snippet` の前にそのウィンドウごと除外されるため、安全に見える親が制限付きテキストを再導入することは
+  できません。
+</Callout>
+- **RAPTOR 多粒度ツリー**（`make_raptor_retriever` / `RAGSPINE_RAPTOR*`）— 再帰的な
+**決定論的**しきい値クラスタリング。クラスタごとの `is_synthesis` 要約は、メンバーの出典情報の和集合を運び、
+**決して引用可能なファクトにはなりません**。検索は葉（詳細）でも内部ノード（テーマ）でも
+取得できます。
+
+### 表現と再ランキング
+
+- **セマンティック dense デフォルト**（`RAGSPINE_EMBEDDING=onnx|auto`、`[embed-onnx]`）— 前述の
+  `OnnxEmbeddingBackend`。`auto` はインポート可能なら ONNX に解決され、そうでなければ純粋 BM25 になるため、
+  出荷されるループは設定なしで真のハイブリッド BM25 + dense → RRF になります。
+- **ローカルクロスエンコーダー再ランキング**（`RAGSPINE_RERANKER=cross_encoder|ce|auto`、`[rerank]`）—
+  オフラインの再ランキング頭脳（`CrossEncoderReranker`、ms-marco MiniLM）。選択されると
+  LLM リストワイズジャッジより優先されます。
+- **ColBERT レイトインタラクション**（`RAGSPINE_RERANKER=colbert`、`[colbert]`）— トークンレベルの
+  マルチベクトル **MaxSim** スコアリング。リランカーとして提供されます。
+- **SPLADE 学習型スパース**（`RAGSPINE_RERANKER=splade`、`[splade]`）— ニューラルスパースな
+  語彙拡張スコアリング（BM25 のように解釈可能で、より強力）。リランカーとして提供されます。
+
+<Callout type="info">
+  クロスエンコーダー、ColBERT、SPLADE の各リランカーはすべて `listwise_rerank` の**内側**で動くため、
+  **RESTRICTED 出口 #1** を自動的に継承します — RESTRICTED 候補がリランカーに到達することはありません。
+  ColBERT / SPLADE は**リランカー**として提供され、それらのマルチベクトル / スパースの*検索バックエンド*（インデックス）
+  は正直なフォローアップ課題です。
+</Callout>
+
+### クエリ変換
+
+- **LLM 分解**（`RAGSPINE_QUERY_DECOMPOSE=llm`）— 複数のサブ質問へのファンアウト。各
+  サブ質問はガード付きパイプライン全体を再実行し、その回答は決定論的にマージされます。
+- **HyDE · RAG-Fusion · ステップバック**（`RAGSPINE_QUERY_TRANSFORM=hyde|rag_fusion|step_back`）—
+  基底リトリーバーの上での LLM クエリ変換。RAG-Fusion は `rrf_fuse` を再利用し、HyDE の
+  仮想ドキュメントは**検索プローブであって、決して引用可能なファクトではありません**。
+- **Adaptive-RAG**（`RAGSPINE_ADAPTIVE`）— 決定論的ヒューリスティック（またはオプトインの LLM）による
+  複雑度分類器が、シングルショット経路と分解の間をルーティングします。
+- **修正型検索 / CRAG**（`RAGSPINE_CORRECTIVE`）— 単独の
+  `retry_without_filters` フォールバックを、上限付き（≤2）の決定論的な評価→行動ループ
+  （フィルタ破棄 → 書き換え → 拒否）に格上げします。弱いコンテキストを拒否することが、捏造防止の観点で安全な選択です。
+
+生成されたすべてのバリアントは、**検索の前に**決定論的なセキュリティゲートを再実行します —
+競合他社に関するサブクエリは拒否されるため、自社の数値が漏れることはありません。
+
+### 検索後処理
+
+- **MMR · lost-in-the-middle · 圧縮**（`RAGSPINE_POSTPROCESSOR`、例:
+  `"mmr,lost_in_middle"`）— 再ランキングの_後_、プロンプト組み立ての_前_に走る決定論的な
+  `NodePostprocessor` チェーンです: MMR による多様性の重複排除、lost-in-the-middle 並べ替え（最良の
+  ヒットを先頭と末尾へ）、抽出型コンテキスト圧縮。圧縮は独立した
+  `prompt_text` キーに書き込み、エージェントはプロンプトにそれを優先して使うため、`text` とすべての参照
+  フィールドはバイト単位で同一のままです。LLMLingua-2 / LLM 圧縮器は縫い目のフォローアップ課題です。
+
+### グラフとマルチホップ
+
+- **構造化関係グラフ**（`graph/` ドメイン）— 統制された次元の上に構築される決定論的な型付きグラフで、
+  **子会社ロールアップ、同業比較、導出のトレース**（完全に引用付き）のためのものです。さらに
+  `GraphStore` Protocol（`RAGSPINE_GRAPH_STORE`、インプロセスのデフォルト +
+  `[graph]` の `networkx` アダプター）と、**オプトイン**のナラティブ GraphRAG 抽出 / コミュニティの
+  スケルトン（`[graph]` + `[llm]` の背後）を含みます。これはルーターの分岐ではなく、独立した
+  マルチホップ面です — [チャネル](/ja/docs/architecture/channels) を参照してください。
+- **関係抽出器スロット**（`RAGSPINE_RELATION_EXTRACTOR`、`make_relation_extractor`）—
+  ナラティブテキストの中にしか存在しない関係のための、`build_relation_graph` の隣にあるオプトインスロットです。
+  デフォルト（`None`）は基底グラフをバイト単位で同一に保ちます。決定論的な共起抽出器はクリーンな来歴の
+  `co_occurs_with` エッジを追加します。LLM 抽出器（`[llm]` の背後）はすべてのエッジに `model-derived` +
+  `unverified` の刻印を付け、両端点を `SecurityGate` で審査し、RESTRICTED テキストを決してモデルに
+  到達させません。
+  [ADR 0015](/ja/docs/decisions/adr-0015) を参照してください。
+
+### マルチモーダル
+
+- **ColPali 視覚ドキュメント検索**（`RAGSPINE_VISUAL_EMBEDDER=colpali`、`[colpali]`）—
+  ページを画像として扱うレイトインタラクション（視覚パッチ上の MaxSim、ColBERT スコアラーを再利用）で、
+  OCR→テキストではレイアウトが失われる、チャートや図の多いレポート向けです。**オプトインかつ GPU 前提**。
+  視覚ヒットはページ参照の手がかり（`is_visual`）であって、決して引用可能なファクトではなく、RESTRICTED
+  ページはインデックス構築時に除外されます。実 GPU でのエンドツーエンドはフォローアップ課題です
+  （`colqwen2` がよりライセンスの緩いモデルの代替です）。
+
+オプトインの方法は一様です — ファクトリの結果を注入するか、環境変数を設定してサービスに配線させます。
+
+```python
+from ragspine.retrieval.rerank.cross_encoder import make_reranker
+from ragspine.retrieval.postprocess import make_postprocessor
+from ragspine.retrieval.link.narrative_link import build_narrative_retriever
+
+# Offline cross-encoder rerank + an MMR / lost-in-the-middle post-chain.
+retriever, store = build_narrative_retriever(
+    "data/chunks.db",
+    reranker=make_reranker("cross_encoder"),                  # or RAGSPINE_RERANKER=cross_encoder
+    postprocessor=make_postprocessor("mmr,lost_in_middle"),   # or RAGSPINE_POSTPROCESSOR="mmr,lost_in_middle"
+)
+```
+
+## 関連項目
+
+<Cards>
+  <Card
+    title="二重チャネル"
+    href="/ja/docs/concepts/dual-channel"
+    description="エージェントが構造化チャネルとナラティブチャネルの間をどうルーティングするか。"
+  />
+  <Card
+    title="RESTRICTED 隔離"
+    href="/ja/docs/concepts/restricted-isolation"
+    description="このドメインが強制する 2 出口フィルタリングの不変条件。"
+  />
+  <Card
+    title="エージェント"
+    href="/ja/docs/guides/agent"
+    description="NarrativeRetriever を消費し、引用付きの回答を合成するオーケストレーター。"
+  />
+  <Card
+    title="拡張ポイント"
+    href="/ja/docs/reference/extension-points"
+    description="EmbeddingBackend、ListwiseJudge、NarrativeRetriever、その他の Protocol 群。"
+  />
+</Cards>

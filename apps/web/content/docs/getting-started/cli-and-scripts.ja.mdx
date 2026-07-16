@@ -1,0 +1,83 @@
+---
+title: CLI とスクリプト
+description: インストールされる ragspine コマンドと、ソースチェックアウトの Make/スクリプトエントリポイント。
+---
+
+`ragspine` コンソールコマンドは wheel に同梱されています。`scripts/` とルートの `Makefile` は、
+ソースチェックアウトでのみ利用できる開発用の便利機能です。
+
+## インストールされるコンソールコマンド
+
+| コマンド                                        | 目的                                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `ragspine quickstart`                           | 決定論的なオフラインデモンストレーション                                        |
+| `ragspine ask --db PATH "question"`             | モック/オフラインパスを通して 1 つの質問を実行                                  |
+| `ragspine version`                              | インストール済みディストリビューションのバージョン                              |
+| `ragspine dify analyze FILE`                    | Dify ワークフローを解析して静的に分析します。コード生成や実行は行いません       |
+| `ragspine dify compile FILE`                    | Dify ワークフロー設定を Python ソースにコンパイルします。実行はしません         |
+| `ragspine workflow list`                        | 同梱テンプレートのメタデータを一覧表示                                          |
+| `ragspine workflow show ID --format yaml\|json` | 同梱ワークフローを 1 つ出力                                                     |
+| `ragspine workflow preview ID`                  | バージョン管理された表示専用のグラフ射影を出力                                  |
+| `ragspine workflow create DESCRIPTION`          | テンプレートをマッチングするか、ベースの Dify 0.6 ワークフローを生成            |
+
+この短縮形は `workflow create` と等価です:
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+### workflow create のオプション
+
+| オプション                      | 意味                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------ |
+| `--template ID`                 | カタログテンプレートを厳密に指定して選択し、マッチングをスキップします                     |
+| `--no-reuse`                    | 常に固定のベースワークフローを生成します                                                   |
+| `--matcher lexical\|auto\|onnx` | 決定論的な字句マッチング、自動 ONNX/フォールバック、または ONNX 必須のいずれかを選択します |
+| `--format yaml\|json`           | シリアライズされた出力形式。デフォルトは YAML です                                         |
+| `-o, --output PATH`             | 出力パス                                                                                   |
+| `--stdout`                      | ワークフロードキュメントのみを標準出力に書き出します                                       |
+| `--force`                       | 既存の通常ファイルを置き換えます。リンクと特殊ファイルは引き続き禁止です                   |
+
+ONNX マッチャーには `[embed-onnx]` が必要で、初回使用時にはモデルをダウンロードしてキャッシュする
+ことがあります。`auto` は ONNX が利用できない場合に字句マッチングへフォールバックしますが、明示的に
+`onnx` を指定した場合はエラーを報告します。
+
+`dify compile` と `dify analyze` は `.json`、`.yaml`、`.yml`、`.toml` のパスを受け付けます。解析では
+Dify のバリデーションの前に、これらを JSON 互換のマッピングへ正規化します。コンパイルはコードを
+生成するだけであり、別途ゲートされたサービスの run エンドポイントのみがコンパイル済み出力を実行します。
+
+## ソースチェックアウトの Make ターゲット
+
+これらはすべてリポジトリのルートから実行してください。
+
+| ターゲット                                        | 目的                                                                                      |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `make venv`                                       | uv で `.venv` を作成                                                                      |
+| `make install`                                    | `[dev,service,vector]` の editable インストール                                           |
+| `make install-all`                                | `[dev,service,vector,llm,embed]` の editable インストール。`[all]` と同一ではありません   |
+| `make test`                                       | GPU/ネットワークテストを除外した pytest                                                   |
+| `make ci`                                         | ドキュメント、型付け、lint、テスト、QA、デモを含むブロッキングな 8 段階ゲート             |
+| `make lint`                                       | 情報提供用の `scripts/lint.sh`。CI ゲートは strict な mypy と ruff を別途呼び出します     |
+| `make fmt`                                        | ruff による修正とフォーマット                                                             |
+| `make drift`                                      | ドキュメントとコード間のドリフトチェック                                                  |
+| `make demo`, `make ask Q="…"`                     | 決定論的なデモと単一の質問                                                                |
+| `make eval-qa`, `make eval-retrieval`             | QA と検索の評価                                                                           |
+| `make serve`, `make worker`                       | FastAPI サーバーと Redis ベースの RQ ワーカー                                             |
+| `make build`, `make publish-test`, `make publish` | ビルドと Twine アップロードのワークフロー                                                 |
+
+ローカルの CI スクリプトが正式なゲートです。8 つの段階は、ドキュメント参照の整合性、ドキュメント
+ドリフト、`mypy --strict`、ruff、通常のテストスイート、分離された Docling テスト、tool モードと
+agent モードでの QA ラチェット、そしてデモのスモークテストです。
+
+## 重要なスクリプト
+
+- `scripts/ask.py`: ワンショットの質問インターフェース。`--provider mock` は決定論的です。実際の
+  Anthropic アダプターには `[llm]` と認証情報が必要です。プロジェクト作者は Anthropic API に
+  アクセスできないため、このプロバイダーパスは他と同等の実地での統合カバレッジを受けていません。
+- `scripts/run_demo.py`: 完全オフラインの、フィクスチャから回答までのスモークテスト。
+- `scripts/run_server.py`: `--host` と `--port` を備えた uvicorn ランチャー。
+- `scripts/run_worker.py`: RQ コンシューマー。`--queue` のデフォルトは `ragspine-ingest` です。
+- `scripts/topology.py`: 静的なエンジントポロジーを Mermaid、DOT、または JSON としてエクスポートします。
+
+現時点では `ragspine serve`、`ragspine worker`、`ragspine topology` のコンソールサブコマンドは
+意図的に存在しません。これらはソースチェックアウトのスクリプトのままです。

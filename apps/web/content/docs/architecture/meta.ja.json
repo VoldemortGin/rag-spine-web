@@ -1,0 +1,5 @@
+{
+  "title": "アーキテクチャ",
+  "icon": "Network",
+  "pages": ["overview", "request-flow", "channels", "package-layout"]
+}

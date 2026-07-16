@@ -1,0 +1,119 @@
+---
+title: ADR 0016 — 検索プロダクト化の設定
+description: メタデータフィルタリング、マルチインデックスルーティング、親子プリセット、エコノミーモード。すべての検索不変条件を保持したまま。
+---
+
+**ステータス:** accepted
+
+**日付:** 2026-07-14
+
+> 不変の記録。ドリフト追跡の対象外（`covers` なし）。編集せず、supersede で置き換えること。
+
+[ADR 0002 のプロダクト方針](/ja/docs/decisions/adr-0002)の一部。
+[ADR 0005](/ja/docs/decisions/adr-0005)（新機能はバイト単位で同一なデフォルトパスから分離する）と
+[ADR 0010](/ja/docs/decisions/adr-0010)（モデル出力に依存しない決定論的なセキュリティ/分離）に
+制約される。[ADR 0015](/ja/docs/decisions/adr-0015) のシームのメタパターンを踏襲している。
+
+## コンテキスト
+
+Dify のデータセット検索が持つプロダクト向けのサーフェス——メタデータフィルタリング、
+複数ナレッジベースのルーティング、親子セグメンテーション、エコノミーモードと高品質モードの切り替え——に
+対応しつつ、RAGSpine の 3 つのコードレベル不変条件、すなわち捏造防止、出典追跡、
+RESTRICTED の二重出口（`link/` + `rerank/`）分離を、すべての新モードで維持したい。
+デフォルトのオフライン・ゼロネットワークパスはバイト単位で同一のまま保たれなければならず、
+パラメータ化された conformance がすべてのモードを拘束し、不変条件が静かに退行できないように
+しなければならない。
+
+## 決定
+
+4 つの追加を行う。いずれもオフライン決定論的、オプトイン、かつデフォルトはバイト単位で同一である。
+それぞれがファミリーのシームパターンに従う：Protocol + 依存ゼロの決定論的デフォルト +
+`make_*` ファクトリ + 環境セレクタ + パラメータ化された conformance。
+
+### 1. メタデータフィルタリング
+
+`retrieval/filtering/` に `MetadataFilter`/`FilterCondition` を追加する。これは `eq`、`ne`、`in`、
+`nin`、`gt`、`gte`、`lt`、`lte`、`between` を備えた、スコアリング前の決定論的ステージである。
+文字列は辞書順で比較され、フィールドが存在しない場合はマッチしない。`apply` は常に順序を保存する
+部分列を返すため、絞り込みしかできない。両方の出口が依然として RESTRICTED を除去するため、
+たとえ制限されたコンテンツを選択するフィルタであっても、それを表面化させることはできない。
+
+これは `HybridRetriever.search(metadata_filter=)` と
+`NarrativeIndex.retrieve(metadata_filter=)` を通じて接続される。デフォルトの `None` はバイト単位で
+同一である。`automatic.py` はオプトインのシームである：`FilterExtractor` Protocol と
+`make_filter_extractor`（デフォルト `none` → `None`、オフラインの
+`ControlledVocabFilterExtractor` はオプトイン、LLM 抽出器はオプトインのアダプタ）。その出力は
+`MetadataFilter` にしかなり得ず、構造的に回答チャネルに到達できず、絞り込みしかできない。
+
+### 2. マルチインデックスおよびマルチルートのルーティング
+
+`retrieval/routing/multi_index.py` の `MultiIndexRetriever` は、A ラインの
+`NarrativeRetriever` Protocol を実装する。複数ライブラリへファンアウトし、`lexical.rrf_fuse` を
+用いてライブラリ横断の RRF 融合を実行できる。すべての結果に `library_id` が付与されるため、
+出典追跡は由来ライブラリを保持する。
+
+ルーティングモードは `LibraryRouter` シームと `make_library_router` を使用する。デフォルトの
+`none` は全ライブラリへファンアウトする。決定論的な `KeywordLibraryRouter` はクエリを
+ライブラリの説明文とマッチングする。LLM ルーターはオプトインである。重なりがゼロの場合は
+全ライブラリへフォールバックするため、ルーティングが再現率を枯渇させることはない。分離は
+継承される：各ライブラリのベースリトリーバーはすでに RESTRICTED コンテンツを除去済みであるため、
+融合はその部分集合しか下流へ渡せない。
+
+### 3. 親子チャンクのプリセット
+
+`chunking/domain_presets.py` の `ParentChildChunker`（エイリアスは `parent_child` と
+`small_to_big`）は、薄い `LayoutAwareChunker` のサブクラスである。オーバーライドするのは
+`_child_extra` のみで、親セクションの全文である `window_text` と、そのセクションの実際の
+段落スパンである `parent_locator` を付与する。したがって、精密な子ヒットは決定論的に
+親コンテキストへ展開でき、出典追跡は実在するロケータを指す。
+
+ベースの `Chunk` には、空のデフォルトを持つ加算的な `parent_locator` と、オーバーライド可能な
+フックが 1 つ追加される。デフォルトのチャンカーはどちらの値も設定せず、バイト単位で同一のままである。
+これは既存の `CHUNKER_IMPLS` の出典追跡 conformance を使用する。
+
+### 4. エコノミーモード
+
+`retrieval/mode.py` に `RetrievalMode` と `make_retrieval_mode` を追加し、
+`ServiceConfig.retrieval_mode` で選択する。既存の純 BM25 パス（`embedding_backend=None`）が
+明示的な `economy` プリセットとなる。アセンブリは埋め込みバックエンドもベクトルストアも
+構築しないため、埋め込みコストはゼロである。`hybrid`/`vector` は代替サーフェスを選択する。
+デフォルトの `auto` は、`ServiceConfig.embedding` に従って埋め込みを組み立てる hybrid を意味し、
+従来の挙動を保持する。
+
+すべてのモードは、空虚でない逆証明を伴うパラメータ化された conformance によって拘束される：
+
+- `tests/conformance/test_metadata_filter_invariants.py`：演算子ごとの絞り込み性/決定論性と、
+  必ず失敗しなければならない拡大スタブ。
+- `test_multi_index_isolation.py`：ルーターごとの分離/出典追跡と、必ず失敗しなければならない
+  リークするベース。
+- `test_retrieval_mode_invariants.py`：モードごとの分離/出典追跡と、エコノミーの埋め込みゼロ。
+
+原則：**プロダクト向けの機能はデフォルトパスの内部ではなく、その傍らのオプトインのシームに置くこと。
+すべてのモードで 3 つの検索不変条件をすべて継承し、決定論的に証明すること。**
+
+## 検討した代替案（却下）
+
+- 自動フィルタ抽出に、フィルタ条件を超えるもの（回答の書き換えなど）を出力させる：
+  これは捏造チャネルを開いてしまう。その戻り値の型は `MetadataFilter` に限定される。
+- フィルタリングに候補の追加や並べ替えを許す：拡大/並べ替えは RESTRICTED コンテンツを
+  持ち込んだり、バイト単位で同一のデフォルトを乱したりし得る。`apply` は厳密に絞り込みのみで、
+  順序を保存する。
+- `MultiIndexRetriever` の内部で RESTRICTED を除去する：これは出口を重複させ、乖離のリスクを
+  生む。各ライブラリの既存の出口が分離を所有し、融合は chunk を一切読まない。
+- 親子を直ちに検索時のストア展開へ向け直す：この決定の時点では、チャンカーはナラティブの
+  取り込みに接続されておらず、階層/ウィンドウのデータも永続化されていなかった。プリセットは
+  まず親コンテキストと実在するロケータを実装した。[ADR 0018](/ja/docs/decisions/adr-0018) が
+  その後、延期されていたストアレベルの展開を完成させている。
+- ブール値の `economy` フラグを使う：名前付きのモードとファクトリのほうがファミリーの
+  シームパターンに適合し、この選択を第一級の設定として公開できる。
+
+## 帰結
+
+- 検索はメタデータフィルタリング、マルチライブラリルーティング、親子セグメンテーション、
+  エコノミー/ベクトルのプリセットを獲得し、その一方でデフォルトのオフラインパスは
+  バイト単位で同一かつゼロネットワークのままである。
+- 捏造防止、出典追跡（ライブラリの由来を含む）、RESTRICTED の二重出口分離は、すべての
+  新モードで成立し、信頼ではなく conformance によって強制される。
+- 新しい成果物は `retrieval/filtering/`、`retrieval/routing/`、`ParentChildChunker`、加算的な
+  `Chunk.parent_locator` と `_child_extra`、`retrieval/mode.py`、
+  `ServiceConfig.retrieval_mode`、および 3 つの conformance パックである。

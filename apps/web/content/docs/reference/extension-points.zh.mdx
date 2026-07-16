@@ -1,0 +1,330 @@
+---
+title: 扩展点
+description: 面向 provider、存储、检索、分块、路由、工作流匹配、连接器与服务边缘的类型化缝。
+---
+
+RAGSpine 的可插拔性不是插件注册表——就是普通的结构化类型。每个
+外部依赖都是一个 Python `Protocol`；核心依赖抽象，绝不依赖
+厂商 SDK。新增一个 provider、向量存储、重排器或 OCR 引擎只需**新增一个
+文件**，且每个重量级 SDK 都是**延迟导入**的，因此核心可以干净地导入，并借助
+确定性的 `MockProvider` 完全离线运行。
+
+<Callout type="info">
+  下面所有的缝都是 `@runtime_checkable` Protocol——你的实现不需要继承
+  任何东西，只需要具备正确的方法签名。`mypy --strict` 覆盖核心，而
+  `anthropic` / `openai` / `sentence-transformers` / `paddleocr` 这些 SDK 只在
+  具体实现内部导入，绝不出现在缝里。
+</Callout>
+
+## 缝的清单
+
+<Cards>
+  <Card
+    title="LLMProvider"
+    description="corespine（经 agent/llm_provider.py 再导出）— chat(messages, tools) 返回 ChatCompletion；OpenAI chat-completions 形态。"
+  ></Card>
+  <Card
+    title="EmbeddingBackend"
+    description="retrieval/lexical/retrieval.py — 把文本批量转为向量，供可注入的向量通道使用。"
+  ></Card>
+  <Card
+    title="ListwiseJudge"
+    description="retrieval/rerank/listwise_rerank.py — 列表式重排：按最优在前返回候选索引。"
+  ></Card>
+  <Card
+    title="OcrBackend"
+    description="extraction/extractors/pdf_scanned_extractor.py — 识别单页扫描页面图像。"
+  ></Card>
+  <Card
+    title="NarrativeRetriever"
+    description="agent/agent.py — 注入编排器的叙事检索缝。"
+  ></Card>
+  <Card
+    title="TaskQueue"
+    description="service/tasks/task_queue.py — 异步作业队列（测试用 FakeQueue，生产用 RQQueue）。"
+  ></Card>
+  <Card
+    title="SourceConnector"
+    description="ingestion/source/connector.py — iter_documents() 从知识库来源（文件系统、HTTP、Notion、内存）产出 RawDoc。"
+  ></Card>
+  <Card
+    title="RelationExtractor"
+    description="graph/extractor.py — extract(chunks) 返回图的边；build_relation_graph 旁可选启用的叙事关系插槽。"
+  ></Card>
+  <Card
+    title="Chunker"
+    description="retrieval/chunking/chunker.py — 文本加 DocumentMeta 转为保留链路的 chunk；含内置实现与第三方 entry point。"
+  ></Card>
+  <Card
+    title="LibraryRouter / FilterExtractor"
+    description="retrieval/routing 与 filtering — 确定性的库选择，以及可选的结构化元数据过滤器抽取。"
+  ></Card>
+  <Card
+    title="TemplateMatcher"
+    description="workflows/matching.py — 为自然语言脚手架对仅含元数据的可运行模板引用做排序。"
+  ></Card>
+</Cards>
+
+### 当前的检索与工作流缝
+
+`Chunker.chunk(text, meta, *, max_chars, overlap_chars) -> list[Chunk]` 掌管分块策略。
+`make_chunker` 支持确定性默认、版面、父子、句子窗口、法律、QA、
+书籍与语义等实现，外加 `ragspine.chunkers` entry-point 组。
+实现必须保留 `doc_id` 与 `source_locator`；层级/窗口数据是附加信息，
+不能替代来源链路。
+
+`LibraryRouter` 选出一个或多个 `RoutableLibrary` ID。`MultiIndexRetriever` 独立调用
+选中的各个 `NarrativeRetriever` 并对结果做 RRF 融合；路由器失败时
+回退到全部库。`FilterExtractor` 可以提出元数据谓词，但过滤器始终是
+经过校验的收窄操作。
+
+`TemplateMatcher` 接收的目录引用只包含匹配元数据，不含工作流提示词或
+凭据。内置的词法与 ONNX 匹配器返回排好序的候选；脚手架策略
+施加分数/差距阈值并校验选中的模板。自定义匹配器不会
+获得文件写入或执行权限。
+
+### `LLMProvider`
+
+归 [`corespine`](https://pypi.org/project/corespine/) 所有，并从
+`src/ragspine/agent/llm_provider.py` 再导出——agent 工具使用循环驱动的唯一方法。它
+使用 **OpenAI chat-completions 形态**（单个 `chat` 方法）。`AnthropicProvider`
+延迟导入 `anthropic` SDK 并把该形态映射到 Anthropic API；`MockProvider`
+既不需要密钥也不需要网络。
+
+<TypeTable
+  type={{
+    chat: {
+      type: '(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion',
+      description:
+        '发送 OpenAI 形态的消息历史（system 提示词是第一条消息）与可选的工具 schema；返回一个 ChatCompletion（choices → 含 content + tool_calls 的 ResponseMessage，外加 usage / model / id）。',
+    },
+  }}
+/>
+
+<Callout type="info">
+  **0.3.0 迁移。**它取代了旧的 `create_message(*, system, messages, tools) ->
+  ProviderResponse`。这条缝现在位于家族共享核心 `corespine` 中，让 ragspine 与
+  其兄弟包共用同一份 provider 契约——参见 [ADR 0012](/zh/docs/decisions/adr-0012)。
+</Callout>
+
+### `EmbeddingBackend`
+
+`src/ragspine/retrieval/lexical/retrieval.py` — 向量通道的
+依赖注入点。默认是 `none`（纯 BM25）；注入它即可加上向量通道。
+
+<TypeTable
+  type={{
+    embed_texts: {
+      type: '(texts: list[str]) -> list[list[float]]',
+      description: '把文本批量转为向量，顺序与输入对齐。',
+    },
+  }}
+/>
+
+### `ListwiseJudge`
+
+`src/ragspine/retrieval/rerank/listwise_rerank.py` — 可选的 LLM 列表式重排器
+缝。真实实现是 Claude（经 `build_listwise_prompt` /
+`parse_listwise_response`）；测试使用确定性的 fake。缺席时回退到 RRF 顺序。
+
+<TypeTable
+  type={{
+    judge: {
+      type: '(query: str, candidates: list[str]) -> list[int]',
+      description:
+        '返回按相关性排序的候选索引（从 0 开始），最相关的在前。调用方保证 RESTRICTED 文本已被剥离。',
+    },
+  }}
+/>
+
+### `OcrBackend`
+
+`src/ragspine/extraction/extractors/pdf_scanned_extractor.py` — 扫描版 PDF 的 OCR/VLM
+缝。真实后端（PaddleOCR）运行在 Ubuntu + GPU 上；逻辑测试使用 fake，使
+渲染 → 映射 → 阈值 → 审核的流程在无 GPU 机器上也完全可测。
+
+<TypeTable
+  type={{
+    recognize: {
+      type: '(image_bytes: bytes, page_no: int) -> OcrPageResult',
+      description: '识别单页图像（PNG 字节）并返回 OcrPageResult。',
+    },
+  }}
+/>
+
+### `NarrativeRetriever`
+
+`src/ragspine/agent/agent.py` — 注入 `answer_question` 的叙事检索
+实现。鸭子类型；省略时叙事路径会诚实降级。
+
+<TypeTable
+  type={{
+    retrieve: {
+      type: '(query: str, *, filters: dict[str, str] | None = None, top_k: int = 50) -> list[dict[str, object]]',
+      description: '按查询检索叙事 chunk，可附带可选的元数据过滤器。',
+    },
+  }}
+/>
+
+### `TaskQueue`
+
+`src/ragspine/service/tasks/task_queue.py` — 异步作业队列。生产用 `RQQueue`（RQ + Redis），
+测试用 `FakeQueue`（同步内联）。`rq` / `redis` 仅在
+`RQQueue` 内部延迟导入。
+
+<TypeTable
+  type={{
+    enqueue: {
+      type: '(func: JobFunc | str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
+      description:
+        '按点号路径或可调用对象入队一个作业，附带可序列化的负载；返回作业 id。',
+    },
+    get: {
+      type: '(job_id: str) -> JobStatus | None',
+      description: '查询作业状态（未知时返回 None）。',
+    },
+  }}
+/>
+
+### `SourceConnector`
+
+`src/ragspine/ingestion/source/connector.py` — 知识库来源缝。连接器
+从你的知识库所在之处产出原始文档；默认的 `FilesystemConnector` 不需要
+extra，HTTP / Notion 连接器在 `[connectors]` extra 之后延迟导入 `httpx`。
+
+<TypeTable
+  type={{
+    iter_documents: {
+      type: '() -> Iterable[RawDoc]',
+      description:
+        '把每个来源文档作为冻结的 RawDoc（source_doc_id、locator、content: bytes、content_type、metadata）逐个产出。',
+    },
+  }}
+/>
+
+内置实现按名字注册在模块级表中；第三方连接器通过
+`ragspine.source_connectors` entry-point 组发现（名字冲突时内置实现获胜）。
+可用 `make_source_connector(spec=None, **kwargs)` 工厂或
+`RAGSPINE_SOURCE_CONNECTOR` 环境变量选择（`none` / `None` → `None`）：
+
+<TypeTable
+  type={{
+    filesystem: {
+      type: "'filesystem' | 'fs' | 'local'",
+      description: 'FilesystemConnector — 零依赖默认实现；遍历本地路径。',
+    },
+    in_memory: {
+      type: "'in_memory' | 'memory' | 'fixture'",
+      description: 'InMemoryConnector — 进程内提供文档（测试 / fixture）。',
+    },
+    http: {
+      type: "'http' | 'https' | 'url'",
+      description: 'HttpConnector — 经 HTTP 抓取；需要 [connectors] extra（httpx）。',
+    },
+    notion: {
+      type: "'notion'",
+      description: 'NotionConnector — 读取 Notion 来源；需要 [connectors] extra（httpx）。',
+    },
+  }}
+/>
+
+### `RelationExtractor`
+
+`src/ragspine/graph/extractor.py` — 由
+`build_relation_graph(..., relation_extractor=None)` 消费的可选叙事关系插槽。取默认值 `None` 时，基础图
+逐字节一致（没有额外的边）。参见 [ADR 0015](/zh/docs/decisions/adr-0015)。
+
+<TypeTable
+  type={{
+    extract: {
+      type: '(chunks: Iterable[object]) -> tuple[GraphEdge, ...]',
+      description:
+        '返回从给定 chunk 中抽取的边。DeterministicRelationExtractor 基于规则产出带干净链路的 co_occurs_with 边；LLMRelationExtractor（可选启用，[llm]）给每条边盖上 derived=model-derived + verified=unverified 标记，两端都经 SecurityGate 筛查，并且绝不让 RESTRICTED 文本触及模型。',
+    },
+  }}
+/>
+
+通过 `make_relation_extractor(spec=None, *, provider=None, profile=None, **kwargs)` 或
+`RAGSPINE_RELATION_EXTRACTOR` 选择（`none` → `None`；`deterministic` / `rule` / `cooccurrence` →
+确定性默认实现；`llm` / `on` → LLM 抽取器，无 provider 可用时
+诚实降级为 `None`）。
+
+<Callout type="warn">
+  模型抽取的边是**有用但不受信任的**。`LLMRelationExtractor` 把
+  `derived=model-derived` 与 `verified=unverified` 标记写进每条边的元数据，
+  链路取自 chunk（即调用方）而非模型的自述，并丢弃任何端点被
+  确定性 `SecurityGate` 拒绝的边。模型断言的关系永远不会被解读为
+  受控的、已验证的事实。
+</Callout>
+
+## 实现一个 Protocol 并注入它
+
+由于这些缝是结构化的，你只需实现相应方法并把实例传进去——无需
+注册，无需基类。下面是一个基于 OpenAI 的 `LLMProvider`，严格对应真实的
+`chat` 签名与 `ChatCompletion` 形态（这些 dataclass 来自 `corespine`，并从
+`ragspine.agent.llm_provider` 再导出）：
+
+```python title="my_openai_provider.py"
+from typing import Any
+
+from openai import OpenAI  # lazy: only your file imports the SDK
+from corespine import ChatCompletion, Choice, ResponseMessage, Usage
+
+
+class OpenAIProvider:
+    """A custom LLMProvider — no subclassing, just the chat method."""
+
+    def __init__(self, model: str = "gpt-4o") -> None:
+        self._client = OpenAI()
+        self._model = model
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion:
+        # The messages are already in the OpenAI chat-completions shape, so they pass
+        # through; the SDK response is the same shape, so the mapping back is direct.
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools or [],  # adapt / omit as needed
+        )
+        choice = resp.choices[0]
+        message = ResponseMessage(role="assistant", content=choice.message.content)
+        u = resp.usage
+        usage = (
+            Usage(
+                prompt_tokens=u.prompt_tokens,
+                completion_tokens=u.completion_tokens,
+                total_tokens=u.total_tokens,
+            )
+            if u is not None
+            else None
+        )
+        return ChatCompletion(
+            choices=(Choice(index=0, message=message, finish_reason=choice.finish_reason or "stop"),),
+            usage=usage,
+            model=resp.model,
+            id=resp.id,
+        )
+```
+
+在 `MockProvider` 原本所在的位置注入即可：
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.storage.fact_store import SqliteFactStore
+from my_openai_provider import OpenAIProvider
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("...", store, OpenAIProvider())
+```
+
+<Callout type="warn">
+  结构化通道的防编造机制守卫不会信任 provider 行文中的数字——找到的
+  事实由事实值确定性渲染，而无事实的结果无论模型输出什么都会被重写为
+  "未找到"。更换 provider 无法绕过这个守卫。
+</Callout>

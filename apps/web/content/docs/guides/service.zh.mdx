@@ -1,0 +1,124 @@
+---
+title: 服务
+description: FastAPI 组合、异步摄取、工作流目录与兼容 API、认证边界，以及默认关闭的执行能力。
+---
+
+`ragspine.service` 是位于引擎之上的可选组合根。安装 `[service]` 即可获得
+FastAPI、uvicorn、RQ 与 Redis 支持。服务会打开由请求/作业持有的存储，通过类型化的缝注入
+provider 与匹配器，并返回不含 traceback 的不透明错误。
+
+## 应用工厂
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config=None,
+    provider=None,
+    queue=None,
+    faq_cache=None,
+    workflow_matcher=None,
+)
+```
+
+省略的依赖会由 `ServiceConfig.from_env()` 组装。实例保存在
+`app.state` 上，因此在测试中也可以很方便地替换。当 `studio_dir` 指向
+一个已存在的目录时，其静态构建产物会挂载到 `/studio`；目录为空或不存在
+则不会添加该路由。
+
+## 端点分组
+
+| 分组                       | 路径                                                              | 是否执行工作？                          | 认证方式                                     |
+| -------------------------- | ----------------------------------------------------------------- | -------------------------------------- | ------------------------------------------- |
+| 引擎                       | `/healthz`、`/readyz`、`/v1/ask*`、摄取/作业                      | ask 与队列操作                          | 未内置                                       |
+| 目录                       | `/v1/workflow-templates*`、`/v1/workflow-scaffold`                | 否                                     | 未内置                                       |
+| 编译器/转换器              | `/v1/dify/analyze`、`/compile`、`/v1/n8n/convert`、`/v1/topology` | 否                                     | 未内置                                       |
+| 内部执行                   | `/v1/dify/run*`、`/v1/n8n/run`                                    | 是，需启用开关                          | 执行开关；请部署在你自己的认证之后           |
+| Dify 兼容公开 API          | `/v1/workflows/run*`、`/v1/info`、`/v1/parameters`                | run 路由需启用开关                      | Bearer 应用密钥                              |
+| n8n 兼容公开 API           | `/api/v1/*`                                                       | CRUD；webhook 在启用后可执行            | `X-N8N-API-KEY`                              |
+| n8n webhook                | `/webhook/{path}`                                                 | 匹配到的激活工作流，需启用开关          | 有意不设认证                                 |
+
+通用引擎路由与内部 `/v1/dify/*` 路由不提供用户认证。请绑定到
+localhost/私有网络，或在公开暴露前加一层带认证的反向代理。
+
+## 引擎与摄取
+
+`POST /v1/ask` 与 `/v1/ask/stream` 会依次执行 FAQ 闸门、意图/安全决策、检索、
+防编造机制重写与溯源组装。SSE 端点会在打开流之前完成全部守卫。
+`AskRequest.history` 仅作为可选的生成上下文，绝不会成为检索证据。
+
+结构化摄取接受 `.xlsx`、`.xlsm`、`.pptx` 与 `.pdf`；叙事作业接受
+`.pptx` 与 `.pdf`。`RAGSPINE_ALLOWED_UPLOAD_ROOT` 约束解析后的路径。API 入队的是
+一个点号分隔的作业引用；worker 会重新校验路径，并持有自己的 SQLite 连接。
+
+`FakeQueue` 是用于测试的同步内存实现。`RQQueue` 是基于 Redis 的生产适配器。
+队列状态为 `queued`、`started`、`finished` 与 `failed`；报告只包含计数/状态，
+不含原始事实值或 chunk 文本。
+
+## 工作流目录与编译器
+
+目录的列表页只包含元数据。详情与脚手架响应会附带规范化工作流、
+Dify YAML 以及 preview v1。工作流脚手架可能进行语义匹配、回退到词法匹配，或
+生成一个固定图；它绝不执行产出结果。
+
+Dify analyze/compile 的请求体必须恰好包含规范化 `workflow` 对象或旧式 `yaml`
+字符串二者之一；未知字段会被拒绝。Analyze 仅做静态分析。Compile 返回一个 Python 代码字符串
+且绝不运行它。n8n 转换同样是纯函数式的，并返回明确的兼容性警告。
+
+部分工作流 POST 请求体在 FastAPI 缓冲之前被限制为 2 MiB：
+`/v1/workflow-scaffold` 与 `/v1/dify/{analyze,compile,run,run/jobs}`。解码后的工作流文档
+受更严格的 1 MiB 解析器限制。校验错误响应会移除 Pydantic 回显的 `input` 与
+`ctx` 字段，避免被拒绝的机密内容被反射回去。
+
+## 默认关闭的执行
+
+`RAGSPINE_DIFY_RUN_ENABLED` 默认为 `false`。在显式启用之前，
+`/v1/dify/run`、`/v1/dify/run/jobs`、`/v1/n8n/run`、Dify 兼容的工作流执行以及 n8n
+webhook 执行都会安全地失败关闭。provider、模型、base URL 与 Dify 应用工作流文件均来自
+服务端配置；客户端无法注入 provider 表达式或密钥。
+
+执行会经过编译并由 L0 静态闸门检查。默认的 `inprocess` 隔离施加
+受限的 builtins/imports 与超时限制，但并非操作系统级沙箱。`subprocess` 会额外施加 Linux 资源
+限制；在 macOS 与 Windows 上则回退到进程内限制。对不受信任的工作流
+执行，应将其视为一个独立加固的服务边界。
+
+## Dify 兼容公开 API
+
+`RAGSPINE_DIFY_PUBLIC_APPS` 是一个以分号分隔的注册表，例如
+`app-key=/srv/workflows/support.yml;other-key=/srv/workflows/report.yml`。请求使用
+`Authorization: Bearer app-key`。若注册表缺失、无效，或密钥未知，这些
+路由返回 `401`。
+
+该 API 支持 `POST /v1/workflows/run`、`GET /v1/workflows/run/{id}`、`GET /v1/info` 与
+`GET /v1/parameters`。运行请求提供 `inputs`、`user` 与 `response_mode`；它们不提供
+工作流本身。流式传输在执行完成后使用 SSE 并重放 trace 事件。运行详情数据是
+进程本地的 LRU，只保留最近 100 次运行，并按应用密钥隔离；它不是持久化历史。
+
+## n8n 兼容公开 API 与 webhook
+
+设置 `RAGSPINE_N8N_API_KEY`；客户端发送 `X-N8N-API-KEY`。若未配置密钥，所有
+`/api/v1/*` 请求都返回 `401`。工作流的 CRUD 与激活，以及执行记录的列表/查询/删除，
+均由文件系统根目录 `RAGSPINE_N8N_STORE_PATH`（默认 `data/n8n_store`）支撑。列表 limit
+默认 100，钳制在 1–250 之间，并使用游标分页。
+
+`GET|POST /webhook/{path}` 刻意不做 API 密钥检查，与 webhook 的惯常行为一致。它只
+匹配激活工作流的 webhook 节点，且仍要求执行能力已启用。查询参数
+与 JSON 对象请求体共同构成 inputs，请求体中的键优先。请在该路由前面配置入口控制、TLS、限流
+与请求体大小策略。
+
+## 运行服务
+
+在仓库根目录执行：
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+
+# separate process; Redis required
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```
+
+具体路由请参见 [HTTP API](/zh/docs/reference/http-api)，环境变量面请参见
+[配置](/zh/docs/reference/configuration)。

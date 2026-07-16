@@ -1,0 +1,83 @@
+---
+title: 'ADR 0011: Adottare il python-project-standard; migrare al layout src/, mantenere il resto'
+description: Adottare lo standard interno come filosofia guida; allineare l'unico invariante strutturale delimitato (layout src/ragspine/) e accettare quattro divergenze documentate.
+---
+
+> Stato: **accettato** · Data: 2026-06-18
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Correlato a [0009](/it/docs/decisions/adr-0009) (politica su framework/dipendenze)
+e [0005](/it/docs/decisions/adr-0005) (core snello).
+
+## Contesto
+
+Uno standard interno esterno ("python-project-standard": mypy `--strict` + hook claw
+beartype + pydantic-ai-confini + seam Protocol `ports/`/`adapters/` + layout `src/<pkg>/`
+
+- un pacchetto infra `core/` + un gate a zero warning con un solo comando) è stato eseguito su questo repository.
+
+RAGSpine soddisfa già l'**intento e la maggior parte della sostanza** dello standard grazie alle proprie
+convenzioni documentate: `mypy strict = true`; l'hook claw beartype in cima a
+`src/ragspine/__init__.py` (import protetto, torre numerica PEP 484) con la disciplina
+dell'ordinamento degli import rispettata; ogni dipendenza esterna dietro un `Protocol` con un core offline
+a zero SDK e un `MockProvider` predefinito; un layout profondo domain-first; TDD; guardie anti-deriva
+(`scripts/check_doc_drift.py`, `scripts/check_docstring_refs.py`); un unico gate CI
+(`scripts/ci.sh`); e prevenzione delle risposte inventate / provenienza applicate a livello di codice.
+
+Le lacune rimanenti erano **scelte puramente di layout strutturale**. Tra queste, la questione **pacchetto
+a livello superiore vs `src/<pkg>/`** è quella che lo standard tratta come invariante rigido, verificato
+meccanicamente, ed è quella il cui costo di migrazione è _delimitato_: ogni import nell'albero usa già
+la forma assoluta `from ragspine.…` (zero `from src.…`), quindi spostare il pacchetto non cambia alcun
+codice applicativo — solo la configurazione del packaging, un ancoraggio della root relativo a `__file__`, gli argomenti
+dei percorsi degli strumenti e le stringhe di percorso nella documentazione. Le altre divergenze (rootutils, `common/` vs
+`core/`, Protocol-via-import-lazy vs `ports/`+`adapters/`, pydantic sparso) comportano un reale
+costo trasversale senza alcun guadagno comportamentale.
+
+## Decisione
+
+Adottare python-project-standard come filosofia guida e **allineare l'unico invariante strutturale
+delimitato e ad alto valore: migrare al layout `src/ragspine/`.** Concretamente:
+
+- `git mv ragspine src/ragspine`; `import ragspine` continua a funzionare tramite l'installazione editable
+  (`.pth` ora punta a `src/`). Nessuna modifica al codice applicativo.
+- Adeguamenti di configurazione: hatchling `packages`, mypy `files` e `[tool.ruff] src` →
+  `src/ragspine`/`src`; l'ancoraggio `Path(__file__)…parents[N]` di `common/core.py` +1 livello;
+  argomenti dei percorsi ruff in `ci.sh`/`Makefile`; `check_docstring_refs.py` ripuntato alla nuova root
+  (la sua vecchia regola "qualsiasi riferimento a `src/…` è detrito morto pre-riorganizzazione" è invertita — `src/ragspine/…`
+  è ora il percorso canonico); stringhe di percorso nella documentazione e in `covers:` riprefissate con `src/`.
+
+**Mantenere queste divergenze** (costo ≫ beneficio — accettate, non debito):
+
+1. `rootutils` + `.project-root` per la risoluzione della root (un solo punto, `common/core.py`,
+   zero effetti collaterali al momento dell'import) invece di installazione editable + `importlib.resources`.
+2. `common/` svolge il ruolo di infrastruttura trasversale che lo standard assegna a `core/`.
+3. Isolamento degli SDK tramite `Protocol` + import lazy (secondo [0009](/it/docs/decisions/adr-0009) / [0005](/it/docs/decisions/adr-0005)), non tramite una separazione in directory `ports/` +
+   `adapters/`.
+4. pydantic al confine solo dove già in uso, non in modo generalizzato.
+
+`check_conformance.py` **non** è integrato in `ci.sh`: continua a presupporre un pacchetto infra
+`core/`, un `core/settings.py` foglia e directory `ports/`/`adapters/` che questo repository deliberatamente
+non ha. `scripts/ci.sh` resta il gate.
+
+## Alternative considerate (respinte)
+
+- **Mantenere anche il layout a livello superiore** (la posizione originale di questo ADR): respinta — lo spostamento a `src/`
+  è delimitato (nessun rimaneggiamento del codice applicativo) e allinea l'unico invariante strutturale
+  rigido dello standard, quindi l'argomento del diff minimo che protegge (1)–(4) non si estende ad esso.
+- **Conformità letterale completa** (aggiungere anche `core/`, separare `ports/`+`adapters/`, pydantic
+  ovunque): respinta — costo trasversale elevato su una codebase matura da 1078 test, zero
+  guadagno comportamentale/di sicurezza.
+- **Integrare `check_conformance.py` nel gate**: respinta — fallirebbe in modo permanente sulle
+  divergenze accettate (1)–(4), trasformando un gate verde in rosso per non-problemi.
+
+## Conseguenze
+
+- Il pacchetto ora risiede in `src/ragspine/`; l'installazione editable `.pth` punta a `src/`; ogni stringa di percorso nella documentazione e in
+  `covers:` è `src/ragspine/…`. Gli ADR 0001–0010 sono immutabili e mantengono i loro
+  riferimenti di percorso originali (ora storici).
+- La semantica di `check_docstring_refs.py` è invertita: `src/ragspine/…` è canonico; un
+  `ragspine/…` nudo o un vecchio `src/<mod>.py` piatto è morto.
+- I nuovi progetti fratelli greenfield seguono ancora lo standard alla lettera (`core/`,
+  `ports/`+`adapters/` fin dal primo giorno); questo repository retrofitta solo lo spostamento a `src/`.
+- Una futura PR a basso rischio potrà aggiungere pydantic al confine di `service/`; per il resto (1)–(4) restano validi.

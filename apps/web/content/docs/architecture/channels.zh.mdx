@@ -1,0 +1,73 @@
+---
+title: 通道
+description: 结构化事实、叙事检索、复合回答，以及具备溯源意识的图工具。
+---
+
+RAGSpine 对数值事实与解释性文本使用不同的证据机制。Agent
+会在 `structured`、`narrative` 或 `composite` 之间选择；图工具始终是一个显式的辅助
+面，而不是隐藏的第四条路由分支。
+
+## 结构化通道
+
+`query_metric` 通过受控词表对指标、实体、期间和渠道进行归一化，并查询 `FactStore`。
+其结果严格为 `found`、`not_found` 或
+`unrecognized_param` 三者之一。
+
+- 结果为 `found` 时，最终的数值表述由存储的事实重建，并携带
+  `source_doc_id`/locator。
+- 结果为 `not_found` 时，返回固定的、不含数字的拒答。
+- 遇到无法识别的参数时，响应会指出不受支持的输入，而不是去猜测。
+
+模型无法为一次失败的查询提供替代数字。
+
+## 叙事通道
+
+```text
+question
+  → optional deterministic/automatic metadata filters
+  → optional library router
+  → per-library lexical and optional vector search
+  → reciprocal-rank fusion
+  → optional rerank / postprocess
+  → child-hit expansion for parent/window prompt context
+  → cited generation
+```
+
+检索模式 `economy`、`bm25` 和 `lexical` 不会构建任何 embedding 后端或向量存储。
+Hybrid/auto 模式在安装了 ONNX embeddings 时可以使用它。元数据过滤操作符为 `eq`、
+`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte` 和 `between`；过滤只做收窄，并保持
+传入的顺序。
+
+`MultiIndexRetriever` 对路由到的各库独立执行搜索，用 RRF 融合其结果，并保留
+`library_id` 溯源信息。如果路由失败，它会搜索所有已注册的库，而不是悄无声息地
+返回空结果。
+
+### 父子与句子窗口证据
+
+小块（chunk）能产生精确命中，而父块或窗口可以改善生成上下文。
+块存储会持久化 `parent_id`、`heading`、`window_text` 和 `parent_locator`。返回的片段
+保留**子块**的 `text`、`chunk_id` 和 `source_locator`；扩展内容放在独立的
+`prompt_text` 中，并以 `parent_locator` 作为反向引用。因此引用指向的是被匹配的
+子块，而不是某个凭空拼造的聚合体。
+
+受限（restricted）的子块会在片段构建之前被丢弃。它们的父块/窗口内容也随之
+丢弃，因此扩展无法绕过隔离。
+
+## 复合路由
+
+复合问题会分别执行结构化事实路径与叙事归因路径，
+然后合并它们的回答与来源列表。叙事文本无法把自己提升为结构化
+数值证据。会话历史仅作为生成上下文，同样不能成为证据。
+
+## 图工具
+
+`graph` 领域提供确定性的结构化关系图，用于汇总、比较
+和推导追溯，并提供可选启用的叙事关系抽取。模型推导出的边会被标记为
+`model-derived` 和 `unverified`，保留调用方提供的谱系信息，并经过同一套安全边界的
+筛查。GraphRAG 辅助工具不会取代双通道路由器。
+
+## 工作流图是独立的
+
+工作流预览 v1 是对 Dify 兼容图的一个脱敏 UI 投影。它只描述节点、
+边、标签和几何信息；它不是叙事证据、不是引擎拓扑，也不是可执行
+格式。参见[工作流](/zh/docs/guides/workflows#preview-协议-v1)。

@@ -1,0 +1,54 @@
+---
+title: 'ADR 0009: "Framework-free" ridefinito — nessun lock-in di framework + solo licenze permissive'
+description: Ridefinire framework-free come assenza di lock-in di orchestrazione più solo licenze permissive; i backend reali diventano extra opzionali per il peso dell'installazione, non per purezza.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002).
+
+## Contesto
+
+Lo slogan "indipendente dai framework / core zero-SDK / funziona offline" descrive in modo
+errato il vincolo effettivo. I requisiti reali sono: (a) **nessun lock-in di orchestrazione
+della famiglia LangChain** (LangChain / LlamaIndex / Dify / LangGraph), e (b) **igiene delle
+licenze delle dipendenze** — niente di più restrittivo di Apache-2.0 (escludere GPL/AGPL/LGPL,
+SSPL, non commerciali, ecc.).
+Le librerie fondamentali mature (torch, numpy, sentence-transformers) sono accettabili.
+"Zero dipendenze" non è mai stato il punto.
+
+## Decisione
+
+Ridefinire **framework-free = (a) nessun lock-in di framework di orchestrazione + (b)
+solo licenze permissive (permissività ≤ Apache-2.0)**. Concretamente:
+
+- **Riscrittura del posizionamento:** da "zero-SDK / funziona offline" a "nessun lock-in di framework +
+  licenze pulite + ogni backend sostituibile tramite `Protocol`."
+- **Gate di licenza delle dipendenze in CI:** ogni dipendenza transitiva deve avere una licenza
+  permissiva; in caso contrario il gate fallisce. Questo rende operativo il vincolo ed è esso stesso
+  un punto di forza per gli utenti attenti alla conformità.
+- **Installazione predefinita leggera:** i backend reali (torch/embedding) sono opzionali tramite extra
+  (`[embed]`, ecc.) — una scelta di packaging/UX riguardante il peso dell'installazione e la GPU opzionale, non
+  più una scelta di purezza. Il percorso offline-deterministico (BM25 + MockProvider) rimane
+  il ciclo predefinito di test/demo, un punto di forza mantenuto piuttosto che un dogma.
+
+## Alternative considerate (respinte)
+
+- **Core zero-SDK assoluto, tutti i backend reali negli extra per purezza (opzione A)**:
+  respinta come _motivazione_ — torch/numpy sono accettabili sia in termini di licenza che di lock-in, quindi
+  la purezza non è la ragione; lo è il peso dell'installazione. (L'esito dell'installazione predefinita leggera è mantenuto, per una
+  ragione diversa.)
+- **Predefinito batteries-included (fornire un embedding CPU reale nell'installazione di base)**:
+  respinta — un predefinito da diversi GB è una barriera all'adozione per una libreria in fase di valutazione.
+- **Distribuzioni a livelli `ragspine-core` + `ragspine`**: respinta come sovraccarico
+  operativo prematuro per una v0.1 a singolo autore.
+
+## Conseguenze
+
+- Cambiano il posizionamento e la formulazione del README e di `pyproject`.
+- Nuovo filone di lavoro in CI: il gate di licenza delle dipendenze.
+- Allenta [0005](/it/docs/decisions/adr-0005)/[0006](/it/docs/decisions/adr-0006):
+  un modello di embedding reale è accettabile in termini di licenza e di lock-in; è un extra per il peso,
+  e il predefinito offline resta il placeholder puro, chiaramente etichettato.

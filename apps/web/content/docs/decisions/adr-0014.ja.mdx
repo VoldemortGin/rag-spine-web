@@ -1,0 +1,138 @@
+---
+title: 'ADR 0014: サービスとしての Dify ワークフロー（analyze / compile / run）と三層安全実行'
+description: 既存の ragspine サービスを、信頼度が段階的に高まる 3 つの Dify エンドポイントで拡張する — analyze と compile は常時有効、run はデフォルト無効で、静的 import ゲート、制限付きインプロセスサンドボックス、（Linux では）サブプロセス隔離の背後に置く。プロバイダは常にサーバー側で決定される。
+---
+
+> ステータス: **proposed** · 日付: 2026-06-24
+
+> 不変の記録。ドリフト追跡の対象外（`covers` なし）。編集せず、置き換える（supersede）。
+
+[0013](/ja/docs/decisions/adr-0013)（Dify YAML → 純 Python コンパイラ + 静的
+最適化アドバイザ）の上に構築する。[0009](/ja/docs/decisions/adr-0009)（フレームワークロックインなし +
+許容的ライセンスのみ）、[0010](/ja/docs/decisions/adr-0010)（セキュリティの分離）、および
+Spine ファミリー境界 ADR（ファミリーリポジトリ、`docs/adr/0001`）に関連する。
+**rag-spine 0.5.0** で出荷済み。
+
+## コンテキスト
+
+[ADR 0013](/ja/docs/decisions/adr-0013) は Dify の `.yml` を可読な純 Python
+（`compile_dify_yaml` / `analyze`）へコンパイルする。次のステップは、この能力を**サービスの
+背後**に置き、利用者が HTTP 経由で到達できるようにすることだ。すなわち、最適化の提案を得る、
+可読なコードを得る、さらにはコンパイル済み成果物を直接**実行**する。他者が提出したコードを
+実行することは**信頼境界**の問題であり、設計は「そのままで動く」と「軽々しく `exec` しない」
+の間に安全なデフォルトを見いださなければならない。
+
+制約: 既存の ragspine サービス（app ファクトリ / DI / RQ キュー / デプロイ）を再利用する —
+第二のサービスは作らない。テストは実 LLM API をいっさい使わずに実行される（TestClient +
+`MockProvider`）。プロバイダは**サーバー側**の環境変数で決定される（クライアントは
+`provider_expr` を注入できない — それはコードインジェクションの攻撃面になる）。ファミリーは
+完全同期。`mypy --strict`、`filterwarnings=error`、pydantic は境界でのみ使用。
+
+## 決定
+
+**ragspine サービスを、信頼度が段階的に高まる 3 つのエンドポイントで拡張する。`run` は
+デフォルトで無効であり、3 つの安全レイヤーを通して実行される。**
+
+### 3 つのエンドポイント（`src/ragspine/service/api/routes.py`、コンパイラは遅延 import）
+
+- `POST /v1/dify/analyze` — 静的な最適化分析のみ（コード生成なし、実行なし）。
+  **常時利用可能**。絶対に安全。
+- `POST /v1/dify/compile` — 純 Python の**コード文字列**へコンパイルする（決して実行されない）。
+  **常時利用可能**。安全。
+- `POST /v1/dify/run` と `POST /v1/dify/run/jobs`（非同期）— コンパイル + **制限付き
+  実行**。ここが**信頼境界**である: デフォルトで無効
+  （`RAGSPINE_DIFY_RUN_ENABLED=false` → 403）、明示的な環境変数によるオプトインのみが解錠する。
+  プロバイダはサーバー側で注入される。
+
+エラーの整形: `DifyCompileError`（コード `dify.*`）→ 400。L0 静的ゲートの
+`DifyUnsafeError`（何も実行されていない）→ 422。実行 / タイムアウトの
+`DifyRunError` / `DifyTimeoutError` → 400。機能が有効化されていない場合 → 403。非同期 run は
+既存の `GET /v1/jobs/{id}` を再利用する。
+
+### 3 つの安全レイヤー（`src/ragspine/service/dify/{safety,runner}.py` + `scripts/run_dify_workflow.py`）
+
+- **L0 — 静的ゲート（バイパス不能、実行前）。** ① `GeneratedCode.warnings` が空でない
+  （`NotImplementedError` スケルトン / 未対応ノード）→ 拒否（422）。② 生成された
+  ソースの import に対する AST 走査 — 許可リスト外のトップレベルルートモジュール
+  （許可されるのは `__future__` / `dataclasses` / `typing` / `string` /
+  `concurrent` / `json` / `corespine` / `ragspine` / `spineagent` のみ）があれば → 拒否。許可リストには
+  意図的に I/O / プロセス / ネットワーク系モジュール
+  （os / sys / subprocess / socket / shutil / pathlib / importlib）を**一つも**含めていない。
+- **L1 — 制限付きインプロセスサンドボックス。** 安全な builtins の**明示的な許可リスト dict**
+  （純計算 / コンテナ / シリアライゼーション + 生成コードが使う例外型）、
+  クラス / モジュール本体の実行に必要な dunder（`__build_class__`）、そして**制限付き
+  `__import__`**（L0 で許可されたルートモジュールのみ — 動的な `__import__('os')` すら
+  ブロックされる）。`open` / `eval` / `exec` / `compile` / `input` などの脱出面は、そもそも
+  決して許可リストに載せない。生成モジュールは `sys.modules` に登録される
+  （`from __future__ import annotations` 下での dataclass の文字列アノテーション解決に必要）。
+  **スレッドベースのソフトタイムアウト**（クロスプラットフォーム、`SIGALRM` に依存しない）。
+- **L2 — サブプロセス隔離。** `isolation='subprocess'` → Linux では別の子
+  プロセス（`Popen(cwd=private tmp)` + `communicate(timeout)` + `kill()` = 暴走プロセスへの
+  SIGKILL、加えて `resource.setrlimit` による CPU 時間 / アドレス空間 / ファイル
+  作成の上限設定）。子プロセスの内部でも L1 の制限付きサンドボックスが適用される。**非 Linux
+  （macOS / Windows）は自動的に L1 にフォールバックする**（そこでは rlimit の信頼性が低く、
+  ハード隔離の効果が薄いため）。
+
+### プロバイダの安全性と、隔離プロセス / ワーカーでの自前構築プロバイダ
+
+クライアントは `provider_expr` を渡すことが**できない**（スキーマにそのフィールドは存在せず、
+余分なフィールドは pydantic に無視される）。生成コードはオフラインのデフォルトプロバイダを
+固定し、実行時にサーバーが `run_workflow(provider=...)` で上書きする。サブプロセス / RQ ワーカーは
+`build_provider(provider_config_dict(config))` から**自前で**プロバイダを構築する — 渡された
+プロバイダのインスタンスや式は決して使わない — したがってプロバイダは常にサーバー側の環境変数で
+決定される。
+
+着地点: `src/ragspine/service/dify/{safety,runner}.py`、
+`service/tasks/jobs.py:run_dify_workflow_job`、`scripts/run_dify_workflow.py`、
+`service/api/{routes,schemas}.py`、および `service/config.py`
+（`dify_run_enabled` / `dify_run_timeout_s` / `dify_run_isolation` + `provider_config_dict`）。
+
+## セキュリティのデフォルト（今回すべて受け入れ、レビュー待ち）
+
+1. **すべての安全デフォルトを受け入れ:** L0 静的ゲート + L1 制限付きサンドボックス + L2
+   サブプロセス隔離をすべて実装する。`run` はデフォルトで無効、かつデフォルトでオフラインモック。
+2. **MVP では認証なし:** HTTP レイヤーは認証を行わない（既存の `/v1/ask` と一貫している）。
+   公開する場合は前段に認証またはネットワーク許可リストを置かなければならない
+   （リバースプロキシ / ingress）— デプロイ全体
+   （README / `.env.example` / compose / helm values）で目立つように明示している。
+3. **正直なサンドボックス境界:** L1 の制限付き builtins は**多層防御の一層**であり、
+   完全なサンドボックスではない。ハード隔離は L2 サブプロセス + SIGKILL +
+   （Linux の）rlimit が担う。非 Linux はハードなリソース上限なしで L1 にフォールバックする —
+   コードとドキュメントで明示的に述べている。
+
+## 検討した代替案（却下）
+
+- **`/run` をデフォルトで有効にする。** 却下 — 他者のコンパイル済み成果物を実行することは信頼
+  境界であり、安全なデフォルトは無効でなければならない。すぐに使える価値は、絶対に安全な
+  analyze / compile がカバーする。
+- **ブロックリスト方式の制限付き builtins（危険な名前を除去する）。** 却下 — 見落としが
+  起きやすすぎる（初稿は `__build_class__` を見落とし、exec 下でのクラス定義が
+  壊れた）。代わりに**明示的な許可リスト dict**を使う: 安全と分かっている名前のみ許可し、それ以外は
+  デフォルトで拒否する。
+- **L1 のタイムアウトに `signal.SIGALRM` を使う。** 却下 — Unix 専用でスレッドと非互換。
+  代わりにスレッドベースのソフトタイムアウト（クロスプラットフォーム）+ L2 サブプロセスの
+  SIGKILL ハードタイムアウト。
+- **L1 での `os.chdir(tmp)`。** 却下（実装で踏んだ後に削除）—
+  `os.chdir` はプロセス全体への副作用であり、スレッドのソフトタイムアウトは暴走スレッドを
+  殺せないため、**プロセス全体**の cwd が削除済み tmp ディレクトリの中に取り残され、以後の
+  サブプロセス起動を汚染してしまう。制限付きサンドボックスの内部では
+  `open` / `os` / `pathlib` にそもそも到達できないため、chdir はプロセスレベルのリスクに見合う
+  利益を何ももたらさない。「tmp の中で実行する」というセマンティクスは L2 サブプロセスの
+  `Popen(cwd=private tmp)` に移した。
+- **クライアントに `provider_expr` を渡させる。** 却下 — 直接的なコードインジェクションの攻撃面。
+  プロバイダはサーバー側の環境変数で決定され、隔離プロセス / ワーカーは
+  `build_provider` で自前構築する。
+
+## 帰結
+
+- サービスは 3 つのエンドポイントを得る（analyze / compile は安全に常時有効。run は信頼
+  境界であり、デフォルトで無効）。app ファクトリ / DI / RQ キュー / デプロイを再利用する —
+  新しいサービスも新しい設定システムも作らない。
+- `[service]` extra に PyYAML が追加される（dify エンドポイントはコンパイラを遅延 import する。pydantic は
+  fastapi に同梱）。コアの `dependencies` は手つかず。デプロイイメージは
+  `.[service,vector,dify]` をインストールする。
+- 制限付き実行は常に L0 + L1（Linux では + L2）を通過する。プロバイダは常にサーバー側で
+  決定され、クライアントからは決して注入できない。
+- 本記録は **proposed** である: セキュリティのデフォルト（認証なし MVP / 正直なサンドボックス
+  境界）はレビュー待ち。いかなる変更も supersede-don't-edit に従う（新しい記録またはステータスの
+  変更）。

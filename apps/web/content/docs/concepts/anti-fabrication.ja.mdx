@@ -1,0 +1,94 @@
+---
+title: 捏造防止
+description: 構造化チャネルが found のファクトを返さない場合、オーケストレーターは回答を「見つかりません」へと決定論的に書き換えます — プロンプトではなく、制御フローで。
+---
+
+捏造防止は RAGSpine を特徴づける不変条件です: **システムは決して数値を捏造しません。**
+構造化チャネルが `found` のファクトを返さない場合、オーケストレーターはモデルが何を生成したかに
+関わらず、回答を正直な「見つかりません」に書き換えます。
+
+<Callout type="warn">
+  **保証。** 構造化パスでは、数値の回答はファクト値から決定論的に合成されます。`found` の
+  ファクトが 1 つもなければ、回答は明示的な拒否になります。モデルの散文が数値の出所になる
+  ことは決してありません。
+</Callout>
+
+## プロンプトではなく、制御フローに存在する
+
+確かにシステムプロンプトはモデルに対し、`query_metric` を呼び出すこと、そしてツールが
+`not_found` を返したときは「見つかりません」と答えることを指示しています。しかしプロンプトは
+依頼であって保証ではありません — モデルはそれを無視できます。そのため RAGSpine はプロンプトに
+依存しません。強制は**コード**、すなわち `agent/agent.py` の中にあります:
+
+- `_structured_answer` はツール結果を仕分けます。いずれかが `found` であれば、回答は
+  **ファクト値そのものから**構築され — `实体 期间 指标（渠道）：值 单位（来源…）` —
+  found パスではモデルの自由テキストの回答は完全に破棄されます。
+- 何も `found` でなく、いずれかが `not_found` である場合、回答は
+  `_not_found_answer` によって書き換えられます。
+- パラメータが `unrecognized_param` だった場合は、`_unrecognized_answer` によって
+  書き換えられます。
+
+```python
+# agent/agent.py — _structured_answer (paraphrased shape)
+found = [r for r in tool_results if r.get("status") == "found"]
+if found:
+    # deterministic synthesis from fact values — model prose is NOT used
+    return _render_from_facts(found)
+not_found = [r for r in tool_results if r.get("status") == "not_found"]
+if not_found:
+    return _not_found_answer(not_found[0]), []     # forced refusal
+unrecognized = [r for r in tool_results if r.get("status") == "unrecognized_param"]
+if unrecognized:
+    return _unrecognized_answer(unrecognized[0]), []
+```
+
+<Callout type="info">
+  **found** パスでモデルの散文を破棄すること自体が、捏造防止の施策の一つです: そうしなければ、
+  稼働中の LLM が本物の数値の傍らに、捏造した余分な数値を散文の中へ紛れ込ませかねないから
+  です。found の回答はファクト値のみからレンダリングされます。（回帰テスト:
+  `test_found_path_discards_fabricated_extra_number`。）
+</Callout>
+
+## 正直な拒否の例
+
+データに存在しない値を尋ねると、返ってくるのは拒否であり — 決して推測ではありません:
+
+```bash
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db \
+  "中国内地FY2025的REVENUE是多少"
+```
+
+```text
+查不到：REVENUE / ACME_CN / 2025（渠道 TOTAL）未在事实表中找到。
+为避免误导，不提供任何推测数字；可尝试调整期间或实体后重问。
+```
+
+存在**する**値の場合と比較してみてください — 回答には決定論的な数値とその来歴が付随します:
+
+```text
+ACME_CN FY2024 REVENUE：1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```
+
+## パスごとのセマンティクス（単一のスイッチではない）
+
+このガードは意図的に、パスごとに異なる形で適用されます:
+
+| パス                                          | 仕組み                                                                     | モデルの散文を信頼するか   |
+| -------------------------------------------- | ------------------------------------------------------------------------ | ------------------------ |
+| **structured**（`_structured_answer`）        | found → ファクト値からレンダリング; found なし → 強制拒否                    | いいえ                    |
+| **multi-sub-task**（`_multi_subtask_answer`） | 各サブタスクを決定論的に実行; LLM を一切呼び出さない                          | 該当なし                  |
+| **narrative**（`_run_narrative`）             | 合成は信頼するが**出典の引用を強制**; found ファクトによる書き換えは行わない    | はい（引用を強制した上で） |
+
+## ガードが発動したことをリクエストがどう通知するか
+
+プライバシーに配慮した trace（[出典追跡](/ja/docs/concepts/provenance) および
+`common/observability` を参照）は、ブール値 `fabrication_guard_triggered` を記録します —
+ツール結果は存在したものの**いずれも** `found` ではなかった場合（つまりリクエストが
+`not_found` / `unrecognized` の拒否へフォールスルーした場合）に true になります。記録される
+のはこのフラグのみであり、回答テキストやファクト値が記録されることは決してありません。
+
+<Callout type="warn">
+  プロバイダー障害の際も正直にデグレードします。LLM 呼び出しが `ProviderError`（ネットワーク /
+  API / タイムアウト）を送出した場合、エージェントは**数値も推測も一切含まない**固定の
+  デグレードメッセージを返します — 欠落を埋めるために捏造することは決してありません。
+</Callout>

@@ -1,0 +1,302 @@
+---
+title: Agent
+description: オーケストレーション層 — 4 スロットの意図解析、明確化ゲートウェイ、決定論的なセキュリティゲート、三路ルーティング、tool-use ループ、LLM プロバイダのシーム、そしてパスごとの捏造防止ガード。
+---
+
+`agent` ドメイン（`src/ragspine/agent/`）は RAGSpine のオーケストレーターです。そのモジュール docstring は、担当するフローを次のように要約しています。
+
+> 意图解析 → 澄清网关 → 安全门 → 三路分流 → tool-use 循环 → 合成回答
+>
+> _（意図解析 → 明確化ゲートウェイ → セキュリティゲート → 三路ルーティング → tool-use ループ → 回答の合成）_
+
+公開エントリポイントはただ 1 つ — `answer_question` — であり、ここが**捏造防止**ガードの置かれている場所でもあります。概念については [捏造防止](/ja/docs/concepts/anti-fabrication) を、ルーティングモデルについては [二重チャネル](/ja/docs/concepts/dual-channel) を参照してください。
+
+## レイアウト
+
+<Files>
+  <Folder name="agent" defaultOpen>
+    <File name="agent.py" />
+    <File name="intent.py" />
+    <File name="llm_provider.py" />
+    <File name="query_tools.py" />
+    <File name="security_gate.py" />
+  </Folder>
+</Files>
+
+## intent — 4 スロット解析
+
+`intent.py` は、`IntentParser` Protocol の背後で、生の質問を `ParsedIntent` dataclass に解析します。デフォルトの `RuleIntentParser` は LLM を一切使わず、設定駆動で、モジュールレベルの `parse_intent(question, reference_date=None)` に委譲します。
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: '正規化されたメトリックコード（例: REVENUE）。存在しない場合は None。',
+    },
+    entity: {
+      type: 'string | null',
+      description: '正規化されたエンティティコード（例: ACME_CN）。存在しない場合は None。',
+    },
+    period: { type: '(period_type, value) | null', description: '例: ("FY", "2024")。' },
+    channel: { type: 'string', description: 'デフォルトは "TOTAL"（例: AGENCY / BANCA / TOTAL）。' },
+  }}
+/>
+
+`ParsedIntent` はさらに `route`、`raw_question`、複数値スロットの `metrics` /
+`entities` / `periods`（明示的に列挙された複合クエリ用）、および `external_entity` を保持します。ルーティング定数は `ROUTE_STRUCTURED = "structured"`、`ROUTE_NARRATIVE = "narrative"`、
+`ROUTE_COMPOSITE = "composite"` です。認識されたメトリックにナラティブの手がかりが伴えば
+`composite` に、数値の手がかりがあれば `structured` に、それ以外は `narrative` にルーティングされます。
+
+<Callout type="info">
+  `IntentParser` Protocol は、実装に `raw_question` を埋めることを要求します。これにより、セキュリティゲートはパーサーが生成したフィールドとは独立に*生の*質問を再スクリーニングできます — つまり LLM ベースのパーサーに差し替えてもスコープチェックを無効化することはできません。
+</Callout>
+
+## intent — 明確化ゲートウェイ
+
+`clarify_scope(intent, reference_date=None) -> ClarificationResult` は、いかなるチャネルよりも前に実行されます。
+4 つのモードは次のとおりです:
+
+| モード定数                        | 値                          | 条件                                                                 |
+| --------------------------------- | --------------------------- | -------------------------------------------------------------------- |
+| `CLARIFY_OUT_OF_SCOPE_ENTITY`     | `"out_of_scope_entity"`     | 生の質問にセキュリティゲートがヒット — まず拒否する。                 |
+| `CLARIFY_ASK_FIRST`               | `"ask_first"`               | **メトリック**が欠落 — 推測すれば実質的な誤りになる。                 |
+| `CLARIFY_ANSWER_WITH_ASSUMPTIONS` | `"answer_with_assumptions"` | **エンティティ / 期間**が欠落 — 補完し、仮定を明示する。              |
+| `CLARIFY_NONE`                    | `"none"`                    | 完全、またはナラティブルート。                                        |
+
+この非対称性は意図的なものです: メトリックの欠落は**まず質問し**（`narrowing_options` =
+サポートされているメトリック一覧）、エンティティや期間の欠落は**仮定を明示した上で回答**します —
+ホームエンティティ（`profile.home_entity_code`）と直近の完了した会計年度
+（`("FY", str(ref.year - 1))`）をデフォルトとし、その両方を `assumption_note` で開示し、
+ワンクリックでの絞り込みを提供します。スコープ外の拒否は、ナラティブの早期リターンやメトリックチェックよりも**先に**、
+`intent.raw_question` に対してセキュリティゲートを呼び出すことでチェックされます —
+意図的に `intent.external_entity` を信用しません。
+
+`ClarificationResult` のフィールド: `mode`、`assumed_slots`、`assumption_note`、
+`narrowing_options`、`question`。
+
+## security_gate — 決定論的、決してプラガブルにしない
+
+`security_gate.py` には `SecurityGate(external_entities, home_company_name)` があります。これは
+決定論的で、LLM を呼ばず、企業名をハードコードしません — 競合他社リストとホーム企業名は
+`DomainProfile` から供給されます。
+
+- `detect(text) -> SecurityScreen` — 最長一致による外部/競合エイリアス検出。空白を除去したビュー上でマッチし
+  （そのため `"竞 安"` では回避できません）、ヒット箇所を同じ長さのスペースで**マスク**して、
+  漏洩しうる部分文字列を一切残しません（ドキュメント化されている
+  `中国 → ACME_CN` の衝突にも対応しています）。
+- `screen(*, raw_question, metric) -> SecurityVerdict` — スコープを**生の質問のみ**から再導出します。
+  競合ヒット時には `SECURITY_REFUSE_OUT_OF_SCOPE`
+  （`= "out_of_scope_entity"`、意図的に `CLARIFY_OUT_OF_SCOPE_ENTITY` と同じ値）を、
+  拒否メッセージと「代わりに `home_company_name` について質問する」という絞り込みオプション付きで返します。それ以外は
+  `SECURITY_ALLOW` を返します。
+
+## query_tools — `query_metric` の三状態
+
+`query_tools.py` は、構造化チャネル唯一のファクト生成プリミティブである
+function-calling ツール `query_metric` を定義します。`execute_query_metric(store, metric, entity, period, channel="TOTAL")` はすべてのパラメータを用語集（glossary）を通して正規化し、
+`fact_metric` ストアに問い合わせ、正確に **3 つ**のステータスのいずれかを返します — 決して推測はしません:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    正確な値が存在します。`value`、`unit`、統制されたディメンションコード、および
+    `source`（`{"doc", "locator"}`）配下の完全なリネージを返します。
+  </Tab>
+  <Tab value="not_found">
+    すべてのパラメータは正規化されたが、一致する行がない。
+    `{"status": "not_found", "normalized": {...}}` を返します — 補間も推論も行いません。
+  </Tab>
+  <Tab value="unrecognized_param">
+    パラメータを統制コードに正規化できなかった（用語集が `None` を返した）。
+    `{"status": "unrecognized_param", "param": ..., "raw": ...}` を返します。
+  </Tab>
+</Tabs>
+
+ツールスキーマはプロファイル由来です（`build_query_metric_tool_anthropic` /
+`build_query_metric_tool_openai`、加えて事前構築済みの定数）。したがってエンティティの例は
+有効なプロファイルから供給されます — 企業名がハードコードされることは決してありません。
+
+## llm_provider — プラガブルなシーム
+
+**0.3.0** 以降、`LLMProvider` Protocol はファミリー共有コアの
+[`corespine`](https://pypi.org/project/corespine/) が所有し、`ragspine.agent.llm_provider` から
+再エクスポートされます。これは **OpenAI chat-completions 形式**を話し、単一の
+`chat` メソッドを持ちます:
+
+```python
+from corespine import ChatCompletion  # re-exported via ragspine.agent.llm_provider
+
+
+class LLMProvider(Protocol):
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion: ...
+```
+
+`messages` は OpenAI 形式の履歴（各要素は `{"role", "content", ...}`）です。システムプロンプトは
+独立した引数ではなく、単に先頭の `{"role": "system", ...}` エントリです。
+`ChatCompletion` は `choices: tuple[Choice, ...]`（各 `Choice` は `content` とオプションの
+`tool_calls` を持つ `ResponseMessage` をラップします）に加え、`usage`、`model`、`id` を保持します
+— 標準的な chat-completions エンベロープであり、すべて `corespine` の frozen dataclass です。
+
+<Callout type="info">
+  **0.3.0 で移行済み。** 以前の `create_message(*, system, messages, tools) ->
+  ProviderResponse` シームは廃止されました。代わりに `chat(messages, *, tools=None) -> ChatCompletion`
+  を実装してください。理由と corespine の境界については [ADR 0012](/ja/docs/decisions/adr-0012) を参照してください。
+</Callout>
+
+<Cards>
+  <Card
+    title="MockProvider"
+    description="オフライン、決定論的、キーもネットワークも不要。1 ターン目に query_metric ツール呼び出しを発行し、2 ターン目に found / not_found / unrecognized のテキストを決定論的にレンダリングします。コアは完全にこの上で動作します。"
+  ></Card>
+  <Card
+    title="AnthropicProvider"
+    description="実際の Claude Messages API。SDK は __init__ 内で遅延 import されます（ImportError は [llm] extra を案内します）。OpenAI 形式の messages/tools を Anthropic API にマッピングし、レスポンスを ChatCompletion へ写し戻します。SDK のエラーは ProviderError としてラップされ、タイムアウト/リトライは SDK に委譲されます。"
+  ></Card>
+</Cards>
+
+`DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"`。チャット用の `OpenAIProvider` はまだ同梱されていません
+— ドキュメント化されたシームがあるだけです（OpenAI のツールスキーマは `query_tools.py` で既に事前構築されており、
+`[llm]` extra は埋め込みバックエンド用に `openai` を同梱しています）。`ProviderError`
+（`corespine.CorespineError` のサブクラス）がラップするのはネットワーク/API/タイムアウトのエラーのみで、
+プログラムエラーはそのまま伝播します。
+
+<Callout type="info">
+  `RAGSPINE_TOKENS_PER_MINUTE`（> 0）を設定すると、サービスは構築したプロバイダを
+  corespine の `RateLimitedProvider` でラップし、クライアント側の**能動的な** TPM スロットリングを行います —
+  SDK 自身の受動的な `max_retries` による 429 バックオフを補完するものです。[設定](/ja/docs/reference/configuration) を参照してください。
+</Callout>
+
+## agent — オーケストレーターと tool-use ループ
+
+`answer_question` が唯一の公開エントリです:
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` は `tuple[str, str]` です。履歴は生成時のコンテキストとしてのみ使われます: システムメッセージの後、
+現在の質問の前に挿入されますが、決定論的な意図解析、セキュリティスクリーニング、検索クエリ、
+証拠/出典リストには決して入りません。アシスタントロールとして扱われるのは `assistant` のみで、
+未知のロールは user に正規化されます。その結果、過去の会話テキストが競合他社クエリを許可したり、
+引用になったりすることはありません。
+[ADR 0017](/ja/docs/decisions/adr-0017) を参照してください。
+
+そのフローは次のとおりです: リクエスト id を割り当て → プライバシーに配慮した trace コンテキストを構築 →
+意図を解析（デフォルトは `RuleIntentParser`）→ `clarify_scope`。その後、厳密な順序で早期リターンします:
+
+<Steps>
+  <Step>
+    **スコープ外**（`CLARIFY_OUT_OF_SCOPE_ENTITY`）→ **いかなるツール、検索、LLM 呼び出しよりも前に**
+    拒否する。
+  </Step>
+  <Step>**まず質問**（`CLARIFY_ASK_FIRST`）→ 明確化のための質問を反射的に返す。</Step>
+  <Step>**仮定付き回答** → 有効な質問を補完してからルーティングする。</Step>
+  <Step>
+    **ルーティング**: narrative → `_run_narrative`；structured/composite → サブタスクを展開して
+    `_run_tool_loop` を実行する（明示的な複数値の複合クエリには LLM を使わない `_multi_subtask_answer`）；
+    composite はさらにナラティブセクションを追記する。
+  </Step>
+</Steps>
+
+tool loop（`_run_tool_loop`）は `MAX_TOOL_ITERATIONS = 5` で上限が設けられています:
+`provider.chat(messages, tools=tools)` を呼び出し、`query_metric` ツール呼び出しがあれば実行し、その結果を
+user メッセージとしてフィードバックし、モデルがツール呼び出しを返さなくなったら停止します。`ProviderError` の際には、
+捏造する代わりに、固定の**数値を含まない**テキストへ縮退します。
+
+`answer_question` は `AgentResult` を返します:
+
+<TypeTable
+  type={{
+    answer: {
+      type: 'str',
+      description: '最終的な回答テキスト（または誠実な拒否 / 明確化のための質問）。',
+    },
+    route: {
+      type: 'str',
+      description: 'structured | narrative | composite（または明確化ルート）。',
+    },
+    clarification: {
+      type: 'ClarificationResult | None',
+      description: 'ゲートウェイが質問または拒否した場合に存在。',
+    },
+    tool_results: {
+      type: 'list[dict]',
+      description: 'query_metric の生の結果（found / not_found / unrecognized_param）。',
+    },
+    sources: { type: 'list[dict]', description: '引用されたすべてのファクト / スニペットの出典リネージ。' },
+  }}
+/>
+
+## 捏造防止ガード
+
+「モデルの出力にかかわらず not-found に書き換える」ガードは `_structured_answer` にあります。
+ツール結果をステータスごとに分割し、意図的に**パスごと**に分かれています:
+
+- **Found** → 回答は**ファクト値から決定論的に**合成され、モデルの文章は破棄されます
+  （回帰テスト
+  `test_found_path_discards_fabricated_extra_number` がこれを固定しています）。
+- **found なし、not_found あり** → 誠実な拒否（「查不到 … 不提供任何推测数字」）。
+- **unrecognized_param のみ** → 問題のパラメータを名指しします。
+- **ツール結果ゼロ**（モデルがツールを呼ばずに回答した）→ モデルのテキストをそのまま返します。
+
+複数サブタスクのパス（`_multi_subtask_answer`）はそもそも LLM を一切呼びません。ナラティブパス
+（`_run_narrative`）はモデルの文章を信頼しますが、モデルが名前を挙げ損ねた引用元ドキュメントを
+**強制的に追記**します。trace フラグ `fabrication_guard_triggered` は、ツール結果が存在するのに
+どれも `found` でない場合 — すなわちガードが拒否へ書き換えた場合 — に true になります。
+
+<Callout type="warn">
+  捏造防止はプロンプトではなく制御フローで強制されます。3 つのパスは意図的に統一**されていません**
+  — [捏造防止](/ja/docs/concepts/anti-fabrication) を参照してください。
+</Callout>
+
+## 例
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # deterministic value, or an honest "not found"
+print(result.sources)  # [{'doc': ..., 'locator': ...}]
+```
+
+## 関連ページ
+
+<Cards>
+  <Card
+    title="捏造防止"
+    href="/ja/docs/concepts/anti-fabrication"
+    description="制御フローによるガードと、それがパスごとに分かれている理由。"
+  />
+  <Card
+    title="二重チャネル"
+    href="/ja/docs/concepts/dual-channel"
+    description="ルーティングが構造化とナラティブをどのように分割・統合するか。"
+  />
+  <Card
+    title="検索"
+    href="/ja/docs/guides/retrieval"
+    description="このオーケストレーターが利用する NarrativeRetriever。"
+  />
+  <Card
+    title="拡張ポイント"
+    href="/ja/docs/reference/extension-points"
+    description="LLMProvider、IntentParser、NarrativeRetriever、およびその他のシーム。"
+  />
+</Cards>

@@ -1,0 +1,57 @@
+---
+title: 'ADR 0010: Parsing dell''intento — gate di sicurezza deterministico + IntentParser modulare'
+description: Disaccoppiare il gate di sicurezza deterministico, sempre attivo e mai sostituibile, da un Protocol IntentParser modulare — deterministico dove conta, flessibile dove è sicuro.
+---
+
+> Stato: **accepted** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento del drift (nessun `covers`). Sostituire con un nuovo ADR, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002). Imposto da [0004](/it/docs/decisions/adr-0004) e [0007](/it/docs/decisions/adr-0007).
+
+## Contesto
+
+Il parser dell'intento è basato su regole, a zero LLM e ottimizzato per la finanza/il cinese (corrispondenza di sinonimi,
+`_SUPPORTED_METRICS` hardcoded, `_CHANNEL_SYNONYMS` inline). È anche la
+**porta d'ingresso critica per la sicurezza**: il rifiuto di entità fuori ambito / concorrenti è deterministico e
+avviene _prima_ di qualsiasi chiamata all'LLM o al recupero, e il mascheramento delle entità esterne risiede qui. Due
+decisioni precedenti rompono un parser puramente a regole: la piena generalità ([0004](/it/docs/decisions/adr-0004))
+significa dimensioni arbitrarie definite dall'utente che un parser ottimizzato per la finanza non è in grado di leggere, e
+il multilingue ([0007](/it/docs/decisions/adr-0007)) rende
+le tabelle di sinonimi per lingua un'esplosione di manutenzione.
+
+L'intuizione chiave: **la decisione di sicurezza e la decisione sull'intento sono separabili.**
+"Questa entità è fuori ambito / concorrente / RESTRICTED?" è critica per la sicurezza e deve
+restare deterministica. "Quale dimensione/periodo viene richiesto?" non lo è — un errore di parsing lì
+produce solo una richiesta di chiarimento o un not-found, mai una fuga di informazioni.
+
+## Decisione
+
+**Disaccoppiarle.**
+
+- Il **gate di sicurezza** (fuori ambito / concorrente / RESTRICTED) diventa una
+  guardia deterministica indipendente, sempre attiva e **mai sostituibile**, che opera sull'
+  output del parser ed è dichiarata tramite `DomainProfile`. Non consulta mai un LLM.
+- L'**estrazione dell'intento** diventa un **Protocol `IntentParser`** con un'implementazione a regole
+  predefinita a zero LLM e guidata dalla configurazione (il default offline secondo
+  [0009](/it/docs/decisions/adr-0009)) e un backend opzionale a classificatore LLM
+  (un extra) per un parsing multilingue / su domini arbitrari robusto.
+
+Principio: **deterministico dove conta (sicurezza), flessibile dove è sicuro (intento).**
+
+## Alternative considerate (respinte)
+
+- **Parser puramente a regole, guidato dalla configurazione, senza mai LLM (opzione A)**: massima purezza, ma
+  costringe ogni utente a scrivere a mano la configurazione dei sinonimi per dominio/per locale — fragile per
+  le lingue morfologicamente ricche e con un elevato attrito all'adozione.
+- **Classificatore LLM come parser primario (opzione C)**: il più flessibile, ma rende la
+  porta d'ingresso dipendente dall'LLM e rischia che un errore di parsing vanifichi il gate di sicurezza; perde il
+  default offline a zero LLM.
+
+## Conseguenze
+
+- La garanzia di sicurezza si rafforza: ora è un componente esplicito, isolato e non sostituibile
+  anziché una proprietà emergente del fatto che "il parser a regole si dà il caso che sia deterministico."
+- Preserva il default offline a zero LLM offrendo al contempo un percorso opt-in per generalità/multilingue.
+- Nuovi artefatti: un componente `SecurityGate` e un Protocol `IntentParser` con due
+  implementazioni.

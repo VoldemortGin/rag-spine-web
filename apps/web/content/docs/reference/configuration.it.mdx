@@ -1,0 +1,105 @@
+---
+title: Configurazione
+description: Variabili d'ambiente di ServiceConfig, selettori di recupero, gate di esecuzione dei flussi di lavoro, credenziali delle API pubbliche e CompanyProfile.
+---
+
+`ServiceConfig.from_env()` mappa il campo dataclass `name` su `RAGSPINE_NAME`. Restano supportati tre alias
+legacy: `RAGSPINE_PROVIDER` → `provider_type`, `RAGSPINE_COMPANY_PROFILE` →
+`company_profile_path` e `RAGSPINE_FAQ_SOURCE` → `faq_source`. Una variabile con il nome canonico del campo
+ha la precedenza sul proprio alias.
+
+## Core e archiviazione
+
+| Variabile                      | Predefinito                | Scopo                                                    |
+| ------------------------------ | -------------------------- | -------------------------------------------------------- |
+| `RAGSPINE_DB_PATH`             | `data/fact_metric.db`      | archivio SQLite dei fatti strutturati                    |
+| `RAGSPINE_CHUNK_DB_PATH`       | non impostata              | archivio dei chunk narrativi; se non impostata degrada in modo onesto |
+| `RAGSPINE_MAPPING_DB_PATH`     | non impostata              | archivio delle mappature                                 |
+| `RAGSPINE_QUEUE_DB_PATH`       | non impostata              | coda di revisione SME, non la coda di job RQ             |
+| `RAGSPINE_MANIFEST_DB_PATH`    | non impostata              | manifest dell'ingestione strutturata                     |
+| `RAGSPINE_REDIS_URL`           | `redis://localhost:6379/0` | connessione RQ/Redis                                     |
+| `RAGSPINE_ALLOWED_UPLOAD_ROOT` | non impostata              | allowlist risolta dei percorsi di ingestione             |
+| `RAGSPINE_FAQ_SOURCE`          | non impostata              | JSON delle FAQ approvate; se non impostata la cache è vuota |
+| `RAGSPINE_REFERENCE_DATE`      | non impostata              | data ISO per la risoluzione dei periodi relativi         |
+
+## Provider e recupero
+
+| Variabile                     | Predefinito      | Valori / scopo                                                                            |
+| ----------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
+| `RAGSPINE_PROVIDER`           | `mock`           | `mock` oppure `anthropic`                                                                    |
+| `RAGSPINE_MODEL`              | predefinito del provider | ID del modello lato server                                                          |
+| `RAGSPINE_BASE_URL`           | non impostata    | URL del gateway del provider lato server                                                   |
+| `RAGSPINE_TOKENS_PER_MINUTE`  | `0`              | limitatore a finestra scorrevole del provider corespine; 0 lo disattiva            |
+| `RAGSPINE_RETRIEVAL_MODE`     | `auto`           | `auto`/`hybrid`/`vector`, oppure `economy`/`bm25`/`lexical` a embedding zero                   |
+| `RAGSPINE_EMBEDDING`          | `auto`           | `none`, `auto`, `onnx`, `deterministic` oppure `openai`                                     |
+| `RAGSPINE_RERANKER`           | `none`           | `cross_encoder`, `colbert`, `splade`, `auto` oppure nessuno                                    |
+| `RAGSPINE_POSTPROCESSOR`      | `none`           | catena separata da virgole come `mmr,lost_in_middle`                                                 |
+| `RAGSPINE_QUERY_DECOMPOSE`    | `none`           | scomposizione opzionale della query tramite LLM                                            |
+| `RAGSPINE_CORRECTIVE`         | `none`           | wrapper `crag` opzionale                                                                  |
+| `RAGSPINE_QUERY_TRANSFORM`    | `none`           | `hyde`, `rag_fusion` oppure `step_back`                                                     |
+| `RAGSPINE_ADAPTIVE`           | `none`           | instradamento opzionale per complessità euristico/LLM                                      |
+| `RAGSPINE_CHUNKER`            | `none`           | predefinito, parent-child/small-to-big, layout, laws, QA, book, sentence-window o semantic |
+| `RAGSPINE_VECTOR_STORE`       | `none`           | nessuno, in-process o adattatore persistente configurato                                   |
+| `RAGSPINE_PERSISTENCE_POLICY` | `default`        | predefinito isolation-first oppure `persist_everything`                                          |
+
+La modalità economica è più forte dell'impostare un embedding economico: non costruisce affatto
+un backend di embedding né un archivio vettoriale.
+
+## Flussi di lavoro e API pubbliche di compatibilità
+
+| Variabile                     | Predefinito      | Scopo                                                        |
+| ----------------------------- | ---------------- | ------------------------------------------------------------ |
+| `RAGSPINE_WORKFLOW_MATCHER`   | `auto`           | selezione del matcher dei flussi di lavoro; auto può ripiegare sul lessicale |
+| `RAGSPINE_DIFY_RUN_ENABLED`   | `false`          | gate principale per l'esecuzione compatibile con Dify/n8n     |
+| `RAGSPINE_DIFY_RUN_TIMEOUT_S` | `10.0`           | timeout di esecuzione in secondi                              |
+| `RAGSPINE_DIFY_RUN_ISOLATION` | `inprocess`      | `inprocess` oppure `subprocess` potenziato per Linux                   |
+| `RAGSPINE_STUDIO_DIR`         | vuota            | directory statica esistente montata su `/studio`               |
+| `RAGSPINE_DIFY_PUBLIC_APPS`   | vuota            | `key=/path/workflow.yml;...`; se vuota disabilita l'API pubblica Dify |
+| `RAGSPINE_N8N_API_KEY`        | non impostata    | `X-N8N-API-KEY` atteso; se non impostata disabilita `/api/v1/*`         |
+| `RAGSPINE_N8N_STORE_PATH`     | `data/n8n_store` | radice dell'archivio file compatibile con n8n                 |
+
+Abilitare l'esecuzione è una decisione sul confine di fiducia, non autenticazione. Le route interne
+di esecuzione necessitano comunque di protezione tramite reverse proxy/rete. Le API pubbliche Dify e n8n hanno
+le proprie chiavi; i webhook sono intenzionalmente non autenticati.
+
+## CompanyProfile
+
+Il profilo aziendale controlla l'identità della sede, gli alias delle entità, etichette/geografia, l'ambito dei concorrenti e
+la classificazione di sensibilità. Il loader usato dal motore legge `RAGSPINE_COMPANY_CONFIG` oppure un
+percorso esplicito:
+
+```bash
+RAGSPINE_COMPANY_CONFIG=config/company.toml \
+  .venv/bin/python scripts/run_server.py
+```
+
+`ServiceConfig.company_profile_path` viene popolato dal canonico
+`RAGSPINE_COMPANY_PROFILE_PATH` o dal legacy `RAGSPINE_COMPANY_PROFILE`, ma l'attuale caricamento del
+profilo aziendale ha un percorso `RAGSPINE_COMPANY_CONFIG` separato. Preferite quest'ultimo finché quelle
+superfici di assemblaggio non saranno unificate.
+
+```toml
+[home]
+company_name = "YourCo"
+entity_code = "YOURCO_GROUP"
+
+[home.synonyms]
+"yourco" = "YOURCO_GROUP"
+
+[external_entities]
+"globex" = "Globex"
+
+[sensitivity]
+default_level = "INTERNAL"
+restricted_keywords = ["board_minutes", "绩效"]
+```
+
+Nessuna identità aziendale di produzione dovrebbe essere codificata nel motore. Le decisioni su concorrenti/rifiuti e
+la classificazione dei contenuti riservati derivano da questo profilo.
+
+## Nota sui test dei provider
+
+Il percorso mock deterministico è la baseline offline pienamente collaudata. L'autore del progetto risiede
+in Cina e non può accedere all'API di Anthropic, per cui il comportamento specifico di Anthropic non ha ricevuto lo
+stesso livello di test di integrazione diretti. Gli utenti di quell'adattatore dovrebbero validare il proprio ID del modello, le credenziali,
+il comportamento del gateway e i limiti di frequenza nel proprio ambiente.

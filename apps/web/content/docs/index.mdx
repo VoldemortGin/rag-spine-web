@@ -1,27 +1,31 @@
 ---
 title: Introduction
-description: RAGSpine is a framework-free backend RAG engine — deterministic dual-channel retrieval and agent orchestration, with anti-fabrication and source provenance as code-enforced invariants.
+description: RAGSpine is an offline-first Python RAG engine with deterministic dual-channel retrieval, provenance, workflow scaffolding, and optional HTTP compatibility surfaces.
 ---
 
-**RAGSpine** is a backend RAG engine you _assemble in plain Python_ — not a framework you
-submit to. No Dify, no LangGraph, no graph DSL, no bundled UI. Just a coherent,
-batteries-included library of composable parts — retrieval, agent orchestration, document
-extraction, evaluation, and an HTTP service layer — wired together by ordinary functions and
-typed `Protocol`s. The core imports zero SDKs and runs fully offline with a deterministic
-`MockProvider`.
+**RAGSpine** is a framework-free backend RAG engine assembled with ordinary Python functions
+and typed `Protocol`s. Its structured channel answers questions whose evidence is a fact table;
+its narrative channel retrieves cited text. The orchestrator routes between them and replaces an
+unsupported answer with an explicit refusal. A deterministic `MockProvider` keeps the base path
+usable without an API key.
 
-It was built for a demanding use case (executive insight Q&A over financial and operational
-reports) and ships that rigor as **first-class, code-enforced invariants**:
+RAGSpine now also includes workflow tooling. The `ragspine` command can turn a natural-language
+description into a safe Dify 0.6 workflow, reuse a close bundled template, serialize JSON or YAML,
+and emit a versioned graph preview. JSON, YAML, and TOML workflow documents can be normalized to a
+JSON-compatible mapping. These compatibility tools do not turn the engine into Dify or n8n, and
+the runtime never downloads or executes an upstream marketplace workflow.
 
-- **Never fabricate.** When the data isn't there, the orchestrator deterministically refuses
-  ("not found") regardless of what the LLM says — anti-fabrication lives in the control flow,
-  not in a prompt you hope the model obeys.
-- **Always cite.** Every answer carries source lineage (document + locator).
-- **Two channels, one router.** A deterministic **structured / numeric** channel answers
-  _"what's the number,"_ a **narrative RAG** channel answers _"why / what happened,"_ and an
-  agent routes each question — or splits a composite one and runs both.
-- **Everything is pluggable.** LLM, embeddings, reranker, OCR, retriever, task queue, and KB
-  source connectors — all typed `Protocol`s injected at the edges.
+## What is enforced
+
+- **No unsupported values.** A failed structured lookup becomes `not_found`, regardless of model
+  prose.
+- **Source lineage.** Facts and narrative snippets retain document and locator information.
+- **Restricted-content isolation.** Restricted children are removed before prompt assembly;
+  parent/window expansion cannot reintroduce them.
+- **Explicit execution.** Workflow scaffolding, parsing, conversion, compilation, and preview are
+  non-executing operations. Dify and n8n execution routes are disabled by default.
+- **Pluggable edges.** Providers, embeddings, stores, rerankers, chunkers, queues, connectors, and
+  other integrations enter through typed seams.
 
 ## Start here
 
@@ -29,50 +33,73 @@ reports) and ships that rigor as **first-class, code-enforced invariants**:
   <Card
     title="Installation"
     href="/docs/getting-started/installation"
-    description="pip install rag-spine, the optional extras, and a from-source setup."
+    description="Install the base package or a precise set of optional capabilities."
   />
   <Card
     title="Quickstart"
     href="/docs/getting-started/quickstart"
-    description="Run the offline demo, ask a question, and call the Python API in minutes."
+    description="Run offline, scaffold a workflow, and start the optional service."
   />
   <Card
-    title="Dual channel"
-    href="/docs/concepts/dual-channel"
-    description="How the structured numeric and narrative RAG channels split the work."
+    title="Workflow guide"
+    href="/docs/guides/workflows"
+    description="Catalog, matching, formats, Dify/n8n conversion, preview v1, and security boundaries."
   />
   <Card
-    title="Anti-fabrication"
-    href="/docs/concepts/anti-fabrication"
-    description="The invariant that rewrites an unsupported answer to an honest refusal."
+    title="Retrieval"
+    href="/docs/guides/retrieval"
+    description="Economy, hybrid, metadata-filtered, multi-index, and parent-child retrieval."
+  />
+  <Card
+    title="HTTP API"
+    href="/docs/reference/http-api"
+    description="Engine, catalog, Dify-compatible, and n8n-compatible endpoints."
   />
   <Card
     title="Architecture"
     href="/docs/architecture/overview"
-    description="The request flow, the channels, and the deep domain-grouped layout."
-  />
-  <Card
-    title="Configuration"
-    href="/docs/reference/configuration"
-    description="Environment variables and the CompanyProfile that drives identity."
-  />
-  <Card
-    title="Changelog"
-    href="/docs/changelog"
-    description="User-facing changes by release — 0.9.0 adds source connectors, a relation-extractor slot, domain chunk presets, and an SSE ask endpoint."
+    description="Domains, dependency direction, and the execution boundary."
   />
 </Cards>
 
-## Explore the domains
+## Repository version and published package
 
-The engine is organized by domain — find the file by folder before you read its name. Each
-has a focused guide:
+The current documentation follows the repository's `main` source, whose package metadata is
+`0.11.0`. That number is a source-tree version, not a statement that PyPI already serves 0.11.0.
+For reproducible released behavior, check the version selected by your package manager with
+`ragspine version`; use an editable source install when following unreleased `main` documentation.
+
+## Major domains
 
 <Cards>
-  <Card title="Extraction" href="/docs/guides/extraction" description="Documents → a frozen StyledGrid IR." />
-  <Card title="Ingestion" href="/docs/guides/ingestion" description="IR / text → stores, idempotently." />
-  <Card title="Storage" href="/docs/guides/storage" description="Fact store + chunk store, full lineage." />
-  <Card title="Retrieval" href="/docs/guides/retrieval" description="Semantic hybrid + RRF + rerank + the opt-in technique stack." />
-  <Card title="Agent" href="/docs/guides/agent" description="Intent, clarification, routing, the guard." />
-  <Card title="Service" href="/docs/guides/service" description="FastAPI app + RQ async ingestion." />
+  <Card
+    title="Extraction"
+    href="/docs/guides/extraction"
+    description="Documents to a lineage-preserving intermediate representation."
+  />
+  <Card
+    title="Ingestion"
+    href="/docs/guides/ingestion"
+    description="Structured facts and narrative chunks, idempotently."
+  />
+  <Card
+    title="Storage"
+    href="/docs/guides/storage"
+    description="SQLite fact, chunk, mapping, queue, and manifest stores."
+  />
+  <Card
+    title="Agent"
+    href="/docs/guides/agent"
+    description="Intent, clarification, tool use, history, and the deterministic guard."
+  />
+  <Card
+    title="Service"
+    href="/docs/guides/service"
+    description="FastAPI composition root and optional async queue."
+  />
+  <Card
+    title="Pipeline"
+    href="/docs/guides/pipeline"
+    description="Static engine topology and workflow preview projections."
+  />
 </Cards>

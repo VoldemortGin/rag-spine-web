@@ -1,0 +1,140 @@
+---
+title: Workflows
+description: Natural-language scaffolding, the 1,000-template catalog, JSON/YAML/TOML normalization, Dify and n8n compatibility, preview v1, and execution boundaries.
+---
+
+RAGSpine's workflow layer has three distinct jobs:
+
+1. **Describe or select** a workflow from the command line or HTTP API.
+2. **Normalize, inspect, convert, and compile** configuration without executing it.
+3. **Run** only through an explicit, server-controlled, default-off execution surface.
+
+Keeping these jobs separate lets a website safely render templates without receiving provider
+keys or executing marketplace code.
+
+## Scaffold from natural language
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+ragspine workflow create "invoice extraction and approval" --format json -o invoice.json
+```
+
+`scaffold_workflow(description, ...)` tries a catalog match first. An explicit `template_id`
+selects that template with confidence `1`. Otherwise, reuse requires both a score threshold and a
+winner margin. A non-match produces a fixed, escaped Dify 0.6 `start → llm → end` graph; it does
+not ask a model to invent executable code. Descriptions are limited to 4,096 characters and
+invalid Unicode/NUL input is rejected.
+
+The fallback includes model requirements that must be configured after import. It never receives
+an API key, provider base URL, or credential from the description.
+
+### Matchers
+
+- `lexical`: deterministic BM25 plus controlled bilingual taxonomy aliases.
+- `onnx`: semantic matching through FastEmbed; requires `[embed-onnx]` and may download/cache a
+  model on first use.
+- `auto`: tries ONNX when available and falls back to lexical matching.
+
+## What the 1,000 templates mean
+
+The bundled catalog contains **7 manually curated templates and 993 generated templates**. The
+generated descriptors cover exactly **39 industries**, **27 use cases**, and five archetypes:
+`analysis`, `extraction`, `routing`, `synthesis`, and `transformation`.
+
+The catalog is authored in the Spine repository. Dify Marketplace and n8n pages can be recorded
+as research/provenance references with observed popularity metadata, but RAGSpine does not copy
+their YAML, prompts, credentials, or long descriptions. At runtime it neither downloads nor
+executes an upstream workflow. The 993 generated descriptors are materialized into constrained
+Dify workflows from package resources.
+
+Catalog loading verifies identifiers and SHA-256 integrity, scans for secrets, restricts node and
+provider/plugin shapes, and returns defensive copies. A template advertised as runnable has no
+environment/conversation variables or unsupported features; external model configuration is
+still a deployment responsibility.
+
+## JSON, YAML, and TOML
+
+`parse_workflow` accepts text or bytes plus an explicit `json`, `yaml`, or `toml` format.
+`load_workflow` chooses by `.json`, `.yaml`, `.yml`, or `.toml` extension. All formats normalize
+to one JSON-compatible `dict[str, object]`.
+
+Automatic text detection recognizes a leading `{` as JSON and otherwise tries YAML. TOML must be
+explicit or loaded from a `.toml` file. JSON and YAML duplicate keys are rejected; YAML uses a
+safe loader. Non-finite numbers, unsupported values, and excessively large structures fail
+closed.
+
+| Limit            |             Value |
+| ---------------- | ----------------: |
+| document bytes   |             1 MiB |
+| nesting depth    |                32 |
+| structural nodes |            20,000 |
+| one string       | 256 Ki characters |
+| YAML aliases     |                64 |
+
+File loading rejects symlinks, special files, and replacement races. `dump_json` and
+`dump_dify_yaml` produce deterministic validated output; emitted YAML is alias-free.
+
+## Dify compatibility
+
+Dify configuration is the primary workflow interchange shape. The compiler follows
+parse → intermediate representation → optimize/codegen and supports Dify workflow and
+advanced-chat graphs:
+
+```bash
+ragspine dify analyze workflow.toml
+ragspine dify compile workflow.yml --target ragspine
+```
+
+Analysis and compilation do not execute the workflow. The compiler's Pydantic boundary requires
+`[dify]` unless it is already supplied by `[service]`.
+
+## n8n conversion
+
+The Python and HTTP conversion surfaces support `n8n_to_dify` and `dify_to_n8n`. Conversion is
+pure and returns warnings for semantics that cannot be represented exactly. n8n source data is
+retained in `_n8n` node metadata and top-level `x_n8n` data for round-trip support. This is not a
+claim that every arbitrary n8n workflow can execute in RAGSpine.
+
+## Preview protocol v1
+
+`ragspine workflow preview ID` and workflow HTTP responses expose a **display-only projection**:
+
+```json
+{
+  "preview_schema_version": 1,
+  "nodes": [
+    { "id": "start", "title": "Start", "type": "start", "x": 0, "y": 0, "width": 240, "height": 96 }
+  ],
+  "edges": []
+}
+```
+
+Nodes contain only `id`, `title`, `type`, geometry, and optional `parent_id`. Edges contain only
+`id`, `source`, `target`, and an optional `label`. The projection deliberately omits prompts,
+variables, provider configuration, and credentials. Geometry is deterministic; validation rejects
+duplicate IDs, missing endpoints, and parent cycles. Limits are 256 nodes, 512 edges, and 512
+characters per display string.
+
+Preview v1 is not an executable workflow format. Consumers should branch on
+`preview_schema_version` and treat unknown versions as unsupported.
+
+## HTTP catalog and scaffolding
+
+- `GET /v1/workflow-templates`: paginated metadata only, maximum 100 per page, with cache and
+  weak ETag support.
+- `GET /v1/workflow-templates/{template_id}`: canonical workflow, Dify YAML, and preview v1.
+- `POST /v1/workflow-scaffold`: description/template selection, match metadata, workflow, YAML,
+  requirements, warnings, and preview. It never executes the result.
+
+## Execution boundary
+
+Dify and n8n run routes return `403` until `RAGSPINE_DIFY_RUN_ENABLED=true`. Providers and
+registered Dify app workflow paths are configured server-side; clients cannot submit provider
+objects or API keys. Compilation passes a static gate and then runs under the configured
+isolation mode. The default `inprocess` mode is a restricted Python boundary, not a security
+container; Linux can opt into subprocess isolation.
+
+The n8n-compatible `/webhook/{path}` route is intentionally unauthenticated to match webhook
+semantics. It only considers active stored workflows and remains subject to the same default-off
+execution gate. Never expose it directly without ingress authentication/rate limits appropriate to
+your deployment.

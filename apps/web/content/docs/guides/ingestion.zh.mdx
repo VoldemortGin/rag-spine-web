@@ -1,0 +1,250 @@
+---
+title: 摄取
+description: IR/文本 → 存储。带批次 manifest 台账的结构化事实摄取、叙事 chunk 摄取，以及 SME 人工评审队列状态机——全部幂等。
+---
+
+**ingestion** 领域接收抽取输出（StyledGrid IR、叙事文本）并把它
+写入[存储](/zh/docs/guides/storage)。它有三条车道：**结构化**（数值
+事实）、**叙事**（文档 chunk）和**评审**（human-in-the-loop 队列，
+兜住确定性路径不确定的一切）。每条车道都是幂等的——
+重跑一次摄取绝不能重复写入。
+
+<Callout type="info">
+  包：`src/ragspine/ingestion/`。契约：`src/ragspine/ingestion/CLAUDE.md`。
+</Callout>
+
+## 目录结构
+
+<Files>
+  <Folder name="ingestion" defaultOpen>
+    <Folder name="structured">
+      <File name="ingestion.py — ingest_excel / ingest_file → IngestReport" />
+      <File name="ingestion_manifest.py — ManifestStore 台账 + 指标" />
+    </Folder>
+    <Folder name="narrative">
+      <File name="narrative_extract.py — 文档 → NarrativeDoc（分段 + 定位信息）" />
+      <File name="narrative_ingest.py — 批量 chunk 摄取 → NarrativeIngestReport" />
+    </Folder>
+    <Folder name="review">
+      <File name="review_queue.py — ReviewQueue 状态机 + 审计轨迹" />
+    </Folder>
+  </Folder>
+</Files>
+
+## 结构化摄取
+
+`structured/ingestion.py` 端到端地编排单个文档：
+**抽取 → 归一化（词表）→ 颜色标签 → upsert**。有两个入口：
+
+- `ingest_excel(path, store, registry, queue, *, dry_run=False, extractor_version="xlsx_styled@1", manifest=None, batch_id=None)` —
+  仅限 xlsx。
+- `ingest_file(path, store, registry, queue, *, dry_run=False, manifest=None, batch_id=None, valid_as_of=None, grid_extractor=None)` —
+  统一的多格式分发器：按后缀路由到正确的抽取器（xlsx /
+  xlsm / pptx，或经[路由器](/zh/docs/guides/extraction#pdf-路由--逐页分诊)处理的 PDF），
+  并复用共享的摄取逻辑。
+
+两者都返回一个 **`IngestReport`**（一个计数对象，而非裸数字）：
+
+<TypeTable
+  type={{
+    source_path: { type: 'str' },
+    source_doc_id: { type: 'str' },
+    file_hash: { type: 'str | None', default: 'None' },
+    dry_run: { type: 'bool', default: 'False' },
+    n_grids: { type: 'int', default: '0' },
+    n_facts_extracted: { type: 'int', default: '0' },
+    n_facts_ingested: { type: 'int', default: '0' },
+    n_tags_applied: { type: 'int', default: '0' },
+    n_enqueued_review: { type: 'int', default: '0' },
+    warnings: { type: 'list[str]', default: '[]' },
+    status: { type: 'str', default: '"ok"' },
+    error: { type: 'str | None', default: 'None' },
+  }}
+/>
+
+在内部，每个网格先经活跃映射打上颜色标签（`apply_mapping`），转换为
+[`Fact`](/zh/docs/guides/storage#fact-dataclass) 对象，再用
+`store.upsert_facts(...)` 写入。事实会被盖上其链路戳——
+`source_doc_id`、`source_locator`、`source_file_hash`、`extractor_version`、
+`mapping_version`，以及 `review_status=REVIEW_AUTO_APPROVED`。
+
+```python
+from ragspine.ingestion.structured.ingestion import ingest_file
+
+report = ingest_file("report.xlsx", store, registry, queue)
+print(report.n_facts_ingested, report.n_enqueued_review)
+```
+
+### 摄取何时转而入队评审
+
+结构化路径是保守的。在以下情况，文件会进入[评审队列](#评审队列)
+而不是自动摄取：
+
+- 没有任何网格能解析出实体，但文件包含可抽取数据——原因
+  _"实体无法解析，需人工指认"_（实体无法解析，需要人工识别）；
+- 文件有带颜色的单元格，但该 scope **没有活跃的颜色映射**——原因
+  _"颜色映射未确认，需 SME 确认图例"_（颜色映射未确认，SME 必须确认图例）；
+- PDF 看起来像 PowerPoint 导出（索取 pptx 源文件），或是需要 OCR 的扫描件。
+
+使用 `dry_run=True` 时，抽取与报告完整运行，但 `n_facts_ingested` 与
+`n_enqueued_review` 保持为 `0`——存储与队列不被触碰。
+
+## 批次 manifest 台账
+
+`structured/ingestion_manifest.py` 记录_跑过什么_。`ManifestStore`（sqlite，
+`manifest_batch` + `manifest_input` 表）打开一个批次、记录每个输入文件，并以
+最终状态与耗时关闭批次。每个批次是一条 `ManifestRecord`：
+
+| 字段                                  | 含义                                              |
+| ------------------------------------- | ------------------------------------------------- |
+| `batch_id`                            | 调用方提供，或自动生成 `batch-{uuid4 hex[:12]}`   |
+| `status`                              | `running` → `done` / `failed`                     |
+| `inputs`                              | 逐文件的 `{path, hash, format, …}` 行             |
+| `n_facts` · `n_warnings` · `n_failed` | 汇总计数                                          |
+| `duration_s` · `failures`             | 耗时 + 逐文件错误                                 |
+
+API：`open_batch(batch_id=None)`、`record_input(...)`、`close_batch(batch_id, status="done")`、
+`get_batch(id)`、`list_batches()`。旁边还有两个可观测性辅助函数：
+`compute_metrics(manifest_store, queue, store)`（事实总数、评审积压、置信度
+分桶、警告率）和 `list_versions(store, registry)`（活跃的抽取器版本 +
+颜色映射）。
+
+<Callout type="warn">
+  **幂等性真正的所在。** 契约把 manifest 称作"守卫"，它确实是每次
+  运行的审计台账（路径 / 哈希 / 计数 / 失败）。但字面意义上的不重复写入
+  保证来自事实存储的**唯一键 upsert**（`store.upsert_facts`，以
+  [`dim_key`](/zh/docs/guides/storage#dim_key--upsert-键) 为键）：重跑一个批次会重新抽取并
+  重新 upsert，而唯一键使存储不会增长。`batch_id` **不是**由内容派生的
+  ——它由调用方提供或是随机 uuid。
+</Callout>
+
+## 叙事摄取
+
+叙事车道是两个模块，职责切分干净：
+
+<Tabs items={["narrative_extract", "narrative_ingest"]}>
+<Tab value="narrative_extract">
+
+纯粹、确定性的文本抽取——零 OCR、零 LLM、不碰存储。`extract_narrative(path)`
+按后缀（`SUPPORTED_SUFFIXES = {.pptx, .pdf, .docx, .docm, .txt}`）分发到对应的
+抽取器，并返回一个 **`NarrativeDoc`**：`doc_id`、`file_hash`、一个 `NarrativeSegment`
+列表（`text` + `source_locator`）、`skipped_pages` 和 `warnings`。定位符形如
+`'slide={N},frame={M}'`、`'slide={N},notes'`、`'page={N}'`，或（对纯文本）`'para={N}'`。
+`NarrativeDoc.to_text()` 用空行连接各段——该字符串就是分块的输入
+契约。
+
+纯 `.txt` 文件走同一条叙事路径——被当作连续散文处理，绝不强行
+转成结构化事实。`extract_txt_narrative(path)` 以 UTF-8 读取（`errors="replace"`），
+按空行切分为段落块，对每块做归一化，并为每个非空块发出一个
+`NarrativeSegment`，携带从 1 开始计数的 `source_locator="para={N}"`。它
+零依赖且确定性。
+
+</Tab>
+<Tab value="narrative_ingest">
+
+批量编排：**抽取 → 分块 → 写入 chunk 存储**，幂等且支持 dry-run。
+`ingest_narrative(inputs, store, *, meta_by_doc=None, dry_run=False, chunker=None)` 接受一个
+文件夹、一个文件或一个列表，并返回一个 `NarrativeIngestReport`（逐文件的
+`FileReport` 列表，外加 `counts()`）。当 `chunker=None` 时，每个文件使用
+`chunk_document(doc.to_text(), doc_meta)`；注入的 `Chunker` 可选择父子、
+句子窗口、版式、领域或语义分块行为。产生的层级/窗口字段会
+持久化到 chunk 存储中，而不是只在内存里重建。Chunk 通过
+`store.replace_doc_chunks(...)` 写入
+[ChunkStore](/zh/docs/guides/storage#chunk-存储)。
+
+逐文件状态为 `ingested` / `skipped` / `failed` / `no_text` 之一。幂等性使用
+同一 sqlite 数据库中的 `narrative_doc` 表（`doc_id → file_hash`）：若记录的哈希
+与文件匹配，则**跳过**该文件、不再重新抽取。`meta_by_doc` 的键会
+对照 `ALLOWED_META_KEYS`（`title`、`topic`、`entity`、`geography`、`period`、
+`language`、`sensitivity`、`valid_as_of`）校验——未知字段抛出 `ValueError`。期间
+取自元数据，或经 `period_from_filename(name)` 从文件名推断。
+
+</Tab>
+</Tabs>
+
+<Callout type="info">
+  敏感度在这里应用：显式的 `meta["sensitivity"]` 优先，否则运行
+  来自 [common](/zh/docs/guides/common#敏感度) 的 `classify_sensitivity(...)`。这正是
+  后续让检索强制执行 RESTRICTED 隔离的基础。
+</Callout>
+
+## 评审队列
+
+`review/review_queue.py` 是 SME 人工评审**状态机**，兜住确定性路径
+不确定的一切——低置信度 OCR、跨通道冲突、
+未确认的颜色映射、无法解析的实体。它以 sqlite 为后端（与事实
+存储同一个数据库，不同的表：`review_item` + 只追加的 `review_audit`）。
+
+状态机有三个字符串状态和两个迁移：
+
+```text
+pending ──approve──▶ approved   (terminal)
+pending ──reject───▶ rejected   (terminal)
+```
+
+`STATUS_PENDING = "pending"`、`STATUS_APPROVED = "approved"`、`STATUS_REJECTED = "rejected"`。
+approved 和 rejected 是终态——重复处理终态条目（或对
+不存在的条目操作）会抛出 `IllegalTransitionError`。
+
+**`ReviewItem`** 携带 `reason`、`payload`（JSON）、`locator`、`priority`（默认 `100`，
+**数字越小越早评审**）、`id`、`status`、`actor`、`note` 和 `corrected_value`。
+
+API：
+
+| 方法                                                       | 效果                                                 |
+| --------------------------------------------------------- | ---------------------------------------------------- |
+| `enqueue(reason, payload, locator, priority=100) -> int`  | 插入 pending 条目 + 写入一条 `enqueue` 审计行        |
+| `list_pending() -> list[ReviewItem]`                      | pending 条目，按 `priority ASC, id ASC` 排序         |
+| `approve(item_id, actor, note=None)`                      | → approved                                           |
+| `reject(item_id, actor, note=None, corrected_value=None)` | → rejected（可选记录一条修正）                       |
+| `get(item_id)` · `audit_trail(item_id)`                   | 获取条目 / 只追加的 `AuditRecord` 历史               |
+
+每次迁移都追加一条 `AuditRecord`（`enqueue` / `approve` / `reject`）——审计轨迹
+只追加、绝不修改，因此评审历史可完整重建。参见
+[术语表中的评审队列](/zh/docs/concepts/glossary#审核队列)。
+
+## 数据源连接器
+
+两条车道默认都从本地路径摄取，但数据源本身是一条可插拔的缝。
+`ingestion/source/connector.py` 定义了 `SourceConnector` Protocol——单一的
+`iter_documents() -> Iterable[RawDoc]`，把每个文档作为 frozen 的 `RawDoc` 产出
+（`source_doc_id`、`locator`、`content: bytes`、`content_type`、`metadata`）。
+
+默认的 `FilesystemConnector` 零依赖。`InMemoryConnector` 在进程内提供文档
+（测试 / fixture）。`HttpConnector` 和 `NotionConnector` 访问远程知识
+库，并在 `[connectors]` extra 之后延迟 import `httpx`。通过
+`make_source_connector(spec, **kwargs)` 或 `RAGSPINE_SOURCE_CONNECTOR` 选择其一；第三方连接器
+经 `ragspine.source_connectors` entry-point 组注册（名称冲突时
+内置名胜出）。参见[扩展点 → SourceConnector](/zh/docs/reference/extension-points#sourceconnector)。
+
+```python
+from ragspine.ingestion.source.connector import make_source_connector
+
+# None / "none" → None; "filesystem"/"fs" → local walk; "http"/"notion" → remote ([connectors]).
+connector = make_source_connector("filesystem")
+for raw in connector.iter_documents():
+    ...  # raw is a RawDoc: source_doc_id, locator, content bytes, content_type, metadata
+```
+
+<Callout type="info">
+  `[connectors]` extra 只引入 `httpx`（宽松许可证、延迟 import）。未选择
+  连接器时，摄取读取本地路径的行为与之前完全一致——逐字节相同。
+</Callout>
+
+## 本领域坚守的不变量
+
+- **幂等摄取**——结构化重跑按 `dim_key` upsert；叙事重跑在
+  `file_hash` 匹配时跳过。重复摄取绝不使存储翻倍。
+- **溯源保留**——每个事实和 chunk 都保有其 `source_doc_id` + 定位符。
+- **保守的自动摄取**——任何有歧义的内容（实体 / 映射 / 置信度 /
+  冲突）都交给人工，而不是静默进入存储。
+- **只追加的审计**——评审迁移被记录、绝不被覆盖。
+
+## 相关阅读
+
+<Cards>
+  <Card title="抽取指南" href="/zh/docs/guides/extraction" />
+  <Card title="存储指南" href="/zh/docs/guides/storage" />
+  <Card title="Common 指南——敏感度与词表" href="/zh/docs/guides/common" />
+  <Card title="术语表中的评审队列条目" href="/zh/docs/concepts/glossary#审核队列" />
+</Cards>

@@ -1,0 +1,89 @@
+---
+title: Provenienza
+description: Ogni fatto e ogni risposta porta con sé un id del documento sorgente più un locator — un lignaggio che viaggia end-to-end e non viene mai perso.
+---
+
+L'invariante gemello della prevenzione delle risposte inventate: **citare sempre.** Ogni fatto memorizzato e ogni risposta
+porta con sé il lignaggio della fonte — da quale documento proviene e in quale punto al suo interno. Non esiste alcun
+percorso che produca un numero senza produrne anche l'origine.
+
+<Callout type="warn">
+  **Garanzia.** Ogni fatto/risposta porta con sé `source_doc_id` (oppure `doc_id` per i chunk) + un
+  `source_locator`. Il lignaggio viene trasportato end-to-end e non viene mai perso lungo il percorso verso la risposta.
+</Callout>
+
+## Il lignaggio inizia dalla memorizzazione
+
+Il lignaggio non viene aggiunto a posteriori al momento della risposta — è una colonna NOT-NULL alla base dello
+stack.
+
+### Fatti strutturati (`storage/fact_store.py`)
+
+I primi dieci campi della dataclass `Fact` sono congelati per posizione; due di essi riguardano il lignaggio:
+
+```python
+@dataclass
+class Fact:
+    metric_code: str
+    entity: str
+    geography: str
+    channel: str
+    period_type: str
+    period: str
+    value: float
+    unit: str
+    source_doc_id: str    # which document
+    source_locator: str   # where inside it (e.g. slide=2,table=1,row=REVENUE,col=FY2024)
+    ...
+```
+
+La tabella `fact_metric` dichiara entrambi come `TEXT NOT NULL`. Un fatto non può esistere senza
+sapere da dove proviene. (La v2 aggiunge anche un lignaggio di versione opzionale — `source_file_hash`,
+`extractor_version`, `mapping_version` — ma si tratta di aggiunte additive.)
+
+### Chunk narrativi (`retrieval/chunking/chunk_store.py`)
+
+Ogni chunk porta con sé `doc_id` + `source_locator` (`TEXT NOT NULL`), insieme a metadati come
+`title`, `entity`, `period` e `sensitivity`.
+
+## Il lignaggio viaggia fino alla risposta
+
+<Steps>
+  <Step>**Query strutturata** — `execute_query_metric` restituisce un risultato `found` il cui sotto-dizionario `source` è `{"doc": fact.source_doc_id, "locator": fact.source_locator}`.</Step>
+  <Step>**Sintesi della risposta** — `_structured_answer` rende ogni fatto trovato come `… 值 单位（来源：{doc} · {locator}）` e restituisce i dizionari `source` come `AgentResult.sources`.</Step>
+  <Step>**Sintesi narrativa** — `_run_narrative` costruisce il blocco di snippet con `（来源：{doc} {locator}）` e, come misura di sicurezza, qualunque nome di documento sorgente omesso dal modello viene aggiunto forzatamente in coda alla risposta.</Step>
+  <Step>**Risposta HTTP** — la route `/v1/ask` mappa `result.sources` nel campo `sources` di `AskResponse` (`service/api/routes.py`).</Step>
+</Steps>
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # number + （来源：… · …）
+print(result.sources)  # [{'doc': 'ACME_FY2024_Review.pptx', 'locator': 'slide=2,table=1,...'}]
+```
+
+## Dove il lignaggio non deve essere perso
+
+<Callout type="info">
+  Queste sono le giunture in cui sarebbe facile — e vietato — perdere il lignaggio:
+</Callout>
+
+- **Memorizzazione** — non scrivere mai un fatto/chunk senza le sue colonne di lignaggio; sono NOT NULL
+  per progettazione. (`storage/CLAUDE.md`: "never drop lineage".)
+- **Rendering dei fatti trovati** — `_structured_answer` / `_multi_subtask_answer` devono mantenere il
+  dizionario `source` allegato a ciascuna riga renderizzata.
+- **Sintesi narrativa** — la misura di sicurezza per le citazioni in `_run_narrative` esiste proprio perché
+  un modello che "dimentica" di citare non possa privare la risposta della provenienza delle fonti.
+- **Il bordo del servizio** — la mappatura `/v1/ask` deve trasportare `sources` senza modifiche; anche un
+  hit del corto circuito FAQ porta con sé il proprio `source` (vedi
+  [Corto circuito FAQ](/it/docs/concepts/faq-short-circuit)).
+
+<Callout type="warn">
+  Il trace rispettoso della privacy registra gli **identificatori** del lignaggio (chunk_id, codici controllati) ma mai
+  il valore del fatto o il testo del chunk — la provenienza delle fonti riguarda il *dove*, non la riesposizione del *cosa*
+  sensibile. Vedi [Isolamento RESTRICTED](/it/docs/concepts/restricted-isolation).
+</Callout>

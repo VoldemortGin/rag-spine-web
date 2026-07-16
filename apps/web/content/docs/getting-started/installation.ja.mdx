@@ -1,0 +1,100 @@
+---
+title: インストール
+description: Python 3.11 以降に RAGSpine をインストールし、オプション機能を意図的に選択し、PyPI リリースとリポジトリ版を区別します。
+---
+
+RAGSpine には **Python 3.11 以降** が必要です。リポジトリは現在バージョン `0.11.0` を宣言していますが、
+これは PyPI に同じバージョンが公開されていることを保証するものではありません。インストール後、
+`ragspine version` を実行して、選択されたディストリビューションを確認してください。
+
+## PyPI からのインストール
+
+```bash
+uv add rag-spine
+# or
+python -m pip install rag-spine
+```
+
+ディストリビューション名は `rag-spine` で、インポート名およびコンソールコマンド名は `ragspine` です:
+
+```python
+import ragspine
+```
+
+プロジェクトの集約ランタイム extra を 1 つのコマンドで指定するには:
+
+```bash
+uv add "rag-spine[all]"
+```
+
+`[all]` は `pyproject.toml` に列挙されたランタイム extras を集約したもので、開発ツールは意図的に
+除外されています。また、個別にオプトインする `[ppt]` や、重量級の代替である `[pdf-docling]` も
+含まれて**いません**。必要な場合は、次の例のようにいずれかを明示的に追加してください:
+
+```bash
+uv add "rag-spine[all,ppt,pdf-docling]"
+```
+
+## オプションの extras
+
+| Extra                                            | 主な機能                                                              |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `[service]`                                      | FastAPI、uvicorn、HTTP テスト/クライアントサポート、RQ、Redis          |
+| `[pdf]` / `[pdf-docling]`                        | デフォルトの `pdfspine` 抽出 / 重量級の Docling フォールバック          |
+| `[ocr]`                                          | PaddleOCR。CUDA 固有の Paddle ランタイムは別途インストールします        |
+| `[doc]` / `[ppt]`                                | `docspine` による DOCX 抽出 / オプトインの `pptspine` による PPTX 抽出  |
+| `[llm]`                                          | Anthropic および OpenAI の SDK アダプター                              |
+| `[embed]` / `[embed-onnx]`                       | sentence-transformers / FastEmbed ONNX 埋め込み                       |
+| `[rerank]`, `[colbert]`, `[splade]`, `[colpali]` | オプションのニューラル再ランキングまたは視覚文書表現                     |
+| `[vector]` / `[graph]`                           | sqlite-vec、pgvector、Qdrant / NetworkX アダプター                    |
+| `[otel]`                                         | OpenTelemetry トレースエクスポート                                     |
+| `[connectors]`                                   | HTTP および Notion のソースコネクター                                  |
+| `[dify]`                                         | Pydantic 2 による Dify コンパイラー境界検証                            |
+| `[dev]`                                          | テスト、lint/型チェック、ドキュメント、ビルド、Twine                    |
+
+ワークフローの JSON/YAML ワイヤーフォーマットサポートは基本 CLI の一部であるため、PyYAML は基本
+依存関係になっています。TOML の読み取りには Python 3.11 の `tomllib` を使用します。Dify コンパイラーは
+`[dify]` を通じて Pydantic 2 を追加します。`[service]` もモダンな FastAPI（`>=0.110`）を使用するため、
+同様に Pydantic 2 を必要とします。
+
+<Callout type="warn">
+  `fastapi>=0.99,<0.100` および `pydantic>=1.10,<2` に固定されたアプリケーションは、同じ環境に
+  RAGSpine のモダンな service extra や Dify extra をインストールできません。そのアプリケーションは
+  既存の環境に残したまま、RAGSpine のサービスは別の仮想環境またはプロセスで実行してください。
+  `rag-spine` の基本インストール自体は Pydantic 2 を必要としません。
+</Callout>
+
+ONNX 系の extras は、初回使用時にモデルの重みをダウンロードし、以降のオフライン実行のために
+キャッシュすることがあります。`[ocr]` は主に Linux/NVIDIA 環境へのデプロイを想定しています。
+ColPali のモデル重みには独自のライセンスがあります。Apache ライセンスの Python 依存関係を
+インストールしても、モデルのライセンスが変わることはありません。
+
+## 現行ソースのインストール
+
+クローンしたリポジトリのルートから次のコマンドを実行してください:
+
+```bash
+git clone https://github.com/VoldemortGin/ragspine.git
+cd ragspine
+uv venv .venv
+uv pip install --python .venv/bin/python -e ".[dev,service,vector]"
+```
+
+Windows では、最後のコマンドで `.venv\\Scripts\\python.exe` を使用してください。Make ターゲットは
+Unix 系の開発環境向けの便利機能です:
+
+```bash
+make venv
+make install
+```
+
+`make install` は `[dev,service,vector]` を選択します。名前に反して、`make install-all` は
+`[dev,service,vector,llm,embed]` を選択します。これは公開されている `[all]` extra と同じセットでは
+ありません。
+
+## オフライン境界
+
+基本インストールでは、API キーなしで構造化チャネル、決定論的オーケストレーション、カタログ閲覧、
+字句ベースのワークフローマッチング、ワークフロー生成、フォーマット正規化、グラフプレビューを
+実行できます。実際のモデルプロバイダー、リモートコネクター、Redis、外部ベクターデータベース、
+初回のモデルダウンロードは、オプトインのネットワーク機能です。

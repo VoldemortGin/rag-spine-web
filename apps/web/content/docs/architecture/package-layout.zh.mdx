@@ -1,0 +1,79 @@
+---
+title: 包布局
+description: src/ragspine 下的十五个领域包及其职责。
+---
+
+当前 `main` 在 `src/ragspine/` 下包含 **15 个顶层领域包**（不含
+`__pycache__`）。布局是按功能分包（package-by-feature），而不是横向的 controllers/models/utils
+切分。
+
+```text
+src/ragspine/
+├── agent/       intent, security, tool loop, provider seam, answer orchestration
+├── cli/         installed ragspine command
+├── common/      profile, glossary, sensitivity, observability, shared constants
+├── dify/        Dify parser, IR, optimizer, code generation, restricted execution support
+├── eval/        QA, extraction, retrieval, faithfulness, and regression gates
+├── extraction/  Office/PDF/text extraction and StyledGrid IR
+├── fixtures/    package fixtures used by demos/tests
+├── graph/       provenance-aware structured/narrative relation graph seams
+├── ingestion/   structured facts, narrative chunks, sources, manifests, review queue
+├── n8n/         pure n8n ↔ Dify conversion
+├── pipeline/    static engine topology values and Mermaid/DOT/JSON export
+├── retrieval/   chunking, filtering, routing, lexical/vector search, rerank, postprocess
+├── service/     FastAPI app, public compatibility APIs, queue, jobs, FAQ, config
+├── storage/     fact-store protocol and SQLite implementation
+└── workflows/   catalog, source policy, formats, matching, scaffold, preview v1
+```
+
+## 职责与边界
+
+### 引擎核心
+
+`common`、`storage`、`extraction`、`ingestion`、`retrieval`、`agent`、`graph` 和 `eval` 实现
+证据路径。重量级 SDK 在适配器中导入，而不是在核心接缝定义中导入。纯净的
+基础安装加 `MockProvider` 保留了确定性的离线路径。
+
+`retrieval` 现在包含 `filtering/`（显式元数据谓词）和 `routing/`
+（多库选择/融合）。父子/窗口数据存储在块存储中，因此它
+能在重启后保留，并可在子命中后进行扩展而不改变引用身份。
+
+### 工作流互操作
+
+`workflows` 负责安全的配置摄取以及目录/脚手架行为。它是
+预览 v1 展示投影的唯一来源。`dify` 负责 Dify 的语义解析/IR/代码生成。`n8n` 在
+n8n JSON 与 Dify 形态的映射之间转换，并附带警告与往返（round-trip）元数据。
+
+这些领域可以准备代码或配置，但不会隐式地执行它们。执行属于
+服务层的事务，并有显式的门控。
+
+### 边缘
+
+`cli` 是安装后的本地边缘。`service` 是网络/组合边缘，会广泛导入以
+装配资源。`pipeline` 是一个小型的静态图值/导出层，描述真实的引擎拓扑；
+它与工作流预览是两回事。
+
+## 两种图表示
+
+| 表示                | 归属        | 用途                                                          |
+| ------------------- | ----------- | ------------------------------------------------------------- |
+| `PipelineGraph`     | `pipeline`  | 检视装配好的引擎拓扑；Mermaid/DOT/JSON                        |
+| 工作流预览 v1       | `workflows` | 单个工作流的安全 UI 投影；仅含节点/边/几何信息                |
+
+两种表示都不会执行节点。
+
+## 导入与依赖的经验法则
+
+领域代码依赖小巧的契约和值；适配器向内依赖这些契约。
+`service` 和 `cli` 是组合根。新的厂商 SDK 应放进可选适配器，配合
+延迟导入和 conformance 测试。工作流客户端不得绕过来源策略、格式限制、
+预览脱敏或服务端执行门控。
+
+<Cards>
+  <Card title="通用功能" href="/zh/docs/guides/common" />
+  <Card title="摄取" href="/zh/docs/guides/ingestion" />
+  <Card title="检索" href="/zh/docs/guides/retrieval" />
+  <Card title="评估" href="/zh/docs/guides/evaluation" />
+  <Card title="工作流" href="/zh/docs/guides/workflows" />
+  <Card title="服务" href="/zh/docs/guides/service" />
+</Cards>

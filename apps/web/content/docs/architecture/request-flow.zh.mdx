@@ -1,0 +1,221 @@
+---
+title: 请求流程
+description: 详细控制流——从问题到意图解析、澄清门、FAQ 短路、路由与防编造机制守卫——逐步对应到代码。
+---
+
+本页是[总览](/zh/docs/architecture/overview)中单行流程的权威展开。下面的每一步都可以追溯到
+`agent/agent.py` 中的编排器 `answer_question(...)`、`agent/intent.py` 中的规则解析器与门控，
+以及 `service/faq/faq_cache.py` 中的服务边缘缓存。
+
+```python
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`AgentResult` 携带 `answer`、`route`、`clarification`、`tool_results` 和 `sources`。在默认
+`decomposer=None` 下，普通单问题路径有严格顺序：其中的澄清与拒答判定先于该路径的工具、检索或
+生成调用。可选的分解前置步骤与 HTTP FAQ 前置步骤位于普通路径之外，下文会分别说明。
+
+`history` 只作为生成上下文。它在意图解析与澄清之后被归一化为 provider 消息，插在 system 消息与
+当前问题之间。它绝不参与意图解析、安全判定、检索查询或证据/引用组装。分解后的请求会把同一份
+历史传给每个经过完整守卫的子问题。
+
+<Steps>
+
+<Step>
+### 可选分解——选择启用的前置步骤
+
+注入 `decomposer` 时，`answer_question` 会先调用它，再进入普通单问题的意图/澄清路径。因此，内置的
+`LLMQueryDecomposer` 此时可能先调用一次 provider。该能力需要显式启用；默认值 `None` 不会产生这次调用。
+
+如果分解器返回多个子问题，每个子问题都会在关闭继续分解的情况下递归运行完整的
+`answer_question` 路径，独立执行意图解析、澄清、安全门、检索与防编造改写。最终的
+`route="decomposed"` 结果以确定性方式拼接并去重来源；合成本身不调用模型。若只返回一个子问题、
+响应格式错误或 provider 失败，则回落到原始的普通路径。
+
+</Step>
+
+<Step>
+### 意图解析——四个槽位
+
+`RuleIntentParser`（可通过 `IntentParser` Protocol 替换，默认委托给
+`parse_intent`）把原始问题转成带**四个槽位**的 `ParsedIntent`，并选定
+一条路由。解析基于规则，**不使用 LLM**——它是确定性且离线的。
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'str | None',
+      description: '经词表归一化的指标代码（如 REVENUE）；缺失时为 None。',
+    },
+    entity: {
+      type: 'str | None',
+      description:
+        '归一化的实体代码（如 ACME_CN），在安全掩码后的文本上匹配；缺失时为 None。',
+    },
+    period: {
+      type: '(str, str) | None',
+      description:
+        '(period_type, value)，例如 ("FY", "2024")、("HY", "2024H1")、("QUARTER", "2025Q1")。',
+    },
+    channel: { type: 'str', description: '分销渠道；默认为 "TOTAL"，绝不为 None。' },
+  }}
+/>
+
+在匹配之前，`parse_intent` 会先运行安全门的 `detect(...)` 来掩码任何竞争对手
+提及，因此被掩码的外部实体绝不会泄漏进本方实体的匹配。路由
+由槽位与词面线索选定，落入三个常量之一：`ROUTE_STRUCTURED`、
+`ROUTE_NARRATIVE` 或 `ROUTE_COMPOSITE`（同时识别到指标**和**叙事线索）。
+
+</Step>
+
+<Step>
+### 澄清门——追问、拒答或假设
+
+`clarify_scope(intent, ...)` 返回一个 `ClarificationResult`，其 `mode` 是四个
+常量之一。各分支按下列确切顺序检查：
+
+<Tabs items={['out_of_scope_entity', 'ask_first', 'answer_with_assumptions', 'none']}>
+  <Tab value="out_of_scope_entity">
+    **拒答——在普通单问题路径中首先检查。** 门控对**原始问题**（而不是解析出的 `external_entity`
+    字段）调用确定性的 `SecurityGate.screen(...)`，因此
+    换成 LLM 解析器也无法绕过这条拒答。如果判定为超出作用域/竞争对手，
+    `answer_question` 立即从这条路径返回拒答消息——不调用工具、不检索，也不再调用 LLM。
+    这就是 `CLARIFY_OUT_OF_SCOPE_ENTITY` 提前返回。
+  </Tab>
+  <Tab value="ask_first">
+    **含糊 → 追问。** 若 `intent.metric is None`（且路由不是叙事），门控
+    返回 `CLARIFY_ASK_FIRST`，并附上列出所支持指标的问题。猜测指标
+    会是实质性错误，因此 agent 选择追问而不是假设——并在不再调用 LLM 的情况下返回
+    澄清问题。
+  </Tab>
+  <Tab value="answer_with_assumptions">
+    **缺实体/期间 → 假设并明示。** 缺失的 `entity` 默认为 `CompanyProfile` 中的本方
+    实体；缺失的 `period` 默认为最近的完整财年
+    （`("FY", str(year - 1))`）。该假设会以 `【假设】…（如需收窄：…）` 横幅的形式暴露，
+    并提供一键收窄选项。回答仍然继续。
+  </Tab>
+  <Tab value="none">
+    **完全指定。** 所有必需槽位齐备（或路由是叙事，无需槽位
+    澄清）——直接进入路由。
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  这种不对称是刻意的：缺失**指标**会中止流程去追问，而缺失
+  **实体或期间**则带着明示的假设继续。猜*哪个数字*是
+  硬性错误；猜*谁的*/*何时的*是可恢复的，且用户可以随时纠正。
+</Callout>
+</Step>
+
+<Step>
+### FAQ 短路——服务边缘
+
+这一步仅在 HTTP 服务位于引擎之前时存在（`POST /v1/ask`）。它是外层前置步骤：在路由处理器调用
+`answer_question` 或打开事实存储、检索器之前，就会调用 `faq_cache.lookup(question, ...)`。
+经审核的命中会返回 `AskResponse(route="faq", ...)`，携带缓存的回答与溯源信息
+——它**绝不会触达 provider、事实存储或检索器**。
+
+关键在于，FAQ 层复用同一套 `parse_intent` / `clarify_scope` 判定来施加
+**保守的排除规则**——命中其中任何一条都算作刻意的未命中，问题
+落回完整的 agent：
+
+- 结构化数值类（路由为 `structured`，或 metric/entity/period 任一槽位被填充），
+- 竞争对手/超出作用域的实体，
+- 实时/时效性线索（今天、现在、最新、latest、current、股价 …），
+- 已过期（超出条目的 `valid_from`/`valid_until` 窗口），
+- 已禁用（`enabled` 为 false），
+- `RESTRICTED` 敏感级。
+
+<Callout type="info">
+  FAQ 缓存位于防编造机制守卫的**前面**。它的排除规则恰恰是为了
+  确保它永远不会短路一个需要该守卫的问题——参见
+  [FAQ 短路](/zh/docs/concepts/faq-short-circuit)。
+</Callout>
+</Step>
+
+<Step>
+### 路由——结构化 / 叙事 / 复合
+
+FAQ 未命中时（或在纯 Python 路径中），agent 按 `intent.route` 分派：
+
+- **`narrative`** → 对注入的 `NarrativeRetriever` 运行 `_run_narrative(...)`。
+- **`structured`** → 展开为子任务。单个子任务运行 `query_metric`
+  工具调用循环（`_run_tool_loop`，上限 `MAX_TOOL_ITERATIONS = 5`）；多个子任务
+  （用户显式列出多个指标/实体/期间）则**以确定性方式、
+  不经 LLM** 运行（`_run_subtasks` → `_multi_subtask_answer`）。
+- **`composite`** → 先运行结构化路径，再运行 `_run_narrative(...)`，把
+  归因内容追加在 `归因分析：` 标题下，并拼接来源列表。
+
+各路由内部运行什么，参见[通道](/zh/docs/architecture/channels)。
+
+</Step>
+
+<Step>
+### 防编造机制守卫——改写为"查不到"
+
+在结构化路径上，模型对数字永远没有最终话语权。`_structured_answer`
+检查的是工具结果，而不是模型的文字：
+
+- **只要有 `found`** → 模型文本被**整体丢弃**，每一行回答都根据事实值及其
+  谱系确定性地重建（`实体 期间 指标（渠道）：值 单位（来源…）`）。
+  接入真实 LLM 时它可能在文字里夹带一个额外编造的数字，所以直接丢弃其文字。
+- **`not_found`** → 改写为诚实的拒答（`查不到 … 为避免误导，不提供任何推测数字`）。
+- **`unrecognized_param`** → 指出无法归一化的那个参数。
+
+叙事路径是刻意的例外：它信任模型的文字，但**强制
+来源引用**，把回答中未点名的来源文档补充进去。当 provider
+故障时，两条路径都诚实降级（返回"AI 服务暂不可用"消息），绝不给出
+数字。完整不变量参见[防编造机制](/zh/docs/concepts/anti-fabrication)。
+
+</Step>
+
+<Step>
+### 回答 + 来源
+
+编排器返回 `AgentResult`，包含（可能已被改写的）`answer`、选定的
+`route`、`tool_results` 和 `sources`——每条事实与引用都携带
+`source_doc_id` + locator。隐私感知的 trace 只记录代码、计数和耗时——
+绝不记录回答、事实值或 chunk 文本。
+
+</Step>
+
+</Steps>
+
+## 完整路径一览
+
+```text
+HTTP service outer pre-step (before answer_question):
+  faq_cache.lookup → vetted hit returns; else call answer_question
+
+answer_question(question, store, provider, …)
+  0. optional decomposer:
+       >1 subquestions → answer each with full guards, then deterministic route="decomposed"
+       one/failure     → continue through the normal single-question path
+  1. parse → ParsedIntent { metric, entity, period, channel, route }   # no LLM
+  2. clarify_scope(intent):
+       out_of_scope_entity      → return refusal            (no further tool / retrieval / LLM)
+       ask_first (no metric)    → return clarifying question (no further LLM)
+       answer_with_assumptions  → set defaults + banner, continue
+     history → provider generation messages only; never intent/security/retrieval/evidence
+  3. route on intent.route:
+       narrative  → _run_narrative
+       structured → single: _run_tool_loop (query_metric, ≤5 iters)
+                     multi : _run_subtasks (deterministic, no LLM)
+       composite  → structured, then append _run_narrative under 归因分析
+  4. anti-fabrication guard (_structured_answer):
+       found              → discard model text, rebuild from fact value + lineage
+       not_found          → rewrite to honest refusal
+       unrecognized_param → name the bad parameter
+       (narrative path: trust prose, force citations)
+  5. return AgentResult { answer, route, tool_results, sources }
+```

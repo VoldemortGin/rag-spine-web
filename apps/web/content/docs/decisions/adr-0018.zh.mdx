@@ -1,0 +1,104 @@
+---
+title: ADR 0018 — 父子块存储级扩展
+description: 持久化 small-to-big 上下文，把 Chunker 缝接入摄取流程，并只在 RESTRICTED 过滤之后扩展，同时保持子块引用的诚实性。
+---
+
+**状态：** accepted
+
+**日期：** 2026-07-14
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
+
+本记录完成了 [ADR 0016](/zh/docs/decisions/adr-0016) 推迟的后续工作：把
+父子行为移到检索时的存储扩展。它受引擎 ADR 0005
+（新能力与逐字节一致的默认路径隔离）与引擎 ADR 0010（独立于模型输出的确定性
+隔离）约束。
+
+## 背景
+
+ADR 0016 加入了 `ParentChildChunker`。分块时子块携带 `window_text`（父
+章节的完整文本）与 `parent_locator`（该章节真实的段落跨度）。但 `Chunker`
+缝当时并未接入叙事摄取，这些字段也未持久化。因此端到端的
+small-to-big——命中一个细粒度子块、为生成提供父级上下文——从未在
+真实的存储路径上运行过。
+
+本记录补上这个缺口：持久化层级/窗口字段，把分块器接入两条摄取
+路径，并在检索出口处做扩展，同时保全逐字节一致的默认行为、
+防编造机制、溯源，以及 RESTRICTED 双出口隔离。
+
+## 决策
+
+三项增量式变更，全部可选加入；默认路径保持逐字节一致。
+
+### 持久化：增量式列，旧数据库仍可读
+
+`narrative_chunk` 新增 `parent_id`、`heading`、`window_text` 与 `parent_locator`，每列均为
+`TEXT NOT NULL DEFAULT ''`。`ChunkStore.init_schema` 执行增量式迁移：
+先 `PRAGMA table_info`，再逐列 `ALTER TABLE ADD COLUMN`。既有行获得空
+默认值并保持可读；没有破坏性重建。`StoredChunk` 以空默认值镜像这四个
+字段。
+
+带 schema 版本的重建方案被否决：增量式列更简单，并让旧库保持在线。
+
+### 摄取接入 `Chunker` 缝
+
+两个写入方都接受 `chunker: Chunker | None`，默认 `None` 时委托给内置的
+`chunk_document` 并保持逐字节一致：
+
+- `ingest_narrative(..., chunker=)` 用于批处理管道。
+- `NarrativeIndex(chunker=)` 用于检索侧的摄取与 embedding。
+
+`ServiceConfig.chunker` 通过 `make_chunker` 选择，默认为 `"none"`，叙事
+worker 的载荷会携带该选择。使用 `parent_child`/`small_to_big` 时，子块带着
+`window_text`/`parent_locator` 到达，存储层将其持久化。
+
+### 检索在 A 线隔离出口之后扩展
+
+在 `narrative_link._to_snippet` 中，非空的 `window_text` 成为一个独立的 `prompt_text` 键。
+agent 的 `_snippet_text` 已经优先取该键作为生成上下文。`text`、`source_locator`
+与 `chunk_id` 仍然是命中子块的值。`parent_locator` 是指向父级跨度的一个额外
+溯源反向引用。
+
+扩展只改变生成上下文。它绝不会成为命中、改变排名或新增结果。
+默认分块器产生空值，因此不会新增任何键，snippet 映射保持
+逐字节一致。此处复用为检索后压缩建立的 `prompt_text` 分层。
+
+### 钉死的 RESTRICTED 窗口决策
+
+**`window_text` 搭乘子块既有的 RESTRICTED 双出口；当子块为 RESTRICTED 时，
+整个 snippet——包括其父级窗口——都会被拒绝。**
+
+`_to_snippet` 只在 `link/` 出口移除 `sensitivity == RESTRICTED` 的 chunk 之后运行。
+受限的子块永远到不了窗口扩展，其 `window_text` 也永远不可能成为
+`prompt_text`。在两种候选语义——只移除窗口，或拒绝整个 snippet——之间，我们
+选择整体拒绝。父级上下文只能通过一个同时通过两个出口的子块暴露。
+
+在当前文档级敏感度模型下，子块与父块共享同一敏感度，因此摄取
+不可能产生"子块被允许而父章节受限"的情况。该机制仍然被防御性地
+钉死。`test_parent_child_isolation.py` 提供了一个含窗口的受限 chunk，
+证明整个 snippet 被拒绝且没有泄漏。
+
+## 已考虑并否决的备选方案
+
+- 用 `window_text` 替换 snippet 的 `text`：扩展出的上下文会伪装成命中证据，
+  破坏溯源的诚实性。子块文本/定位符保持可引用；窗口只用于生成。
+- 剥离窗口但保留受限的子块 snippet：局部处理比拒绝整个
+  snippet 更脆弱，且与既有的出口语义冲突。
+- 在 RESTRICTED 过滤之前扩展：这会打开一条直接泄漏路径。扩展严格发生在
+  `_to_snippet` 中，位于剥离的下游。
+- 加 schema 版本并重建：增量式 `ALTER TABLE` 让旧数据库保持可读，无需
+  迁移仪式。
+
+## 后果
+
+- Small-to-big 端到端可用：一次精确的子块命中为生成提供父级章节，
+  而引用仍钉在子块的真实定位符上，父级定位符保持为一个
+  反向引用。
+- 离线默认逐字节一致：默认分块让字段留空，不新增 snippet
+  键，也不改变打分或溯源。BM25/向量元数据记录从不读取新
+  字段。
+- `SentenceWindowChunker` 也通过同一路径获得持久化。
+- 变更产物包括 `ChunkStore`/`StoredChunk` 的四个字段与迁移、两条
+  `chunker=` 摄取缝、`ServiceConfig.chunker` 与 worker 传递、
+  `narrative_link._to_snippet` 的窗口到 `prompt_text` 转换，以及
+  `tests/conformance/test_parent_child_isolation.py` 加持久化/迁移测试。

@@ -1,0 +1,91 @@
+---
+title: 設定
+description: ServiceConfig の環境変数、検索セレクター、ワークフロー実行ゲート、公開 API 認証情報、および CompanyProfile。
+---
+
+`ServiceConfig.from_env()` は dataclass のフィールド `name` を `RAGSPINE_NAME` にマッピングします。3 つのレガシーエイリアスが引き続きサポートされています: `RAGSPINE_PROVIDER` → `provider_type`、`RAGSPINE_COMPANY_PROFILE` →
+`company_profile_path`、`RAGSPINE_FAQ_SOURCE` → `faq_source`。正規のフィールド名の変数は、そのエイリアスよりも優先されます。
+
+## コアとストレージ
+
+| 変数                           | デフォルト                 | 目的                                                             |
+| ------------------------------ | -------------------------- | ---------------------------------------------------------------- |
+| `RAGSPINE_DB_PATH`             | `data/fact_metric.db`      | 構造化ファクトの SQLite ストア                                   |
+| `RAGSPINE_CHUNK_DB_PATH`       | 未設定                     | ナラティブチャンクストア。未設定の場合は正直にデグレードします   |
+| `RAGSPINE_MAPPING_DB_PATH`     | 未設定                     | マッピングストア                                                 |
+| `RAGSPINE_QUEUE_DB_PATH`       | 未設定                     | SME レビューキュー（RQ ジョブキューではありません）              |
+| `RAGSPINE_MANIFEST_DB_PATH`    | 未設定                     | 構造化インジェスションのマニフェスト                             |
+| `RAGSPINE_REDIS_URL`           | `redis://localhost:6379/0` | RQ/Redis 接続                                                    |
+| `RAGSPINE_ALLOWED_UPLOAD_ROOT` | 未設定                     | 解決済みインジェスションパスの許可リスト                         |
+| `RAGSPINE_FAQ_SOURCE`          | 未設定                     | 審査済み FAQ JSON。未設定の場合はキャッシュが空になります        |
+| `RAGSPINE_REFERENCE_DATE`      | 未設定                     | 相対期間の解決に使う ISO 日付                                    |
+
+## プロバイダーと検索
+
+| 変数                          | デフォルト               | 値 / 目的                                                                                          |
+| ----------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `RAGSPINE_PROVIDER`           | `mock`                   | `mock` または `anthropic`                                                                          |
+| `RAGSPINE_MODEL`              | プロバイダーのデフォルト | サーバー側のモデル ID                                                                              |
+| `RAGSPINE_BASE_URL`           | 未設定                   | サーバー側プロバイダーのゲートウェイ URL                                                           |
+| `RAGSPINE_TOKENS_PER_MINUTE`  | `0`                      | corespine のスライディングウィンドウ式プロバイダースロットル。0 で無効                             |
+| `RAGSPINE_RETRIEVAL_MODE`     | `auto`                   | `auto`/`hybrid`/`vector`、または埋め込みを使わない `economy`/`bm25`/`lexical`                      |
+| `RAGSPINE_EMBEDDING`          | `auto`                   | `none`、`auto`、`onnx`、`deterministic`、または `openai`                                           |
+| `RAGSPINE_RERANKER`           | `none`                   | `cross_encoder`、`colbert`、`splade`、`auto`、または none                                          |
+| `RAGSPINE_POSTPROCESSOR`      | `none`                   | `mmr,lost_in_middle` のようなカンマ区切りのチェーン                                                |
+| `RAGSPINE_QUERY_DECOMPOSE`    | `none`                   | オプションの LLM によるクエリ分解                                                                  |
+| `RAGSPINE_CORRECTIVE`         | `none`                   | オプションの `crag` ラッパー                                                                       |
+| `RAGSPINE_QUERY_TRANSFORM`    | `none`                   | `hyde`、`rag_fusion`、または `step_back`                                                           |
+| `RAGSPINE_ADAPTIVE`           | `none`                   | オプションのヒューリスティック/LLM による複雑度ルーティング                                        |
+| `RAGSPINE_CHUNKER`            | `none`                   | default、parent-child/small-to-big、layout、laws、QA、book、sentence-window、または semantic       |
+| `RAGSPINE_VECTOR_STORE`       | `none`                   | none、インプロセス、または設定済みの永続アダプター                                                 |
+| `RAGSPINE_PERSISTENCE_POLICY` | `default`                | 分離優先のデフォルト、または `persist_everything`                                                  |
+
+economy モードは、安価な埋め込みを設定するよりも強力です。埋め込みバックエンドもベクトルストアも、そもそも一切構築しません。
+
+## ワークフローと公開互換 API
+
+| 変数                          | デフォルト       | 目的                                                                  |
+| ----------------------------- | ---------------- | --------------------------------------------------------------------- |
+| `RAGSPINE_WORKFLOW_MATCHER`   | `auto`           | ワークフローマッチャーの選択。auto は lexical にフォールバックし得ます |
+| `RAGSPINE_DIFY_RUN_ENABLED`   | `false`          | Dify/n8n 互換実行のマスターゲート                                      |
+| `RAGSPINE_DIFY_RUN_TIMEOUT_S` | `10.0`           | 実行タイムアウト（秒）                                                 |
+| `RAGSPINE_DIFY_RUN_ISOLATION` | `inprocess`      | `inprocess`、または Linux で強化される `subprocess`                    |
+| `RAGSPINE_STUDIO_DIR`         | 空               | `/studio` にマウントされる既存の静的ディレクトリ                       |
+| `RAGSPINE_DIFY_PUBLIC_APPS`   | 空               | `key=/path/workflow.yml;...`。空の場合、公開 Dify API は無効になります |
+| `RAGSPINE_N8N_API_KEY`        | 未設定           | 期待される `X-N8N-API-KEY`。未設定の場合、`/api/v1/*` は無効になります |
+| `RAGSPINE_N8N_STORE_PATH`     | `data/n8n_store` | n8n 互換ファイルストアのルート                                         |
+
+実行の有効化は信頼境界に関する判断であり、認証ではありません。内部の実行ルートには、引き続きリバースプロキシ/ネットワークによる保護が必要です。公開の Dify API と n8n API はそれぞれ独自のキーを持ちます。webhook は意図的に未認証のままにしています。
+
+## CompanyProfile
+
+会社プロファイルは、ホームのアイデンティティ、エンティティのエイリアス、ラベル/地理情報、競合他社のスコープ、および機密性分類を制御します。エンジンが使用するローダーは、`RAGSPINE_COMPANY_CONFIG` または明示的に指定されたパスを読み取ります:
+
+```bash
+RAGSPINE_COMPANY_CONFIG=config/company.toml \
+  .venv/bin/python scripts/run_server.py
+```
+
+`ServiceConfig.company_profile_path` は、正規の `RAGSPINE_COMPANY_PROFILE_PATH` またはレガシーの `RAGSPINE_COMPANY_PROFILE` によって設定されますが、現行の会社プロファイル読み込みは別系統の `RAGSPINE_COMPANY_CONFIG` パスを使用しています。これらの組み立て面が統一されるまでは、後者を優先してください。
+
+```toml
+[home]
+company_name = "YourCo"
+entity_code = "YOURCO_GROUP"
+
+[home.synonyms]
+"yourco" = "YOURCO_GROUP"
+
+[external_entities]
+"globex" = "Globex"
+
+[sensitivity]
+default_level = "INTERNAL"
+restricted_keywords = ["board_minutes", "绩效"]
+```
+
+本番環境の会社アイデンティティをエンジンにハードコードしてはいけません。競合他社に関する判断/回答拒否の判断、および制限コンテンツの分類は、このプロファイルから導出されます。
+
+## プロバイダーのテストに関する注記
+
+決定論的な mock パスが、完全に検証されたオフラインのベースラインです。プロジェクトの作者は中国を拠点としており Anthropic API にアクセスできないため、Anthropic 固有の挙動については同等の直接的な統合テストを実施できていません。このアダプターを使用する方は、モデル ID、認証情報、ゲートウェイの挙動、レート制限をご自身の環境で検証してください。

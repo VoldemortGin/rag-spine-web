@@ -1,0 +1,297 @@
+---
+title: 変更履歴
+description: リリースごとの RAGSpine の注目すべきユーザー向け変更点と、それに並走する Spine ファミリーの現在地。
+---
+
+このページはリリースごとの**ユーザー向け**の変更を追跡します：API の形状、設定サーフェス、
+パッケージング、依存関係。変更の背後にある理由については、リンクされた
+[ADR](/ja/docs/decisions) を辿ってください。シンボルレベルの詳細については、タグ付けされたソースに対して `make docs` を実行してください。
+
+<Callout type="info">
+  このドキュメントは現在の `main` ツリーに追随しており、そのパッケージメタデータは `0.11.0` です。これは
+  PyPI に 0.11.0 が公開されているという主張ではありません。インストール済みディストリビューションの
+  挙動については `ragspine version` とロックファイルを確認してください。
+</Callout>
+
+## 0.11.0（現在のソーススナップショット）
+
+**自然言語によるワークフローのひな形生成と、安全なウェブサイトプレビュー契約。** この作業は
+`main` に存在します。公開ステータスは意図的にソースメタデータから推測していません。
+
+### 追加
+
+- インストール済みショートハンド `ragspine "description"` と明示的な `ragspine workflow create` コマンド。
+  完全一致テンプレート選択、再利用のオプトアウト、lexical/ONNX/auto マッチング、JSON/YAML 出力、
+  安全なクロスプラットフォームのファイル書き込みを備えます。
+- 1,000 件のバンドルカタログ：手作業でキュレートされた 7 件のワークフローと、ちょうど 39 の業種、
+  27 のユースケース、5 つのアーキタイプにわたる 993 件の生成ディスクリプタ。Dify/n8n マーケットプレイスの
+  ページは事実確認のためのリサーチ参照にはなり得ますが、上流のワークフロー本体、プロンプト、
+  認証情報は、実行時にコピーもダウンロードもされません。
+- JSON、YAML、TOML のワークフロー取り込みを JSON 互換マッピングへ正規化。重複キー、サイズ、深さ、
+  構造ノード、文字列、YAML エイリアス、シンボリックリンク、特殊ファイルの各ガードを備えます。
+- ワークフロープレビュースキーマ v1：プロンプト、変数、プロバイダー設定、認証情報、実行可能な設定を
+  含めずにレンダリングするための、決定的にリダクションされたノード/エッジ/ジオメトリ。
+- 読み取り専用のカタログ/詳細/ひな形生成 HTTP エンドポイント、ページキャッシュ/ETag、
+  マッチャーのフォールバック。
+
+### セキュリティ挙動
+
+- ひな形生成とプレビューがワークフローを実行することは決してありません。既存の Dify/n8n 実行サーフェスは、
+  デフォルトで `RAGSPINE_DIFY_RUN_ENABLED=false` の背後に留まります。
+- サービスは、選択されたワークフローのリクエストボディをバッファリング前に制限し、422 レスポンスから
+  エコーされたバリデーション入力/コンテキストを取り除きます。
+
+## 0.10.0
+
+**検索プロダクトプリセット、履歴セマンティクス、永続化された small-to-big 展開。**
+
+### 追加
+
+- `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte`、`between` によるメタデータフィルタと、
+  オプションの自動抽出シーム。フィルタは絞り込みのみを行い、順序を保持します。
+- マルチライブラリルーティングと `MultiIndexRetriever`：ライブラリごとの検索、RRF 融合、
+  `library_id` による出典追跡、ルーティング失敗時の全ライブラリフォールバック。
+- 埋め込みバックエンドもベクトルストアも構築しないエコノミー検索モード（`economy` / `bm25` /
+  `lexical`）。
+- 親子/small-to-big チャンク分割と、ストアレベルの `parent_id`、`heading`、`window_text`、
+  `parent_locator` の永続化/マイグレーション。引用元となるのは引き続き子チャンクであり、展開された
+  `prompt_text` は生成専用で、制限付きの子がそのウィンドウを通じて漏洩することはあり得ません。
+- `answer_question(..., history=...)` と HTTP ask 履歴。過去のターンは生成コンテキストとしてのみ
+  用いられ、意図/セキュリティ/検索の入力や証拠になることは決してありません。[ADR 0017](/ja/docs/decisions/adr-0017) と
+  [ADR 0018](/ja/docs/decisions/adr-0018) を参照してください。
+
+## 0.9.0
+
+**ソースコネクタ、リレーショングラフの出典追跡、ドメインチャンク分割とストリーミング。** このリリースは
+さらに 3 つのオプトインシームを開き、ストリーミング回答エンドポイント、`.txt` 取り込み、
+2 つのエルゴノミクスヘルパーを追加します — すべてデフォルトオフで、未選択時には**バイト単位で同一**です。
+
+### 追加
+
+- **KB ソースコネクタシーム。** `SourceConnector` Protocol
+  （`iter_documents() -> Iterable[RawDoc]`、`make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`）
+  により取り込みソースがプラガブルになります：`filesystem`（依存ゼロのデフォルト）、`in_memory`、
+  `http`、`notion`。サードパーティのコネクタは `ragspine.source_connectors` エントリポイント
+  グループを通じて登録します。[取り込み](/ja/docs/guides/ingestion#ソースコネクタ)を参照してください。
+- **出典追跡マーカー付きのオプトイン `RelationExtractor` スロット。** `build_relation_graph` の傍らに
+  置かれた `RelationExtractor` Protocol（`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`）。
+  デフォルトの `None` はベースグラフをバイト単位で同一に保ちます。決定的な共起抽出器はクリーンな
+  系譜を持つ `co_occurs_with` エッジを追加します。オプトインの LLM 抽出器（`[llm]` の背後）は
+  すべてのエッジに `model-derived` + `unverified` のスタンプを押し、両端点を `SecurityGate` で
+  スクリーニングし、RESTRICTED テキストがモデルに到達することを決して許しません。[ADR 0015](/ja/docs/decisions/adr-0015) を参照してください。
+- **ドメインチャンクプリセット — `laws` / `qa` / `book`。** ドキュメントファミリーごとに見出し検出のみを
+  調整する（条項/章/質問と回答のペアリング）、3 つのレイアウト対応 `RAGSPINE_CHUNKER` プリセット。
+  ベースの予算、`parent_id`、ロケータを継承します。
+  [検索](/ja/docs/guides/retrieval#インデキシングとチャンキング)を参照してください。
+- **ストリーミング ask エンドポイント — `POST /v1/ask/stream`（SSE）。** `/v1/ask` と同じ回答を
+  トークン単位でストリーミングします。完全なガードチェーン（FAQ ショートサーキット、二重チャネル検索、
+  捏造防止リライト、出典追跡）は最初のバイトがストリーミングされる**前に**最後まで実行されるため、
+  捏造が途中までストリーミングされてから撤回されることは決して起こりません。
+  [HTTP API](/ja/docs/reference/http-api#エンジンルート)を参照してください。
+- **`.txt` ナラティブ取り込み。** プレーンテキストファイルがナラティブパス
+  （`extract_txt_narrative`）に加わります：UTF-8、空行による段落分割、ブロックごとに
+  `para={N}` ロケータ付きの 1 セグメント — 依存ゼロかつ決定的です。
+  [取り込み](/ja/docs/guides/ingestion#ナラティブインジェスト)を参照してください。
+- **エルゴノミクスヘルパー。** `AgentResult.answer_plain`（インラインの `（来源：…）`
+  サフィックスを取り除いた回答。`sources` から引用をレンダリングする UI 向け）、キーワード専用の
+  `Fact.metric(...)` ビルダー（frozen な 10 タプルに対する順序非依存の構築）、そして
+  `SqliteFactStore.has_source_doc(source_doc_id)`（増分リフレッシュのための存在プローブ）。
+  [Python API](/ja/docs/reference/python-api) を参照してください。
+
+### 依存関係
+
+- 新しい**オプションの、寛容なライセンスの、遅延インポートされる** extra が 1 つ：`[connectors]`
+  （`httpx`。`http` / `notion` コネクタのみが必要とします）。非オプションの新しいランタイム依存は
+  なく、オフラインのデフォルトパスは変更ありません。
+
+## 0.8.1
+
+**拡張シームの強化。** 幅方向バックログにあった 3 つのガバナンスシームが正式化され、サードパーティの
+バックエンドが不変条件の conformance パックを_通して_（決して迂回せずに）プラグインできるように
+なります。純粋に構造的な作業です — すべてのデフォルトパスは**バイト単位で同一**のままで、捏造防止の
+ラチェットはゼロを維持します。
+
+### 追加
+
+- **`TraceSink` シーム + プライバシートレース conformance。** プライバシーに配慮したトレースシンクは
+  登録可能なシーム（`make_trace_sink` / `RAGSPINE_TRACE_SINK`）となり、回答/ファクト値/チャンク
+  テキストを含むあらゆるペイロードを拒否またはスクラブする conformance パックを_通して_、観測性を
+  OpenTelemetry / ファイルへファンアウトできます。実際の `OtelTraceSink` はオプションの `[otel]`
+  extra の背後で出荷され、系譜を漏洩するシンクはパックに**失敗**します。
+- **`FactStore` Protocol。** 構造化ストアは、stdlib-sqlite の `SqliteFactStore` をデフォルト
+  （`make_fact_store` / `RAGSPINE_FACT_STORE`）とする `@runtime_checkable` Protocol となり、
+  DuckDB / Postgres アダプタをフォローアップとして開きます。その conformance パックは、ストレージ側の
+  2 つの不変条件 — **found-determinism**（ミスは空を返し、捏造された値を決して返さない）と
+  **出典の存続**（`source_doc_id` + ロケータが upsert/query を通じて持続する）— を、必ず失敗
+  しなければならないリバースプルーフのスタブとともに拘束します。
+- **`Extractor` 出典追跡 conformance パック。** 登録されたすべての抽出器（xlsx · pptx · pdf ·
+  docx · pptx-rich）は、実際のフィクスチャに対して非 null の `source_doc_id` + セルロケータを
+  持つことが検証されます。系譜を落とすスタブは両方の次元で失敗します。
+
+### 依存関係
+
+- 新しい**オプションの、寛容なライセンスの、遅延インポートされる** extra が 1 つ：`[otel]`
+  （OpenTelemetry、Apache-2.0）。非オプションの新しいランタイム依存はありません。
+
+## 0.8.0
+
+**2 回目の競合パリティバッチ**（ワークストリーム W8–W12）。主流スタック（LlamaIndex ·
+LangChain / LangGraph · Haystack · RAGFlow · Weaviate · Vespa · Jina · Cohere）に対して
+ベンチマークされています。0.7.0 と同様、すべての追加は**オプトインでデフォルトオフ**です：何も
+選択しなければオフラインの決定的ループは**バイト単位で同一**であり、新しい各バックエンドは
+RESTRICTED の 2 出口分離と出典追跡 conformance パックを継承します。
+
+### 追加
+
+- **検索後のポストプロセッサチェーン。** 再ランキングの後、プロンプト組み立ての前に実行される
+  `NodePostprocessor` シーム（`make_postprocessor` / `RAGSPINE_POSTPROCESSOR`、例：
+  `"mmr,lost_in_middle"`）— **MMR** 多様性による重複除去、**lost-in-the-middle** の並べ替え、
+  決定的な**抽出型コンテキスト圧縮**。いずれもモデル不要です。LLMLingua-2 / LLM コンプレッサは
+  このシームのフォローアップです。圧縮は別個の `prompt_text` キーに書き込み、`text` と
+  すべての参照フィールドをバイト単位で同一に保ちます。
+- **LLM クエリ変換。** 既存の `QueryRewriter` / `IntentParser` シーム上の **HyDE**、
+  **RAG-Fusion**（RRF を再利用）、**step-back** プロンプティング、**Adaptive-RAG** ルーティング
+  （`make_query_transform` / `RAGSPINE_QUERY_TRANSFORM`、`RAGSPINE_ADAPTIVE`）。生成された
+  各サブクエリは決定的セキュリティゲートを再実行します。HyDE の仮想ドキュメントは検索プローブで
+  あり、引用可能なファクトには決してなりません。
+- **RAPTOR + チャンク分割戦略。** **RAPTOR** 多粒度ツリー（決定的なしきい値クラスタリング。
+  出典追跡を保持し、引用可能なファクトには決してならない `is_synthesis` クラスタサマリー）に
+  加え、`Chunker` シーム上の **sentence-window** および **semantic** チャンク分割
+  （`RAGSPINE_CHUNKER`、`make_raptor_*` / `RAGSPINE_RAPTOR*`）。
+- **ColBERT と SPLADE の再ランカー。** 既存の `ListwiseJudge` シーム上で `make_reranker` を介した、
+  トークンレベルの遅延相互作用（MaxSim）と学習型スパーススコアリング
+  （`RAGSPINE_RERANKER=colbert|splade`、`[colbert]` / `[splade]`）。**再ランカー**として
+  出荷されます。重いマルチベクトル/スパース検索インデックスはフォローアップです。
+- **ColPali ビジュアルドキュメント検索。** OCR→テキスト変換でレイアウトが失われるような、チャートや
+  図が密集したレポートのための、`VisualEmbedder` シーム上のページ画像遅延相互作用
+  （`make_visual_embedder` / `RAGSPINE_VISUAL_EMBEDDER`、`[colpali]`）。オプトインで **GPU** を
+  使用します。決定的な MaxSim オーケストレーションと入口での RESTRICTED 分離は完成済みで、
+  実 GPU でのエンドツーエンドはフォローアップです。
+
+### 依存関係
+
+- 新しい**オプションの、寛容なライセンスの、遅延インポートされる** extra のみ：`[colbert]`、
+  `[splade]`、`[colpali]`（すべて `fastembed` 経由、Apache-2.0）。非オプションの新しいランタイム
+  依存はなく、オフラインのデフォルトパスは変更ありません。
+
+## 0.7.0
+
+**品質深化バッチ**（ワークストリーム W1–W7）：デフォルトの検索ループが真にセマンティックになり、
+オフラインの再ランキング頭脳を獲得し、Spine ファミリーのドキュメントスタックを活用し、根拠性
+（groundedness）の測定を追加し、決定的なナレッジグラフを育てます。オプトインの追加はデフォルト
+オフで、リーンな純 BM25 パスはバイト単位で同一のままです。
+
+### 変更
+
+- **extra が存在するときは dense がデフォルトでオン。** `ServiceConfig.embedding` のデフォルトが
+  `"auto"` になりました：`[embed-onnx]` がインストールされていれば、出荷されるループは設定なしで
+  真のハイブリッド（BM25 + ONNX セマンティック → RRF）になります。extra がなければ `None` に
+  解決され、リーンな純 BM25 パスはバイト単位で同一です。`RAGSPINE_EMBEDDING` に `onnx` /
+  `auto` が追加されます。
+
+### 追加
+
+- **実セマンティック埋め込みのデフォルト（W1）。** `[embed-onnx]` の背後にある
+  `OnnxEmbeddingBackend`（`fastembed` 経由、`paraphrase-multilingual-MiniLM-L12-v2`、384 次元
+  多言語、オフライン、決定的）。`make_embedding_backend` に `onnx` / `auto` として登録されます。
+- **ローカルクロスエンコーダ再ランカー（W2）。** 新しい `make_reranker` ファクトリ
+  （`RAGSPINE_RERANKER`、`[rerank]`）を介した `ListwiseJudge` シーム上の
+  `CrossEncoderReranker`（`fastembed` の `ms-marco-MiniLM`、オフライン、決定的）— オフラインの
+  再ランキング頭脳です。LLM listwise judge はより高コストな選択肢として残ります。
+- **ファミリードキュメントスタック（W3）。** デフォルトの `OcrBackend` はファミリーのオフライン OCR
+  （pdfspine → ocrspine）となり、スキャン PDF のパスが**実際に取り込みへ配線されました**
+  （以前はキュー投入のみ）。新しい `.docx` Extractor（`docspine`、`[doc]`）とオプトインの
+  `.pptx` Extractor（`pptspine`、`[ppt]`）。docx / pptx のセル塗りつぶしとネストされたテーブルが
+  `StyledGrid` IR に流れ込むようになりました。
+- **Contextual Retrieval + レイアウトチャンク分割（W4）。** インデックステキストのみに注入される
+  決定的なコンテキストヘッダー（`title · entity · period · heading`）（`RAGSPINE_CONTEXTUAL`）に
+  加え、`Chunker` シーム上のレイアウト対応チャンク分割および親子/small-to-big チャンク分割
+  （`RAGSPINE_CHUNKER`）。
+- **忠実性/根拠性の評価（W5）。** 2 つの新しいラチェット付きゲート — クレームレベルの**忠実性**と
+  自由テキストの**回答正確性** — が同じベースラインラチェットに組み込まれ、オフラインの決定的
+  含意判定デフォルトを備えます。[評価](/ja/docs/guides/evaluation)を参照してください。
+- **エージェント的な深化、オプトイン（W6）。** LLM クエリ分解（`RAGSPINE_QUERY_DECOMPOSE`）、
+  修正的検索 / CRAG の grade→act ループ（`RAGSPINE_CORRECTIVE`）、そして有界のマルチターン
+  会話メモリのスケルトン — それぞれがサブクエリ/ターンごとにセキュリティゲートと分離を
+  再アサートします。
+- **GraphRAG（W7）。** 新しい `graph/` ドメイン：制御された次元（子会社ロールアップ、同業比較、
+  導出トレース — すべて引用付き）上の決定的な**構造化リレーショングラフ**、インプロセスの
+  デフォルトと `networkx` アダプタを備えた `GraphStore` Protocol（`RAGSPINE_GRAPH_STORE`、
+  `[graph]`）、そしてナラティブ GraphRAG の抽出/コミュニティ**スケルトン**（オプトイン、
+  `[graph]` + `[llm]` の背後）。[チャネル](/ja/docs/architecture/channels)を参照してください。
+
+### 依存関係
+
+- 新しい**オプションの、寛容なライセンスの、遅延インポートされる** extra のみ：`[embed-onnx]`、
+  `[rerank]`、`[doc]`、`[ppt]`、`[graph]`。オフラインで重い SDK ゼロのデフォルトパスは
+  保持されます。
+
+## 0.3.0
+
+ヘッドラインは、共有ファミリーコアへの **LLM プロバイダーシームの移行**と、オプションのアクティブ
+レートリミッターです。完全な根拠については [ADR 0012](/ja/docs/decisions/adr-0012) を参照してください。
+
+### 変更（カスタムプロバイダーには破壊的変更）
+
+- **`LLMProvider` は現在 [`corespine`](https://pypi.org/project/corespine/) に置かれ**、
+  `ragspine.agent.llm_provider` から再エクスポートされます。インターフェースは
+  `create_message(*, system, messages, tools) -> ProviderResponse` から **OpenAI
+  chat-completions 形式**へ移行しました：
+
+  ```python
+  def chat(
+      self,
+      messages: list[dict[str, Any]],
+      *,
+      tools: list[dict[str, Any]] | None = None,
+  ) -> ChatCompletion: ...
+  ```
+
+  システムプロンプトは、独立した引数ではなく最初の `{"role": "system", ...}` メッセージとなり、
+  `ProviderResponse` は `corespine.ChatCompletion` に置き換えられました（`choices` →
+  `content` + `tool_calls` を持つ `ResponseMessage`、加えて `usage` / `model` / `id`）。カスタム
+  プロバイダーは移行が必要です — [拡張ポイント](/ja/docs/reference/extension-points#llmprovider)を参照してください。
+
+### 追加
+
+- **アクティブ TPM レート制限。** `RAGSPINE_TOKENS_PER_MINUTE`（int、デフォルト `0` = オフ）を
+  設定すると、サービスはプロバイダーを corespine の `RateLimitedProvider` でラップします —
+  tokens-per-minute の上限を_下回り続ける_スライディングウィンドウのソフトリミットで、SDK の
+  受動的な `max_retries` 429 バックオフを補完します。[設定](/ja/docs/reference/configuration)を参照してください。
+- **`[all]` extra** — `pip install "rag-spine[all]"` はすべてのランタイム機能
+  （`[pdf,ocr,llm,embed,vector,service]`。`[dev]` は除く）を取り込みます。
+  [インストール](/ja/docs/getting-started/installation)を参照してください。
+
+### 依存関係
+
+- 非オプションのランタイム依存が 1 つ追加されます：**`corespine>=0.1.0`**（薄い共有ファミリー
+  コア。それ自体の `dependencies` は空です）。オフラインファースト、重い SDK ゼロのデフォルト
+  パスは保持されます。
+
+## Spine ファミリー
+
+RAGSpine は、薄い `corespine` コアを共有する小さなファミリーの 1 パッケージです。兄弟パッケージの
+現在のリリース：
+
+<Cards>
+  <Card
+    title="corespine 0.1.0"
+    description="薄い共有コア：LLMProvider シーム + RateLimitedProvider、6 つの Protocol シーム、統一エラー型、mypy ゲート。ドメイン中立なプリミティブのみで、ランタイム依存は空です。"
+  ></Card>
+  <Card
+    title="spineagent 0.0.3"
+    description="汎用マルチエージェント協調フレームワーク（agent / tool / オーケストレーション + MCP / A2A シーム）。オフラインファーストで corespine 上に構築されています。mypy --strict + beartype の二重型ゲートで強化されています。"
+  ></Card>
+  <Card
+    title="pdfspine 0.3.0"
+    description="PyMuPDF（fitz）の Apache-2.0・純 Rust 再実装（PyO3 バインディング付き）— PP-OCRv5 OCR がコンパイル済みで wheel に同梱され、Markdown と画像からの PDF 生成にも対応しました。RAGSpine はこれを通じて（[pdf] extra 経由で）ファミリー OCR に到達します。"
+  ></Card>
+  <Card
+    title="docspine 0.2.0"
+    description="Apache-2.0・純 Rust の DOCX で、第一級のテーブルモデル（gridSpan / vMerge / ネスト）を備えます。忠実な .docx → PDF エクスポート（ストリーミングページネーション、セクションごとのジオメトリ、テーブル忠実度）に対応しました。[doc] extra を通じて RAGSpine の .docx Extractor を支えます。"
+  ></Card>
+  <Card
+    title="pptspine 0.2.0"
+    description="Apache-2.0・純 Rust の PowerPoint / OOXML で、より充実したマージ処理を備えます。忠実な .pptx → PDF エクスポート（スライドごとに 1 ページ、プレースホルダー/テーマ継承）に対応しました。[ppt] extra を通じて RAGSpine のオプトイン .pptx Extractor を支えます。"
+  ></Card>
+</Cards>

@@ -1,0 +1,127 @@
+---
+title: 'ADR 0013: Dify ワークフロー YAML → 純 Python コンパイラ + 静的最適化アドバイザー'
+description: Dify ワークフローの .yml を、脱 Dify 化された IR（parse → IR → codegen）を経由してフレームワーク非依存の命令型 Python にコンパイルし、8 つのルールからなる静的最適化アドバイザーを備える — PyYAML は新設の [dify] extra の背後に置かれ、完全同期で、コアへの新規依存はゼロ。
+---
+
+> ステータス: **accepted** · 日付: 2026-06-24
+
+> 不変の記録。ドリフト追跡の対象外（`covers` なし）。編集せず、supersede すること。
+
+関連: [0009](/ja/docs/decisions/adr-0009)（フレームワークロックインの排除 + パーミッシブライセンスのみ）、
+[0011](/ja/docs/decisions/adr-0011)（python-project-standard）、および spine ファミリー境界 ADR
+（ファミリーリポジトリの `docs/adr/0001` — ファミリーの継ぎ目 / LLM プロトコル）。
+**rag-spine 0.4.0** で出荷済み。
+
+## コンテキスト
+
+Dify は広く使われているローコード LLM アプリケーションオーケストレーションプラットフォームであり、その
+ワークフローは `.yml`（DSL）としてエクスポートされる。Dify 上で動作するワークフロー / advanced-chat を
+持ちながら、**プラットフォームロックインからの脱却**を望むユーザーは数多い。すなわち、フレームワーク非依存で、
+読みやすく、バージョン管理でき、オフラインで実行可能な純 Python のコードが欲しいのである。RAGSpine の
+アイデンティティはまさにこの「フレームワーク非依存のバックエンド」（[ADR 0009](/ja/docs/decisions/adr-0009):
+フレームワークロックインの排除 + パーミッシブライセンスのみの依存関係）であり、Dify ワークフローを命令型の
+純 Python に**コンパイル**し、その過程で**静的最適化の提案**を提示することは、プロダクトの方向性に自然に
+合致する。
+
+ハード制約: ファミリーは完全同期であること。コアは SDK ゼロを維持すること。LLM 呼び出しは
+`corespine.LLMProvider.chat` の継ぎ目を経由すること。オフラインの `MockProvider` がデフォルトであること。
+パーミッシブライセンスのみのライセンスゲートを堅持すること。`mypy --strict` であること。pydantic は境界
+のみに置くこと。
+
+## 決定
+
+**`.yml → parse → IR → codegen + optimize` — 脱 Dify 化された 1 つの IR によって疎結合化された 3 ステージ。**
+
+- **parse** — `yaml.safe_load`（PyYAML、MIT、ライセンスゲートを通過）がドキュメントを dict に読み込み、
+  pydantic v2 の境界モデルで検証する（`extra='allow'` により未知フィールドを許容するため、Dify の新しい
+  フィールドがパーサを壊すことは決してない）。pydantic は**このステージにのみ**現れる。
+  PyYAML は新設の `[dify]` オプショナル extra の背後で遅延 import され、コアの `dependencies` には手を
+  付けない。
+- **IR** — `DifyDoc → WorkflowIR`。ノードは frozen dataclass の `IRNode` サブクラスに正規化され、
+  変数参照（`value_selector` / `{{#nodeId.field#}}`）は
+  `VarRef` / `Literal` / `TemplateValue` に正規化される。エッジは `source_handle` を保持し、Kahn の
+  トポロジカルソートが `topo_order` と `parallel_layers` を導出する。循環があれば `CyclicGraph` を送出
+  する。純粋な stdlib のみ — pydantic はゼロで、Dify の概念はこの層より下には一切漏れない。
+- **codegen** — `WorkflowIR → GeneratedCode`。トポロジーは命令型スクリプト
+  `def run_workflow(inputs, *, provider=None) -> dict` へと平坦化される。LLM ノードは
+  `provider.chat(messages)` になり、並列レイヤーは `concurrent.futures.ThreadPoolExecutor` を使う
+  （**async コードは生成しない** — ファミリーは完全同期である）。純粋な stdlib のみ。
+- **optimize** — `WorkflowIR → list[Suggestion]`: **8 つの純粋に静的なルール**（API 呼び出しゼロ、
+  稼働環境には決して触れない。環境の上限値は注入可能）—
+  PARALLEL_001/002、BOTTLE_001/002、CACHE_001、RESOURCE_001/002、LLM_001。
+
+配置先は `src/ragspine/dify/{parse,ir,codegen,optimize}/ + api.py + errors.py`。ファサードは:
+`compile_dify_yaml(source, *, target='ragspine', provider_expr='MockProvider()',
+emit_trace=False, analyze=True) -> CompileResult(code, suggestions, ir)`、
+`analyze(source, *, env=None) -> list[Suggestion]`、低レベル API は
+`parse_dify_yaml / lower_to_ir / generate_code`。CLI: `ragspine dify compile <path>`。
+
+## MVP の 6 つのデフォルト（§7 — 未決事項に対する解決済みデフォルト）
+
+MVP を前進させるため、6 つの未決事項について**妥当なデフォルト**を採用した（レビュー時に見直し可能）:
+
+1. **ターゲットランタイム** — デフォルトは純 ragspine の命令型スクリプト。`target=` パラメータを継ぎ目
+   として予約し、spineagent オーケストレーションターゲットは P7 に残す。
+2. **最適化のスコープ** — 純粋に静的なルール（API ゼロ）。動的プロファイリング / 実トークン推定は先送り。
+3. **`code` ノード** — 生成されるローカル関数として**インライン化**し、「ソース信頼の前提」を示すコメント
+   を付す（Dify の code ノードはもともと任意のユーザーコードを実行するものであり、コンパイラは同じ信頼
+   境界を維持し、サンドボックス化はしない）。
+4. **未サポートノード**（http-request / tool / knowledge-retrieval / parameter-extractor /
+   plugins）— `raise NotImplementedError` + 詳細な docstring を持つフック関数を生成する
+   （**実行可能なスケルトン**を生み出し、コンパイル全体を失敗させることは決してしない）。
+   `GeneratedCode.warnings` に明示的に記録する。
+5. **アプリモード** — まず `workflow` + `advanced-chat`（`answer` ノード付き）。
+   `conversation_variables` / メモリ / マルチターン会話状態は P7 に残す。
+6. **YAML 依存** — 新設の `[dify]` オプショナル extra（PyYAML、`safe_load`）。コアの `dependencies`
+   には手を付けない。
+
+## 検討した代替案（却下）
+
+- **直接 `.yml → code`（IR なし）。** 却下 — 3 ステージが密結合になり、ターゲットバックエンド
+  （spineagent）の追加や静的解析が困難になる。IR はオプティマイザと複数ターゲットのための共有の支点である。
+- **ランタイムインタプリタ（`.yml` をその場で実行）。** 却下 — それはもう一つのミニ Dify ランタイムを
+  作ることであり、ライブラリ品質の純 Python にコンパイルしてプラットフォームから脱却するという目的そのもの
+  を打ち消し、ADR 0009 のフレームワーク非依存の立場にも反する。
+- **async コードの生成。** 却下 — ファミリーは完全同期である。
+  `ThreadPoolExecutor` で並列性はカバーでき、より読みやすくオフラインでも実行可能である。
+- **PyYAML をコアの `dependencies` に入れる。** 却下 — 必要なのは parse ステージだけである。
+  遅延 import + `[dify]` extra により「`import ragspine` は重い依存を一切引き込まない」を真に保つ。
+
+## 帰結
+
+- 新設の `[dify]` extra（PyYAML）。コアの `dependencies` とオフラインコアは変更なし。
+- 未サポートノードは**実行可能なスケルトン + 警告**を生成する — ユーザーはコンパイル失敗ではなく、直接
+  埋められる足場を手に入れる。
+- IR 層は後続ターゲット（spineagent オーケストレーション、実トークン推定、動的最適化）のための拡張点を
+  予約している。
+- 本記録は当初 **proposed** だった: 6 つのデフォルトはレビュー待ちであり、いかなる変更も
+  supersede-don't-edit に従う（新しい記録またはステータスの反転）。
+
+## P7 フォローアップ（2026-06-24）: accepted
+
+> 上記の過去の決定本文には手を付けていない（編集せず supersede）。本セクションは §7 デフォルトの
+> **#1 / #4** を proposed から **accepted** に収束させ、P7 での追加事項を記録する。これに伴い本記録の
+> ステータスは `proposed → accepted` に反転する。
+
+- **デフォルト #1（ターゲットランタイム）→ accepted かつ前進。** `target='spineagent'` を実装済み
+  （MVP、オフラインで実行可能な最小パス）。tool-use 構造（tool ノード 1 個以上）を持つワークフローは
+  spineagent の `Coordinator` / `FunctionCallingAgent` にマッピングされ、エントリポイントは
+  `run_agent(inputs, *, provider=None) -> AgentResult`。tool ノードがない場合は
+  `DifyCompileError(code='dify.no_agent_structure')` を送出し、`target='ragspine'` を提案する。
+- **デフォルト #4（未サポートノード）→ 精緻化かつ accepted。** 3 つのノードタイプ —
+  knowledge-retrieval / parameter-extractor / tool — が `NotImplementedError` フックから
+  **実際のコード生成**へ移行: knowledge-retrieval → `build_narrative_retriever + retrieve`
+  （`KNOWLEDGE_CHUNK_DB` のデフォルトは `':memory:'`、オフラインの空ストア）;
+  parameter-extractor → `provider.chat(tools=[function-tool schema])` で `tool_calls` を解析;
+  tool → spineagent の `@function_tool` プレースホルダ + その呼び出し箇所。**本当に外部副作用を必要と
+  するノードのみ**（http-request、…）がフックのまま残る — コンパイラは外部副作用を無から生み出すことは
+  できず、埋められるスケルトンを残すことこそが誠実な振る舞いである。
+- **新規: `answer_question` fold パス**（`codegen/fold.py`、デフォルトで有効、
+  `fold_answer_question` で切り替え）: IR が構造的に
+  `start → knowledge-retrieval → llm(context points at that retrieval) → answer/end` という Q&A
+  スケルトンにマッチする場合、単一の `ragspine.answer_question(...)` 呼び出しに畳み込む — retrieve +
+  chat を手で配線するよりも短く、かつより正確である（組み込みの捏造防止「見つかりません」書き換え +
+  出典追跡）。
+- **再確認:** コンパイラ自体は**ランタイム依存を一切追加しない** — 生成コードは ragspine の検索
+  プリミティブ / spineagent を import するが、`ragspine.dify` 自身の import はクリーンなまま。
+  `mypy --strict` / ruff / `filterwarnings=error` はすべてグリーン。

@@ -1,0 +1,166 @@
+---
+title: Pipeline
+description: 静态引擎 PipelineGraph 导出，以及它与仅用于展示的工作流预览 v1 协议的区别。
+---
+
+`pipeline` 领域（`src/ragspine/pipeline/`）是 RAGSpine 对一个问题的代码优先回答：图框架
+（Dify、LangGraph）能给你、而纯 Python 引擎给不了的那样东西——
+**管线的可视化图示**。RAGSpine 不采用先编写、再祈祷与现实一致的图 DSL，
+而是从真实的组装关系中_推导出_一个静态的 `PipelineGraph`，并
+以 Mermaid、DOT 或 JSON 导出。
+
+它小巧、位于叶子层级、严格只读：它不从编排器 import 任何东西
+（所有内省都是 `getattr` 鸭子类型），因此永远不可能扰动它所
+描述的系统。
+
+<Callout type="info">
+  这个引擎拓扑模型不同于[工作流预览
+  v1](/zh/docs/guides/workflows#preview-协议-v1)。`PipelineGraph` 描述已组装的 RAGSpine
+  组件并导出 Mermaid/DOT/JSON。工作流预览描述一个 Dify 兼容工作流，
+  含脱敏后的节点、边与几何信息。两者都是只读的；都不是执行格式。
+</Callout>
+
+## 目录结构
+
+<Files>
+  <Folder name="pipeline" defaultOpen>
+    <File name="graph.py" />
+    <File name="topology.py" />
+  </Folder>
+</Files>
+
+`graph.py` 是零依赖的值层（frozen dataclass + 导出器）；
+`topology.py` 持有读取实时组装关系的三个构建器。公共 API
+重新导出六个名字：`Node`、`Edge`、`PipelineGraph`、`agent_topology`、
+`retriever_topology`、`service_topology`。
+
+## 值模型
+
+`graph.py` 定义三个 frozen dataclass：
+
+<TypeTable
+  type={{
+    Node: {
+      type: 'id, label, kind, domain=None, symbol=None',
+      description:
+        '一个管线节点。kind ∈ stage | store | external | gate | channel。symbol 是漂移守卫使用的点分 import 路径（概念节点为 None）。',
+    },
+    Edge: {
+      type: 'src, dst, label=None, kind="flow"',
+      description:
+        '一条有向边。kind ∈ flow | conditional | data。label 例如 "route=structured" / "hit" / "miss"。',
+    },
+    PipelineGraph: {
+      type: 'title, nodes: tuple[Node], edges: tuple[Edge]',
+      description: '不可变的图，外加其导出器。',
+    },
+  }}
+/>
+
+`PipelineGraph` 携带三个导出器和一个合并器：
+
+| 方法                            | 返回            | 输出                                                                                                               |
+| ------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `to_mermaid(*, direction="TD")` | `str`           | 一个 `flowchart`——节点形状由 `kind` 决定（gate `{}`、store `[(...)]`、channel `([...])`，其余为矩形）。            |
+| `to_dot()`                      | `str`           | 一个 Graphviz `digraph`（`rankdir=TB`）。                                                                          |
+| `to_dict()`                     | `dict`          | 可 JSON 往返的 `{title, nodes[...], edges[...]}`。                                                                 |
+| `merge(other, *, group=None)`   | `PipelineGraph` | 按 id 去重节点（先到者胜），保留所有边；可选地给新增节点打上 `domain=group` 标记。                                 |
+
+<Callout type="info">
+  导出在多次运行间**确定且逐字节一致**（稳定的声明顺序）。`domain`
+  分组可经 `to_dict` 往返，但在 v1 中 `to_mermaid` / `to_dot` 不输出
+  subgraph/cluster 块。
+</Callout>
+
+## 三个构建器
+
+`topology.py` 从实时的、鸭子类型的组装关系推导图——只有当组件
+确实被接入时，其节点才会出现。
+
+<Cards>
+  <Card
+    title="agent_topology(*, narrative_retriever=None)"
+    description="完整的请求流：parse_intent → clarify_scope（经一条 data 边咨询 SecurityGate）→ 路由菱形 → structured / narrative / composite 分支。叙事节点仅在注入了 narrative_retriever 时出现。"
+  ></Card>
+  <Card
+    title="retriever_topology(retriever)"
+    description="HybridRetriever 子管线：prefilter → BM25 [+vector] [+multi-query] → RRF → top_k。vector 节点当且仅当 retriever.embedding_backend 已设置时出现；multi-query 节点当且仅当 query_rewriter 已设置时出现。重排刻意不在此子图中。"
+  ></Card>
+  <Card
+    title="service_topology(app)"
+    description="服务拓扑：位于 agent 上游的 FAQ 短路，加上异步摄取路径（routes → queue → jobs）。基于 app.state.faq_cache 与 app.state.queue 做鸭子类型判断。"
+  ></Card>
+</Cards>
+
+<Callout type="info">
+  `HybridRetriever.topology()`（位于[检索](/zh/docs/guides/retrieval)领域）是对
+  `retriever_topology` 的薄委托——因此一个已配置的检索器可以自行渲染，而
+  pipeline 包无需 import 编排器。
+</Callout>
+
+## CLI — `scripts/topology.py`
+
+`scripts/topology.py` 离线且确定性地渲染三种拓扑中的任意一种（它
+构建默认/mock 组装——不需要 Redis、不需要 API key）。从项目根目录运行：
+
+```bash
+python scripts/topology.py                                  # agent → Mermaid → stdout
+python scripts/topology.py --which retriever --of dot
+python scripts/topology.py --of json --out docs/generated/topology.json
+```
+
+参数：
+
+- `--of {mermaid,dot,json}` — 输出格式（默认 `mermaid`）。
+- `--which {agent,retriever,service}` — 哪个拓扑（默认 `agent`）。
+- `--out PATH` — 写入文件（自动创建父目录）；省略则打印到 stdout。写入
+  被 git 忽略的 `docs/generated/` 可让重新生成的图示保持干净的 diff。
+
+在底层，CLI 从默认/离线组装构建各拓扑：`retriever` →
+`retriever_topology(HybridRetriever([]))`（空语料上的纯 BM25 骨架）；
+`service` → 用 `MockProvider` / `FakeQueue` / 空 `FAQCache` 调用 `create_app(...)`，再
+`service_topology(app)`；`agent` → `agent_topology(narrative_retriever=object())`（一个
+哨兵值，使 narrative/composite 分支得以显示）。
+
+## Python API
+
+```python
+from ragspine.pipeline import agent_topology
+
+graph = agent_topology(narrative_retriever=object())
+print(graph.to_mermaid())   # Mermaid flowchart string
+print(graph.to_dot())       # Graphviz digraph string
+
+import json
+print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
+```
+
+## 相关阅读
+
+<Cards>
+  <Card
+    title="Agent"
+    href="/zh/docs/guides/agent"
+    description="agent_topology 所渲染的请求流。"
+  />
+  <Card
+    title="检索"
+    href="/zh/docs/guides/retrieval"
+    description="其 .topology() 委托到此处的 HybridRetriever。"
+  />
+  <Card
+    title="服务"
+    href="/zh/docs/guides/service"
+    description="service_topology 所内省的 FastAPI 应用。"
+  />
+  <Card
+    title="CLI 与脚本"
+    href="/zh/docs/getting-started/cli-and-scripts"
+    description="topology.py 与其他仓库根目录脚本。"
+  />
+  <Card
+    title="工作流预览"
+    href="/zh/docs/guides/workflows#preview-协议-v1"
+    description="由模板网站渲染的、版本化且脱敏的图投影。"
+  />
+</Cards>

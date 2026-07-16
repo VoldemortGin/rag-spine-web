@@ -120,19 +120,19 @@ hits = store.query("REVENUE", "ACME_GROUP", "FY", "2024")   # [] = not found, [F
 store.close()
 ```
 
-| method                                                                                                                    | purpose                                                                               |
-| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `init_schema()`                                                                                                           | create `fact_metric`, run the v2 column migration, create both unique indexes         |
-| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | batch insert; on `dim_key` conflict, overwrite value + lineage; returns count written |
-| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | exact parameterized lookup, returns 0 or 1 row                                        |
-| `count() -> int`                                                                                                          | total facts                                                                           |
+| method                                                                                                                    | purpose                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `init_schema()`                                                                                                           | create `fact_metric`, run the v2 column migration, create both unique indexes                                          |
+| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | batch insert; on `dim_key` conflict, overwrite value + lineage; returns count written                                  |
+| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | exact parameterized lookup, returns 0 or 1 row                                                                         |
+| `count() -> int`                                                                                                          | total facts                                                                                                            |
 | `has_source_doc(source_doc_id) -> bool`                                                                                   | `True` if _any_ fact exists for that doc (any review status) — an existence probe for idempotent / incremental refresh |
-| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | read-only SELECT entry point for ledger/metrics reuse                                 |
-| `delete_by_source_doc(source_doc_id) -> int`                                                                              | physically delete a doc's facts (any review status); idempotent                       |
-| `set_review_status(dim_key, status) -> int`                                                                               | human-review write-back: flip one fact's `review_status` by `dim_key`; returns 0 or 1 |
+| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | read-only SELECT entry point for ledger/metrics reuse                                                                  |
+| `delete_by_source_doc(source_doc_id) -> int`                                                                              | physically delete a doc's facts (any review status); idempotent                                                        |
+| `set_review_status(dim_key, status) -> int`                                                                               | human-review write-back: flip one fact's `review_status` by `dim_key`; returns 0 or 1                                  |
 | `dim_key_for(fact) -> str` _(static)_                                                                                     | compute a `Fact`'s `dim_key` from its typed identity columns (the public accessor — `dim_key` is never a `Fact` field) |
-| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | fetch one fact by `dim_key` (any review status); `None` if absent                     |
-| `close()`                                                                                                                 | idempotent connection close (also auto-closed on GC via `weakref.finalize`)           |
+| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | fetch one fact by `dim_key` (any review status); `None` if absent                                                      |
+| `close()`                                                                                                                 | idempotent connection close (also auto-closed on GC via `weakref.finalize`)                                            |
 
 The table is `fact_metric`. `query()` issues an exact-match `SELECT` on
 `(metric_code, entity, period_type, period, channel)`; because that combination is unique,
@@ -180,7 +180,14 @@ on `fact_store` — explicit `narrative_chunk` schema, parameterized SQL, `execu
 `StoredChunk` is one chunk's content plus metadata: `chunk_id`, `doc_id`, `seq`, `text`,
 `source_locator`, `para_start`, `para_end`, `title`, `topic`, `entity`, `geography`,
 `period`, `language`, `sensitivity` (default `"INTERNAL"`), `valid_as_of`, `ingested_at`,
-`version`, and `active`.
+`version`, and `active`. Current schemas add `parent_id`, `heading`, `window_text`, and
+`parent_locator`. `init_schema()` adds those columns with empty defaults to an older database, so
+existing chunk stores remain readable.
+
+`window_text` is generation-only expansion context. A retrieval hit and citation retain the child
+`text`, `chunk_id`, and `source_locator`; `parent_locator` is a provenance backreference, not a
+replacement locator. Restricted children are removed with their expansion context before prompt
+assembly.
 
 `replace_doc_chunks(doc_id, chunks, valid_as_of="")` is the **versioned, idempotent**
 write: re-ingesting a document flips the old version's rows to `active=0` and inserts the
@@ -202,7 +209,7 @@ under the zero-warning gate. `close()` is idempotent.
 
 ## Default database paths
 
-Defaults come from [`common/core.py`](/docs/guides/common#core-global-constants):
+Defaults come from [`common/core.py`](/docs/guides/common#core--global-constants):
 `DEFAULT_FACT_DB = data/fact_metric.db` (holds both `fact_metric` and `narrative_chunk`),
 `DEFAULT_MAPPING_DB = data/color_mapping.db`, and
 `DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`.

@@ -191,8 +191,17 @@ def answer_question(
     reference_date: date | None = None,
     narrative_retriever: NarrativeRetriever | None = None,
     intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
 ) -> AgentResult: ...
 ```
+
+`HistoryTurn` is `tuple[str, str]`. History is generation context only: it is inserted after the
+system message and before the current question, but never enters deterministic intent parsing,
+security screening, the retrieval query, or the evidence/source list. Only `assistant` is treated
+as the assistant role; unknown roles normalize to user. Consequently, previous conversation text
+cannot authorize a competitor query or become a citation. See
+[ADR 0017](/docs/decisions/adr-0017).
 
 Its flow: assign a request id → build a privacy-aware trace context → parse the intent
 (default `RuleIntentParser`) → `clarify_scope`. It then early-returns in strict order:
@@ -268,9 +277,9 @@ results exist but none are `found` — i.e. the guard rewrote to a refusal.
 ```python
 from ragspine.agent.agent import answer_question
 from ragspine.agent.llm_provider import MockProvider
-from ragspine.storage.fact_store import FactStore
+from ragspine.storage.fact_store import SqliteFactStore
 
-store = FactStore("data/fact_metric.db"); store.init_schema()
+store = SqliteFactStore("data/fact_metric.db"); store.init_schema()
 result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
 print(result.answer)   # deterministic value, or an honest "not found"
 print(result.sources)  # [{'doc': ..., 'locator': ...}]

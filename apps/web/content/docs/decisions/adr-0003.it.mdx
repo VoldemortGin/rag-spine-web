@@ -1,0 +1,44 @@
+---
+title: 'ADR 0003: Destinatari — una libreria OSS generica su cui altri possano costruire'
+description: I destinatari principali sono gli sviluppatori che costruiscono il proprio RAG sopra RAGSpine; la finanza diventa un dominio di esempio, non l'identità.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento del drift (nessun `covers`). Sostituire, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002).
+
+## Contesto
+
+RAGSpine trasmetteva contemporaneamente tre segnali contrastanti sui destinatari: libreria OSS (Apache 2.0,
+nome su PyPI, "contributi benvenuti", punti di estensione basati su Protocol), strumento enterprise
+interno (isolamento RESTRICTED, coda di revisione SME, DNA pervasivo di reportistica finanziaria) e
+vetrina portfolio/di riferimento (demo fittizia ACME, badge dei 943 test, roadmap con
+"lacune dichiarate"). I destinatari non erano mai stati dichiarati, eppure condizionano ogni decisione a valle.
+
+## Decisione
+
+I **destinatari principali sono gli altri sviluppatori che costruiscono il proprio RAG sopra
+RAGSpine** — una libreria OSS generica. Ottimizzare per: una superficie di estensione `Protocol`
+pulita, una generalità dimostrata (non asserita), CLI pacchettizzate e documentazione rivolta
+ai contributori. La finanza diventa un dominio di esempio, non l'identità.
+
+## Alternative considerate (respinte)
+
+- **Implementazione di riferimento / pezzo da portfolio + libreria OSS** (l'opzione
+  originariamente raccomandata, più conservativa): ottimizzare per rigore leggibile e
+  riproducibilità, considerando fuori portata una community di contributori. Respinta — l'utente
+  vuole utenti esterni reali, non una vetrina.
+- **Strumento enterprise interno di produzione**: cablare il codice dormiente, aggiungere l'autenticazione, puntare
+  a un deployment. Respinta come identità _principale_, sebbene il codebase sia plausibilmente
+  nato in questo modo.
+
+## Conseguenze
+
+- La natura "generica" deve essere **dimostrata**, il che impone [0004](/it/docs/decisions/adr-0004)
+  (generalizzazione completa) e un esempio di secondo dominio.
+- Il codice dormiente/cablato a metà diventa un passivo di credibilità → [0005](/it/docs/decisions/adr-0005).
+- Il layer `service/` viene ridefinito come esempio di deployment di riferimento, non come prodotto.
+- La superficie per i contributori è importante: pacchetti di localizzazione ([0007](/it/docs/decisions/adr-0007)),
+  una guida su "come aggiungere un backend/una localizzazione", CONTRIBUTING/governance.

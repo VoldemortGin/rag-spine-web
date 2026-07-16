@@ -1,258 +1,105 @@
 ---
 title: Configuration
-description: Environment variables (RAGSPINE_*) read by ServiceConfig, and the CompanyProfile TOML that drives identity, metrics, and competitor scope — no hardcoded company anywhere.
+description: ServiceConfig environment variables, retrieval selectors, workflow execution gates, public API credentials, and CompanyProfile.
 ---
 
-RAGSpine reads its runtime configuration from two places, both verifiable in code:
+`ServiceConfig.from_env()` maps dataclass field `name` to `RAGSPINE_NAME`. Three legacy aliases
+remain supported: `RAGSPINE_PROVIDER` → `provider_type`, `RAGSPINE_COMPANY_PROFILE` →
+`company_profile_path`, and `RAGSPINE_FAQ_SOURCE` → `faq_source`. A canonical field-name variable
+takes precedence over its alias.
 
-- **Environment variables** (`RAGSPINE_*`) — assembled into a frozen `ServiceConfig`
-  (`src/ragspine/service/config.py`). Shared by the CLI, the FastAPI app, and the worker.
-- **The CompanyProfile TOML** — the company identity, entity synonyms, default geography,
-  and external/competitor list. The core hardcodes **no** company; it all comes from here.
+## Core and storage
 
-## Environment variables
+| Variable                       | Default                    | Purpose                                        |
+| ------------------------------ | -------------------------- | ---------------------------------------------- |
+| `RAGSPINE_DB_PATH`             | `data/fact_metric.db`      | structured fact SQLite store                   |
+| `RAGSPINE_CHUNK_DB_PATH`       | unset                      | narrative chunk store; unset degrades honestly |
+| `RAGSPINE_MAPPING_DB_PATH`     | unset                      | mapping store                                  |
+| `RAGSPINE_QUEUE_DB_PATH`       | unset                      | SME review queue, not the RQ job queue         |
+| `RAGSPINE_MANIFEST_DB_PATH`    | unset                      | structured-ingestion manifest                  |
+| `RAGSPINE_REDIS_URL`           | `redis://localhost:6379/0` | RQ/Redis connection                            |
+| `RAGSPINE_ALLOWED_UPLOAD_ROOT` | unset                      | resolved ingestion-path allowlist              |
+| `RAGSPINE_FAQ_SOURCE`          | unset                      | vetted FAQ JSON; unset means empty cache       |
+| `RAGSPINE_REFERENCE_DATE`      | unset                      | ISO date for relative-period resolution        |
 
-Every value below is read in `ServiceConfig.from_env` (`src/ragspine/service/config.py`).
-All are optional — the defaults run the offline, deterministic path with no API key.
+## Provider and retrieval
 
-<TypeTable
-  type={{
-    RAGSPINE_DB_PATH: {
-      type: 'string',
-      default: 'data/fact_metric.db',
-      description:
-        'Path to the fact (numeric) store — the SQLite database backing the structured channel.',
-    },
-    RAGSPINE_CHUNK_DB_PATH: {
-      type: 'string',
-      default: '(unset)',
-      description:
-        'Path to the narrative chunk store. When unset, the narrative channel degrades honestly (no narrative retrieval) instead of failing.',
-    },
-    RAGSPINE_PROVIDER: {
-      type: '"mock" | "anthropic"',
-      default: 'mock',
-      description:
-        'LLM provider. mock is the offline deterministic provider (no key, no network); anthropic uses the real Claude Messages API.',
-    },
-    RAGSPINE_MODEL: {
-      type: 'string',
-      default: 'claude-opus-4-8',
-      description:
-        'Model id for the anthropic provider (DEFAULT_ANTHROPIC_MODEL). Ignored by the mock provider.',
-    },
-    RAGSPINE_BASE_URL: {
-      type: 'string',
-      default: '(unset)',
-      description:
-        'Override the Anthropic API base URL — for an enterprise gateway forwarding the Anthropic API.',
-    },
-    RAGSPINE_EMBEDDING: {
-      type: '"auto" | "onnx" | "none" | "deterministic" | "openai"',
-      default: 'auto',
-      description:
-        'Embedding backend for the vector channel. Default auto = the ONNX semantic backend when [embed-onnx] is importable, else pure BM25 (offline). onnx forces the semantic backend; none forces pure BM25. Selects the backend built by make_embedding_backend. Dense-on-by-default (auto) is new in 0.7.0.',
-    },
-    RAGSPINE_REFERENCE_DATE: {
-      type: 'string (YYYY-MM-DD)',
-      default: '(unset → today)',
-      description:
-        'ISO date used as the anchor for resolving relative periods (last year, H1, …). When unset the agent uses the current date.',
-    },
-    RAGSPINE_REDIS_URL: {
-      type: 'string',
-      default: 'redis://localhost:6379/0',
-      description: 'Redis connection URL for the RQ job queue (used by the worker and RQQueue).',
-    },
-    RAGSPINE_FAQ_SOURCE: {
-      type: 'string',
-      default: '(unset → empty cache)',
-      description:
-        'Path to the FAQ JSON file. When unset, the FAQ short-circuit cache is empty (every question runs the full workflow).',
-    },
-    RAGSPINE_ALLOWED_UPLOAD_ROOT: {
-      type: 'string',
-      default: '(unset)',
-      description:
-        'Ingestion path allowlist. When set, ingest job file paths must resolve inside this root — path traversal is rejected.',
-    },
-    RAGSPINE_COMPANY_PROFILE: {
-      type: 'string',
-      default: '(unset → built-in default profile)',
-      description:
-        'Path to the CompanyProfile TOML. When unset, the built-in default profile is used.',
-    },
-    RAGSPINE_MAPPING_DB_PATH: {
-      type: 'string',
-      default: '(unset)',
-      description: 'Path to the metric/entity mapping store used during structured ingestion jobs.',
-    },
-    RAGSPINE_QUEUE_DB_PATH: {
-      type: 'string',
-      default: '(unset)',
-      description:
-        'Path to the SME ReviewQueue store (human review-queue state). Distinct from the RQ job queue.',
-    },
-    RAGSPINE_MANIFEST_DB_PATH: {
-      type: 'string',
-      default: '(unset)',
-      description:
-        'Path to the structured-ingestion batch manifest ledger (idempotent batch tracking).',
-    },
-    RAGSPINE_TOKENS_PER_MINUTE: {
-      type: 'int',
-      default: '0 (off)',
-      description:
-        'Active client-side TPM (tokens-per-minute) throttle. When > 0, build_provider wraps the LLM provider in corespine RateLimitedProvider — a sliding-window soft limit, complementary to the SDK max_retries passive 429 backoff. 0 disables it. New in 0.3.0.',
-    },
-  }}
-/>
+| Variable                      | Default          | Values / purpose                                                                         |
+| ----------------------------- | ---------------- | ---------------------------------------------------------------------------------------- |
+| `RAGSPINE_PROVIDER`           | `mock`           | `mock` or `anthropic`                                                                    |
+| `RAGSPINE_MODEL`              | provider default | server-side model ID                                                                     |
+| `RAGSPINE_BASE_URL`           | unset            | server-side provider gateway URL                                                         |
+| `RAGSPINE_TOKENS_PER_MINUTE`  | `0`              | corespine sliding-window provider throttle; 0 is off                                     |
+| `RAGSPINE_RETRIEVAL_MODE`     | `auto`           | `auto`/`hybrid`/`vector`, or zero-embedding `economy`/`bm25`/`lexical`                   |
+| `RAGSPINE_EMBEDDING`          | `auto`           | `none`, `auto`, `onnx`, `deterministic`, or `openai`                                     |
+| `RAGSPINE_RERANKER`           | `none`           | `cross_encoder`, `colbert`, `splade`, `auto`, or none                                    |
+| `RAGSPINE_POSTPROCESSOR`      | `none`           | comma chain such as `mmr,lost_in_middle`                                                 |
+| `RAGSPINE_QUERY_DECOMPOSE`    | `none`           | optional LLM query decomposition                                                         |
+| `RAGSPINE_CORRECTIVE`         | `none`           | optional `crag` wrapper                                                                  |
+| `RAGSPINE_QUERY_TRANSFORM`    | `none`           | `hyde`, `rag_fusion`, or `step_back`                                                     |
+| `RAGSPINE_ADAPTIVE`           | `none`           | optional heuristic/LLM complexity routing                                                |
+| `RAGSPINE_CHUNKER`            | `none`           | default, parent-child/small-to-big, layout, laws, QA, book, sentence-window, or semantic |
+| `RAGSPINE_VECTOR_STORE`       | `none`           | none, in-process, or configured persistent adapter                                       |
+| `RAGSPINE_PERSISTENCE_POLICY` | `default`        | isolation-first default or `persist_everything`                                          |
 
-<Callout type="info">
-  `RAGSPINE_DB_PATH`, `RAGSPINE_CHUNK_DB_PATH`, `RAGSPINE_PROVIDER`, `RAGSPINE_MODEL` /
-  `RAGSPINE_BASE_URL`, `RAGSPINE_REDIS_URL`, `RAGSPINE_FAQ_SOURCE`, and
-  `RAGSPINE_ALLOWED_UPLOAD_ROOT` are the variables surfaced in the README. The remaining ones
-  (`RAGSPINE_EMBEDDING`, `RAGSPINE_REFERENCE_DATE`, `RAGSPINE_COMPANY_PROFILE`,
-  `RAGSPINE_MAPPING_DB_PATH`, `RAGSPINE_QUEUE_DB_PATH`, `RAGSPINE_MANIFEST_DB_PATH`,
-  `RAGSPINE_TOKENS_PER_MINUTE`) are also read by `ServiceConfig.from_env` and are listed here for
-  completeness.
-</Callout>
+Economy mode is stronger than setting a cheap embedding: it does not construct an embedding
+backend or vector store at all.
 
-### Example
+## Workflows and public compatibility APIs
 
-```bash
-# Structured channel only, offline mock provider
-RAGSPINE_DB_PATH=data/fact_metric.db .venv/bin/python scripts/run_server.py --port 8000
+| Variable                      | Default          | Purpose                                                      |
+| ----------------------------- | ---------------- | ------------------------------------------------------------ |
+| `RAGSPINE_WORKFLOW_MATCHER`   | `auto`           | workflow matcher selection; auto can fall back to lexical    |
+| `RAGSPINE_DIFY_RUN_ENABLED`   | `false`          | master gate for Dify/n8n-compatible execution                |
+| `RAGSPINE_DIFY_RUN_TIMEOUT_S` | `10.0`           | execution timeout in seconds                                 |
+| `RAGSPINE_DIFY_RUN_ISOLATION` | `inprocess`      | `inprocess` or Linux-enhanced `subprocess`                   |
+| `RAGSPINE_STUDIO_DIR`         | empty            | existing static directory mounted at `/studio`               |
+| `RAGSPINE_DIFY_PUBLIC_APPS`   | empty            | `key=/path/workflow.yml;...`; empty disables public Dify API |
+| `RAGSPINE_N8N_API_KEY`        | unset            | expected `X-N8N-API-KEY`; unset disables `/api/v1/*`         |
+| `RAGSPINE_N8N_STORE_PATH`     | `data/n8n_store` | n8n-compatible file-store root                               |
 
-# Add the narrative channel and a real provider through an enterprise gateway,
-# with an active 90k tokens/minute client-side throttle
-RAGSPINE_DB_PATH=data/fact_metric.db \
-RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
-RAGSPINE_PROVIDER=anthropic \
-RAGSPINE_BASE_URL=https://gateway.internal/anthropic \
-RAGSPINE_TOKENS_PER_MINUTE=90000 \
-.venv/bin/python scripts/run_server.py --port 8000
-
-# Worker for async ingestion (needs Redis)
-RAGSPINE_REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/run_worker.py
-```
-
-### Opt-in retrieval, eval & graph selectors (0.7.0+)
-
-Releases 0.7.0 / 0.8.0 add a family of **opt-in** capability selectors, each read from a
-`RAGSPINE_*` environment variable that mirrors a `make_*` factory. All are **default-off** —
-unset, the pipeline runs the offline deterministic default (byte-identical), and the LLM- or
-vision-backed ones additionally need their extra and a provider. See the
-[Retrieval guide](/docs/guides/retrieval) and [Evaluation guide](/docs/guides/evaluation) for
-what each one does.
-
-| Variable                  | Default      | Selects                                                                                    |
-| ------------------------- | ------------ | ------------------------------------------------------------------------------------------ |
-| `RAGSPINE_RERANKER`       | `none`       | local reranker via `make_reranker` — `cross_encoder` / `ce` / `auto`, or `colbert` / `splade` |
-| `RAGSPINE_CHUNKER`        | default      | chunking strategy via `make_chunker` — `layout` / `parent_child` / `sentence_window` / `semantic`, plus the domain presets `laws` / `qa` / `book` |
-| `RAGSPINE_SOURCE_CONNECTOR`| `none`      | KB source connector via `make_source_connector` — `filesystem` (default, no extra) / `in_memory` / `http` / `notion` (`http` and `notion` need `[connectors]`) |
-| `RAGSPINE_RELATION_EXTRACTOR`| `none`    | opt-in relation-graph slot via `make_relation_extractor` — `deterministic` / `rule` / `cooccurrence`, or `llm` (needs `[llm]` + a provider); see [ADR 0015](/docs/decisions/adr-0015) |
-| `RAGSPINE_CONTEXTUAL`     | `none`       | deterministic Contextual-Retrieval index header via `make_index_text_fn`                   |
-| `RAGSPINE_POSTPROCESSOR`  | `none`       | post-retrieval chain via `make_postprocessor` — e.g. `mmr,lost_in_middle`                  |
-| `RAGSPINE_CORRECTIVE`     | `none`       | CRAG grade→act retriever wrapper via `make_corrective_retriever`                           |
-| `RAGSPINE_QUERY_DECOMPOSE`| `none`       | LLM query decomposition via `make_decomposer`                                              |
-| `RAGSPINE_QUERY_TRANSFORM`| `none`       | query transform via `make_query_transform` — `hyde` / `rag_fusion` / `step_back`           |
-| `RAGSPINE_ADAPTIVE`       | `none`       | Adaptive-RAG complexity routing via `make_adaptive_decomposer`                             |
-| `RAGSPINE_RAPTOR*`        | `none`       | RAPTOR multi-granularity tree via `make_raptor_retriever` / `make_raptor_summarizer`       |
-| `RAGSPINE_GRAPH_STORE`    | `in_process` | GraphStore backend via `make_graph_store` — `in_process` / `networkx`                      |
-| `RAGSPINE_NARRATIVE_GRAPH`| `none`       | opt-in narrative-GraphRAG via `make_narrative_graph`                                        |
-| `RAGSPINE_VISUAL_EMBEDDER`| `none`       | ColPali visual-document retrieval via `make_visual_embedder`                               |
-
-<Callout type="info">
-  These knobs come from the quality-depth workstreams (W1–W12). Model overrides
-  (`RAGSPINE_COLBERT_MODEL`, `RAGSPINE_SPLADE_MODEL`, `RAGSPINE_COLPALI_MODEL`, …) pick a
-  specific pinned checkpoint; the full behavior of each layer is documented in the
-  [Retrieval guide](/docs/guides/retrieval).
-</Callout>
+Enabling execution is a trust-boundary decision, not authentication. The internal run routes still
+need reverse-proxy/network protection. Public Dify and n8n APIs have their own keys; webhooks are
+intentionally unauthenticated.
 
 ## CompanyProfile
 
-The CompanyProfile is RAGSpine's "no hardcoded company" seam. The core depends on a
-`DomainProfile` loaded from TOML — identity, entity synonyms, geography, display labels,
-the external/competitor list, and sensitivity rules all live in config, never in code.
-
-<Steps>
-<Step>
-Copy the template:
+The company profile controls home identity, entity aliases, labels/geography, competitor scope, and
+sensitivity classification. The loader used by the engine reads `RAGSPINE_COMPANY_CONFIG` or an
+explicit path:
 
 ```bash
-cp config/company.example.toml config/company.toml
+RAGSPINE_COMPANY_CONFIG=config/company.toml \
+  .venv/bin/python scripts/run_server.py
 ```
 
-</Step>
-<Step>
-Edit it for your deployment, then point at it with `RAGSPINE_COMPANY_CONFIG=config/company.toml`
-(or pass the path to `load_company_profile()` directly).
-</Step>
-</Steps>
+`ServiceConfig.company_profile_path` is populated by the canonical
+`RAGSPINE_COMPANY_PROFILE_PATH` or legacy `RAGSPINE_COMPANY_PROFILE`, but current company-profile
+loading has a separate `RAGSPINE_COMPANY_CONFIG` path. Prefer the latter until those assembly
+surfaces are unified.
 
-The template (`config/company.example.toml`) is a fully fictional placeholder:
-
-```toml title="config/company.toml"
+```toml
 [home]
 company_name = "YourCo"
 entity_code = "YOURCO_GROUP"
 
-# Entity synonyms: alias (lowercase / abbrev / local language) -> controlled entity_code
 [home.synonyms]
-"yourco group" = "YOURCO_GROUP"
 "yourco" = "YOURCO_GROUP"
-"group" = "YOURCO_GROUP"
-"yourco north" = "YOURCO_NORTH"
-"north" = "YOURCO_NORTH"
 
-# Entity default geography: entity_code -> geography
-[home.geography]
-YOURCO_GROUP = "GLOBAL"
-YOURCO_NORTH = "NORTH"
-
-# Display names: entity_code -> user-visible name (drives clarification / prompt text)
-[home.labels]
-YOURCO_GROUP = "YourCo Group"
-YOURCO_NORTH = "YourCo North"
-
-# External / competitor entities: alias -> display name.
-# A hit refuses and proposes re-asking the home-entity equivalent.
 [external_entities]
 "globex" = "Globex"
-"initech" = "Initech"
 
-# Deterministic sensitivity classification for narrative ingestion.
 [sensitivity]
 default_level = "INTERNAL"
-escalate_unknown_to_restricted = false
-restricted_filename_patterns = ["board_minutes", "exec_comp", "performance_review"]
-restricted_keywords = ["board_minutes", "exec_comp", "绩效"]
+restricted_keywords = ["board_minutes", "绩效"]
 ```
 
-### What the profile drives
+No production company identity should be hardcoded in the engine. Competitor/refusal decisions and
+restricted-content classification derive from this profile.
 
-<Cards>
-  <Card
-    title="Identity"
-    description="home company_name + entity_code — the default entity when the user names none, and the display name used in clarification and refusal text."
-  ></Card>
-  <Card
-    title="Metrics & entities"
-    description="Entity synonyms normalize ZH/EN/abbrev aliases to controlled entity_codes; geography sets each entity's default geographic scope."
-  ></Card>
-  <Card
-    title="Competitor scope"
-    description="external_entities is the competitor/out-of-scope list. The deterministic SecurityGate refuses on a match before any tool, retrieval, or LLM call."
-  ></Card>
-  <Card
-    title="Sensitivity"
-    description="Deterministic RESTRICTED classification rules for narrative ingestion — restricted content is filtered at two retrieval exits before reaching a prompt."
-  ></Card>
-</Cards>
+## Provider testing note
 
-<Callout type="warn">
-  No company name is hardcoded anywhere in the engine. Home identity, entities, the tool schema, and
-  refusal text all derive from `load_company_profile()` — see
-  `src/ragspine/common/company_profile.py`. Never backfill a real company into code.
-</Callout>
+The deterministic mock path is the fully exercised offline baseline. The project author is based
+in China and cannot access the Anthropic API, so Anthropic-specific behavior has not received the
+same direct integration testing. Users of that adapter should validate their model ID, credentials,
+gateway behavior, and rate limits in their own environment.

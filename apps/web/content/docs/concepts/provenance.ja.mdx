@@ -1,0 +1,90 @@
+---
+title: 出典追跡
+description: すべてのファクトとすべての回答は、出典ドキュメント id とロケーターを保持します — この系譜はエンドツーエンドで受け渡され、決して失われません。
+---
+
+捏造防止と対をなす不変量: **常に引用する。** 保存されたすべてのファクトとすべての回答は
+出典の系譜 — どのドキュメントに由来し、その中のどこにあるか — を保持します。数値を生成
+しながら、その出所を提示しないパスは存在しません。
+
+<Callout type="warn">
+  **保証。** すべてのファクト/回答は `source_doc_id`（チャンクの場合は `doc_id`）と
+  `source_locator` を保持します。系譜はエンドツーエンドで受け渡され、回答に至る途中で失われることは決してありません。
+</Callout>
+
+## 系譜はストレージから始まる
+
+系譜は回答時に後付けされるものではありません — スタックの最下層にある NOT-NULL カラム
+です。
+
+### 構造化ファクト (`storage/fact_store.py`)
+
+`Fact` dataclass の最初の 10 フィールドは位置固定（positional-frozen）であり、そのうち 2 つが系譜です:
+
+```python
+@dataclass
+class Fact:
+    metric_code: str
+    entity: str
+    geography: str
+    channel: str
+    period_type: str
+    period: str
+    value: float
+    unit: str
+    source_doc_id: str    # which document
+    source_locator: str   # where inside it (e.g. slide=2,table=1,row=REVENUE,col=FY2024)
+    ...
+```
+
+`fact_metric` テーブルは両者を `TEXT NOT NULL` として宣言しています。ファクトは、自らの
+出所を知らないままでは存在できません。（v2 ではオプションのバージョン系譜 —
+`source_file_hash`、`extractor_version`、`mapping_version` — も追加されますが、これらは
+追加的なものです。）
+
+### ナラティブチャンク (`retrieval/chunking/chunk_store.py`)
+
+各チャンクは、`title`、`entity`、`period`、`sensitivity` といったメタデータとともに、
+`doc_id` と `source_locator`（`TEXT NOT NULL`）を保持します。
+
+## 系譜は回答まで受け渡される
+
+<Steps>
+  <Step>**構造化クエリ** — `execute_query_metric` は `found` 結果を返し、その `source` サブ dict は `{"doc": fact.source_doc_id, "locator": fact.source_locator}` です。</Step>
+  <Step>**回答合成** — `_structured_answer` は見つかった各ファクトを `… 值 单位（来源：{doc} · {locator}）` として描画し、`source` dict 群を `AgentResult.sources` として返します。</Step>
+  <Step>**ナラティブ合成** — `_run_narrative` は `（来源：{doc} {locator}）` を付けてスニペットブロックを構築し、バックストップとして、モデルが省略した出典ドキュメント名は回答に強制的に追記されます。</Step>
+  <Step>**HTTP レスポンス** — `/v1/ask` ルートは `result.sources` を `AskResponse` の `sources` フィールドにマッピングします（`service/api/routes.py`）。</Step>
+</Steps>
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import FactStore
+
+store = FactStore("data/fact_metric.db"); store.init_schema()
+result = answer_question("中国内地FY2024的REVENUE是多少", store, MockProvider())
+print(result.answer)   # number + （来源：… · …）
+print(result.sources)  # [{'doc': 'ACME_FY2024_Review.pptx', 'locator': 'slide=2,table=1,...'}]
+```
+
+## 系譜を失ってはならない箇所
+
+<Callout type="info">
+  以下は、系譜を失いやすく — そして失うことが禁じられている — 縫い目（シーム）です:
+</Callout>
+
+- **ストレージ** — 系譜カラムなしでファクト/チャンクを決して書き込まないこと。これらは
+  設計上 NOT NULL です。（`storage/CLAUDE.md`: "never drop lineage"。）
+- **見つかったファクトの描画** — `_structured_answer` / `_multi_subtask_answer` は、描画
+  される各行に `source` dict を付随させたまま保持しなければなりません。
+- **ナラティブ合成** — `_run_narrative` の引用バックストップは、引用を「忘れた」モデルが
+  回答から出典追跡を剥ぎ取れないようにするためにこそ存在します。
+- **サービスエッジ** — `/v1/ask` のマッピングは `sources` を変更せずにそのまま通過させな
+  ければなりません。FAQ ショートサーキットのヒットも独自の `source` を保持します
+  （[FAQ ショートサーキット](/ja/docs/concepts/faq-short-circuit) を参照）。
+
+<Callout type="warn">
+  プライバシーに配慮した trace は系譜の**識別子**（chunk_ids、統制コード）を記録しますが、ファクトの値や
+  チャンクのテキストは決して記録しません — 出典追跡が扱うのは*どこ*であって、機微な*何*を
+  再び露出させることではありません。[RESTRICTED 分離](/ja/docs/concepts/restricted-isolation) を参照してください。
+</Callout>

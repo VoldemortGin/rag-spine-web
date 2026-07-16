@@ -1,0 +1,142 @@
+---
+title: HTTP API
+description: 精确的 FastAPI 路由族、请求边界、认证、缓存，以及默认关闭的工作流执行。
+---
+
+从源码 checkout 启动可选的 `[service]` 应用：
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --port 8000
+```
+
+## 引擎路由
+
+| 方法   | 路径                                | 请求 / 行为                                                              |
+| ------ | ----------------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/healthz`                          | 存活探测                                                                 |
+| `GET`  | `/readyz`                           | 事实存储与可选队列的就绪状态；降级时返回 `503`                           |
+| `POST` | `/v1/ask`                           | `question`，可选 `reference_date`，可选 `(role, text)` 形式的 `history` |
+| `POST` | `/v1/ask/stream`                    | 同一个完整守卫后的答案，经 SSE 传输                                      |
+| `POST` | `/v1/ingest/structured/jobs`        | `.xlsx`、`.xlsm`、`.pptx`、`.pdf` 作业                                   |
+| `POST` | `/v1/ingest/narrative/jobs`         | `.pptx`、`.pdf` 作业                                                     |
+| `GET`  | `/v1/jobs/{job_id}`                 | 队列状态/结果/错误                                                       |
+| `GET`  | `/v1/topology?scope=agent\|service` | 静态引擎拓扑；scope 无效返回 `400`                                       |
+
+示例：
+
+```bash
+curl -s http://127.0.0.1:8000/v1/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"China FY2024 revenue","history":[["user","Use the annual report"]]}'
+```
+
+`/v1/ask/stream` 先计算出完整的守卫后响应，再发送 `start`、零个或多个
+`delta`，以及 `done` SSE 帧。因此守卫失败绝不会出现流到一半再撤回的情况。
+
+## 工作流目录
+
+### `GET /v1/workflow-templates`
+
+查询字段为 `offset`（默认 0）与 `limit`（1–100，默认 100）。响应包含
+`total`、`offset`、`limit`、可为空的 `next_offset`，以及仅含元数据的 `templates`。它有意
+省略工作流 YAML 与预览数据。
+
+该路由发送弱的、按页区分的 `ETag` 与
+`Cache-Control: public, max-age=300, stale-while-revalidate=3600`。匹配的 `If-None-Match` 可能
+收到 `304`。
+
+### `GET /v1/workflow-templates/{template_id}`
+
+返回目录元数据，外加规范化 `workflow`、确定性的 Dify `yaml`，以及仅供展示的
+`preview`（schema 版本 1）。未知标识符返回 `404` 且不暴露路径。
+
+### `POST /v1/workflow-scaffold`
+
+```json
+{ "description": "invoice extraction and approval", "reuse": true }
+```
+
+`description` 为 1–4,096 个字符。可选的 `template_id` 必须是小写连字符形式的目录
+标识符。禁止额外字段。响应包含 `workflow`、`yaml`、`preview`、
+`origin`、`template_id`、`confidence`、`matcher`、`warnings`、`compatibility`、`requirements`，以及
+可选的事实性 `source` 元数据。它不会执行该工作流。
+
+## Dify 编译器与内部执行
+
+| 方法   | 路径                | 行为                                                                       |
+| ------ | ------------------- | ------------------------------------------------------------------------- |
+| `POST` | `/v1/dify/analyze`  | 仅静态建议                                                                 |
+| `POST` | `/v1/dify/compile`  | 返回目标为 `ragspine` 或 `spineagent` 的 Python 源码；不执行               |
+| `POST` | `/v1/dify/run`      | 仅在启用后编译、过闸并执行                                                 |
+| `POST` | `/v1/dify/run/jobs` | 同步编译/过闸，然后在启用后入队                                            |
+
+analyze、compile 与 run 只接受恰好一种文档形式：
+
+```json
+{ "workflow": { "app": { "mode": "workflow" }, "workflow": { "graph": {} } } }
+```
+
+或旧式信封：
+
+```json
+{ "yaml": "app:\n  mode: workflow\nworkflow:\n  graph: {}\n" }
+```
+
+未知字段以及同时提供/都不提供这两种形式都会被拒绝。`RAGSPINE_DIFY_RUN_ENABLED` 默认
+为 false，执行会得到 `403`。provider 仅由服务端配置构建。
+
+## n8n 转换与内部执行
+
+| 方法   | 路径              | 行为                                                          |
+| ------ | ----------------- | ------------------------------------------------------------- |
+| `POST` | `/v1/n8n/convert` | 纯 `n8n_to_dify` 或 `dify_to_n8n` 转换，附带警告               |
+| `POST` | `/v1/n8n/run`     | 先转换，再复用默认关闭的 Dify 运行路径                        |
+
+转换接受一个映射（或转换信封中的 JSON/YAML 字符串），且绝不运行它。
+
+## Dify 兼容公开 Workflow API
+
+四条路由全部要求 `Authorization: Bearer <app-key>`。应用密钥与服务端工作流路径
+注册在 `RAGSPINE_DIFY_PUBLIC_APPS` 中；注册表缺失时返回 `401`。
+
+| 方法   | 路径                                  |
+| ------ | ------------------------------------- |
+| `POST` | `/v1/workflows/run`                   |
+| `GET`  | `/v1/workflows/run/{workflow_run_id}` |
+| `GET`  | `/v1/info`                            |
+| `GET`  | `/v1/parameters`                      |
+
+运行请求必须提供 `user`，接受 `inputs`，并将 `response_mode` 选为 `blocking` 或
+`streaming`。密钥选中服务端的工作流；客户端不上传工作流或
+provider。执行仍然要求 `RAGSPINE_DIFY_RUN_ENABLED=true`。
+
+## n8n 兼容公开 API
+
+每条 `/api/v1/*` 路由都要求 `X-N8N-API-KEY` 与 `RAGSPINE_N8N_API_KEY` 匹配。若服务端密钥
+未设置，该面整体以 `401` 禁用。
+
+| 方法                   | 路径                                         |
+| ---------------------- | -------------------------------------------- |
+| `GET`、`POST`          | `/api/v1/workflows`                          |
+| `GET`、`PUT`、`DELETE` | `/api/v1/workflows/{workflow_id}`            |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/activate`   |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/deactivate` |
+| `GET`                  | `/api/v1/executions`                         |
+| `GET`、`DELETE`        | `/api/v1/executions/{execution_id}`          |
+| `GET`、`POST`          | `/webhook/{path}`                            |
+
+集合分页使用 `limit`（默认 100，接受并钳制到 1–250）与游标。webhook
+是 API 密钥认证的例外：它有意接受未认证的 GET/POST，只
+匹配激活工作流，并且仍然处于默认关闭的执行开关之后。
+
+## 限制、错误与部署安全
+
+脚手架及部分 Dify POST 路由在缓冲之前就拒绝大于 2 MiB 的请求体；解码后的
+工作流文档限制为 1 MiB，并有额外的深度/节点/字符串/YAML 别名
+限制。校验响应会移除回显的输入/上下文。内部失败返回不透明的错误
+对象，不含 traceback。
+
+引擎、目录、编译器、转换器、拓扑与内部
+运行路由没有内置认证。公开部署必须增加网络隔离或反向代理。若 URL 的保密性不足，
+webhook 路由需要入口认证/限流。

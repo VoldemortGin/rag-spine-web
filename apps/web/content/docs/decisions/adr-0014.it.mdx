@@ -1,0 +1,137 @@
+---
+title: 'ADR 0014: Workflow Dify come servizio (analyze / compile / run) con esecuzione sicura a tre livelli'
+description: Estende il servizio ragspine esistente con tre endpoint Dify a livello di fiducia crescente — analyze e compile sempre attivi, run disabilitato per impostazione predefinita dietro un gate statico sugli import, una sandbox in-process ristretta e (su Linux) isolamento in sottoprocesso; il provider è sempre deciso lato server.
+---
+
+> Stato: **proposto** · Data: 2026-06-24
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire con un nuovo record, non modificare.
+
+Si basa su [0013](/it/docs/decisions/adr-0013) (il compilatore da YAML Dify → Python puro + l'advisor di
+ottimizzazione statica). È correlato a [0009](/it/docs/decisions/adr-0009) (nessun lock-in verso i framework +
+solo licenze permissive), a [0010](/it/docs/decisions/adr-0010) (disaccoppiamento della sicurezza) e
+all'ADR sui confini della famiglia Spine (repository di famiglia, `docs/adr/0001`).
+Rilasciato in **rag-spine 0.5.0**.
+
+## Contesto
+
+[ADR 0013](/it/docs/decisions/adr-0013) compila un `.yml` Dify in Python puro leggibile
+(`compile_dify_yaml` / `analyze`). Il passo successivo è mettere questa capacità **dietro un
+servizio**, così che i consumatori possano raggiungerla via HTTP: ottenere suggerimenti di
+ottimizzazione, ottenere il codice leggibile e persino **eseguire** direttamente l'artefatto
+compilato. Eseguire codice inviato da qualcun altro è un problema di **confine di fiducia** — il
+design deve trovare un default sicuro tra
+"funziona subito senza configurazione" e "mai `exec` alla leggera".
+
+Vincoli: riutilizzare il servizio ragspine esistente (app factory / DI / coda RQ / deploy) —
+nessun secondo servizio; i test girano senza alcuna API LLM reale (TestClient + `MockProvider`); il
+provider è deciso dall'env **lato server** (i client non possono iniettare un `provider_expr` — sarebbe
+una superficie di code injection); la famiglia è completamente sincrona; `mypy --strict`,
+`filterwarnings=error`, pydantic solo al confine.
+
+## Decisione
+
+**Estendere il servizio ragspine con tre endpoint a livello di fiducia crescente; `run` è disattivato per
+impostazione predefinita ed esegue attraverso tre livelli di sicurezza.**
+
+### I tre endpoint (`src/ragspine/service/api/routes.py`, compilatore importato in modalità lazy)
+
+- `POST /v1/dify/analyze` — solo analisi statica di ottimizzazione (nessuna generazione di codice, nessuna esecuzione).
+  **Sempre disponibile**; assolutamente sicuro.
+- `POST /v1/dify/compile` — compilazione in una **stringa di codice** Python puro (mai eseguita).
+  **Sempre disponibile**; sicuro.
+- `POST /v1/dify/run` e `POST /v1/dify/run/jobs` (asincrono) — compilazione + **esecuzione
+  ristretta**. Questo è il **confine di fiducia**: disattivato per impostazione predefinita
+  (`RAGSPINE_DIFY_RUN_ENABLED=false` → 403), solo un opt-in esplicito via env lo sblocca; il
+  provider è iniettato lato server.
+
+Modellazione degli errori: `DifyCompileError` (codice `dify.*`) → 400; il
+`DifyUnsafeError` del gate statico L0 (nulla è stato eseguito) → 422; esecuzione / timeout
+`DifyRunError` / `DifyTimeoutError` → 400; funzionalità non abilitata → 403. Le esecuzioni asincrone riutilizzano il
+`GET /v1/jobs/{id}` esistente.
+
+### I tre livelli di sicurezza (`src/ragspine/service/dify/{safety,runner}.py` + `scripts/run_dify_workflow.py`)
+
+- **L0 — gate statico (non aggirabile, prima dell'esecuzione).** ① un
+  `GeneratedCode.warnings` non vuoto (uno scheletro `NotImplementedError` / un nodo non supportato) → rifiuto
+  (422); ② un'analisi AST sugli import del sorgente generato — qualsiasi modulo radice di primo livello
+  fuori dall'allowlist (solo `__future__` / `dataclasses` / `typing` / `string` /
+  `concurrent` / `json` / `corespine` / `ragspine` / `spineagent`) → rifiuto. L'allowlist
+  deliberatamente **non** contiene alcun modulo di I/O / processo / rete
+  (os / sys / subprocess / socket / shutil / pathlib / importlib).
+- **L1 — sandbox in-process ristretta.** Un **dizionario allowlist esplicito di builtin sicuri**
+  (calcolo puro / contenitori / serializzazione + i tipi di eccezione usati dal codice generato),
+  il dunder necessario per eseguire i corpi di classi/moduli (`__build_class__`) e un
+  `__import__` **ristretto** (solo i moduli radice presenti nell'allowlist L0 — persino un `__import__('os')` dinamico è
+  bloccato); `open` / `eval` / `exec` / `compile` / `input` e le altre superfici di evasione
+  semplicemente non sono mai inserite nell'allowlist. Il modulo generato viene registrato in `sys.modules` (la risoluzione
+  delle annotazioni stringa dei dataclass sotto `from __future__ import annotations` ne ha bisogno).
+  **Soft timeout basato su thread** (multipiattaforma, nessuna dipendenza da `SIGALRM`).
+- **L2 — isolamento in sottoprocesso.** `isolation='subprocess'` → su Linux, un processo figlio
+  separato (`Popen(cwd=private tmp)` + `communicate(timeout)` + `kill()` = SIGKILL per un
+  processo fuori controllo, più `resource.setrlimit` che limita il tempo di CPU / lo spazio di indirizzamento / la creazione
+  di file); il figlio applica comunque la sandbox ristretta L1 al suo interno. **Le piattaforme non Linux
+  (macOS / Windows) ricadono automaticamente su L1** (lì rlimit è inaffidabile, quindi l'isolamento
+  forte offre poco).
+
+### Sicurezza del provider e provider auto-costruiti in processi isolati / worker
+
+I client **non possono** passare un `provider_expr` (lo schema non ha tale campo; i campi extra sono
+ignorati da pydantic). Il codice generato fissa il provider offline predefinito; a runtime il
+server lo sovrascrive tramite `run_workflow(provider=...)`. Il sottoprocesso / worker RQ **costruisce da
+sé** il proprio provider a partire da `build_provider(provider_config_dict(config))` — mai un'istanza o un'espressione di provider
+passata — così il provider è sempre deciso dall'env lato server.
+
+Punti di atterraggio: `src/ragspine/service/dify/{safety,runner}.py`,
+`service/tasks/jobs.py:run_dify_workflow_job`, `scripts/run_dify_workflow.py`,
+`service/api/{routes,schemas}.py` e `service/config.py`
+(`dify_run_enabled` / `dify_run_timeout_s` / `dify_run_isolation` + `provider_config_dict`).
+
+## Default di sicurezza (tutti accettati in questo giro, in attesa di revisione)
+
+1. **Tutti i default di sicurezza accettati:** il gate statico L0 + la sandbox ristretta L1 + l'isolamento
+   in sottoprocesso L2 sono tutti implementati; `run` è disattivato per impostazione predefinita e offline-mock per impostazione predefinita.
+2. **Nessuna autenticazione nell'MVP:** il livello HTTP non effettua alcuna autenticazione (coerentemente con
+   l'esistente `/v1/ask`). L'esposizione pubblica deve anteporre un'autenticazione o un'allowlist di rete
+   (reverse proxy / ingress) — segnalato in modo evidente in tutta la documentazione di deploy
+   (README / `.env.example` / compose / valori helm).
+3. **Confine onesto della sandbox:** i builtin ristretti di L1 sono **un livello di difesa in
+   profondità**, non una sandbox completa; l'isolamento forte proviene dal sottoprocesso L2 + SIGKILL +
+   (Linux) rlimit. Le piattaforme non Linux ricadono su L1 senza limiti rigidi sulle risorse — dichiarato esplicitamente
+   nel codice e nella documentazione.
+
+## Alternative considerate (respinte)
+
+- **`/run` attivo per impostazione predefinita.** Respinta — eseguire l'artefatto compilato di qualcun altro è un confine
+  di fiducia; il default sicuro deve essere disattivato. Il valore immediato "out of the box" è coperto da
+  analyze / compile, che sono assolutamente sicuri.
+- **Builtin ristretti in stile blocklist (rimuovere i nomi pericolosi).** Respinta — troppo facile
+  dimenticarne uno (la prima bozza aveva dimenticato `__build_class__`, rompendo le definizioni di classe sotto
+  exec). Usare invece un **dizionario allowlist esplicito**: solo i nomi noti come sicuri, tutto il resto
+  negato per impostazione predefinita.
+- **`signal.SIGALRM` per il timeout L1.** Respinta — solo Unix e incompatibile con
+  i thread. Al suo posto, un soft timeout basato su thread (multipiattaforma) + il timeout rigido con SIGKILL
+  del sottoprocesso L2.
+- **`os.chdir(tmp)` in L1.** Respinta (rimossa dopo esserci inciampati in fase di implementazione) —
+  `os.chdir` è un effetto collaterale a livello di intero processo; un soft timeout basato su thread non può uccidere il thread
+  fuori controllo, il che lascerebbe la cwd dell'**intero processo** dentro una directory tmp cancellata e avvelenerebbe
+  i successivi spawn di sottoprocessi. All'interno della sandbox ristretta, `open` / `os` / `pathlib` sono
+  comunque irraggiungibili, quindi chdir non offre nulla a fronte di un rischio a livello di processo. La semantica
+  "eseguire dentro tmp" si sposta nel `Popen(cwd=private tmp)` del sottoprocesso L2.
+- **Permettere ai client di passare `provider_expr`.** Respinta — una superficie diretta di code injection. Il
+  provider è deciso dall'env lato server; i processi isolati / worker si auto-costruiscono tramite
+  `build_provider`.
+
+## Conseguenze
+
+- Il servizio acquisisce tre endpoint (analyze / compile sicuri e sempre attivi; run un confine
+  di fiducia, disattivato per impostazione predefinita); riutilizza l'app factory / DI / la coda RQ / il deploy — nessun nuovo
+  servizio, nessun nuovo sistema di configurazione.
+- L'extra `[service]` aggiunge PyYAML (gli endpoint dify importano il compilatore in modalità lazy; pydantic
+  arriva con fastapi); il core `dependencies` resta intatto. L'immagine di deploy installa
+  `.[service,vector,dify]`.
+- L'esecuzione ristretta passa sempre per L0 + L1 (+ L2 su Linux); il provider è sempre deciso
+  lato server e non può mai essere iniettato da un client.
+- Questo record è **proposto**: i default di sicurezza (MVP senza autenticazione / il confine onesto
+  della sandbox) attendono revisione; qualsiasi modifica segue il principio "sostituire, non modificare" (un nuovo record o un cambio
+  di stato).

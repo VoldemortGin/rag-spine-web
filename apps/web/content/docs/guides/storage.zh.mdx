@@ -1,0 +1,234 @@
+---
+title: 存储
+description: 基于 sqlite 的持久层——一个数值事实存储和一个叙事 chunk 存储，都带有完整来源链路。Fact dataclass、dim_key upsert 键，以及确定性的"找到/未找到"读取。
+---
+
+**storage** 领域是 RAGSpine 双通道背后的 sqlite 持久层：一个
+**事实存储**（数值指标）和一个 **chunk 存储**（叙事）。二者都保留完整来源
+链路——每一行都知道自己来自哪个文档、哪个定位符——并且都采用同样
+严谨的风格：显式 schema、参数化 SQL，以及只读的 `execute_read`
+入口，使可观测性代码永远不会触碰原始连接。
+
+<Callout type="info">
+  事实存储位于 `src/ragspine/storage/fact_store.py`（契约：
+  `src/ragspine/storage/CLAUDE.md`）。叙事 **chunk 存储**位于检索子树的
+  `src/ragspine/retrieval/chunking/chunk_store.py`——它是同一概念存储层的叙事半边，
+  其 schema 刻意与 `fact_store` 对称。二者背靠同一个 sqlite
+  文件 `data/fact_metric.db`，分处不同的表。
+</Callout>
+
+## 布局
+
+<Files>
+  <Folder name="storage" defaultOpen>
+    <File name="fact_store.py — Fact 数据类 + FactStore 协议 + SqliteFactStore（表 fact_metric）" />
+  </Folder>
+  <Folder name="retrieval/chunking">
+    <File name="chunk_store.py — StoredChunk + ChunkStore（表 narrative_chunk）" />
+  </Folder>
+</Files>
+
+## Fact dataclass
+
+一个 `Fact` 就是一条指标数据点：维度 + 数值 + 来源链路（+ v2 的风格语义与
+版本链路字段）。它是一个 `@dataclass`（非 frozen）。字段**顺序是契约的一部分**：
+前十个字段按位置冻结，新字段只能追加在末尾。
+
+<TypeTable
+  type={{
+    metric_code: { type: 'str', description: "1 — 例如 'REVENUE'。" },
+    entity: { type: 'str', description: '2 — 受控实体代码。' },
+    geography: { type: 'str', description: '3 — 非身份字段，可覆写。' },
+    channel: { type: 'str', description: "4 — 例如 'TOTAL'、'AGENCY'。" },
+    period_type: { type: 'str', description: "5 — 'FY' / 'HY' / 'QUARTER'。" },
+    period: { type: 'str', description: "6 — 例如 '2024'。" },
+    value: { type: 'float', description: '7 — 数值本身。' },
+    unit: { type: 'str', description: "8 — 例如 'USD_M'、'PCT'。" },
+    source_doc_id: { type: 'str', description: '9 — 来源链路。' },
+    source_locator: { type: 'str', description: "10 — 来源链路（例如 'sheet=5yr!C4'）。" },
+    tags: { type: 'dict[str, object]', default: '{}' },
+    source_file_hash: { type: 'str | None', default: 'None' },
+    extractor_version: { type: 'str | None', default: 'None' },
+    mapping_version: { type: 'int | None', default: 'None' },
+    confidence: { type: 'float | None', default: 'None' },
+    review_status: { type: 'str', default: 'REVIEW_AUTO_APPROVED' },
+    valid_as_of: { type: 'str | None', default: 'None' },
+    ingested_at: { type: 'str | None', default: 'None' },
+    corrected_by: {
+      type: 'str | None',
+      default: 'None',
+      description: '修正链路——执行修正的领域专家（SME）。',
+    },
+    corrected_audit_seq: {
+      type: 'int | None',
+      default: 'None',
+      description: '修正链路——该数值背后的审核审计 seq。',
+    },
+    dimensions: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: '仅存于内存的维度袋，不是数据库列。',
+    },
+  }}
+/>
+
+<Callout type="warn">
+  **前十个字段按位置冻结**——`metric_code, entity, geography, channel,
+  period_type, period, value, unit, source_doc_id, source_locator`。评估基座通过
+  `Fact(*row)` 绑定一个 10 元组；重排或删除其中任何一个都会破坏它。新字段**只能追加**
+  在末尾——`dimensions` 是最后一个字段。
+</Callout>
+
+由于这十个位置参数容易写串顺序，构造指标事实时应使用仅限关键字参数的
+classmethod `Fact.metric(*, metric_code, entity, period_type, period, value, unit,
+source_doc_id, source_locator, channel="TOTAL", geography="", **extra)`——与顺序无关，
+`channel` / `geography` 有默认值，附加的 v2 字段通过 `**extra` 透传。它
+返回一个普通的 `Fact`，因此按位置的 10 元组契约（`Fact(*row)`）不受影响。
+
+`dimensions` 是仅存于内存的任意维度袋，**不映射为数据库列**。其
+`__post_init__` 守卫会在任何键与结构 / 链路 /
+`dim_key` 保留名冲突时抛出 `ValueError`；维度袋为空时会派生一个身份镜像
+（`{metric, entity, channel, period}`）。它绝不会写入任何列，也绝不会
+被重建进 `Fact(**data)`。
+
+### 审核状态
+
+`review_status` 控制可见性。默认可见的读取只返回
+`VISIBLE_REVIEW_STATUSES = (REVIEW_AUTO_APPROVED, REVIEW_APPROVED)`；完整集合为
+`auto_approved`、`pending`、`approved`、`rejected`、`blocked`。
+
+## FactStore
+
+`FactStore` 是一个 `@runtime_checkable` **Protocol**——核心所导入的缝（只把它当作
+类型注解 / `isinstance` 目标使用；实例化会抛错）。你实际构造的类是
+零依赖的 sqlite 默认实现 `SqliteFactStore`，可以直接构造，也可以通过
+`make_fact_store(spec, **kwargs)` 工厂 / `RAGSPINE_FACT_STORE` 环境变量（第三方
+后端在 `ragspine.fact_stores` entry-point 组下注册）。
+
+```python
+from ragspine.storage.fact_store import Fact, SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+
+store.upsert_facts([
+    Fact("REVENUE", "ACME_GROUP", "ASIA", "TOTAL", "FY", "2024",
+         1234.5, "USD_M", "doc-42", "sheet=5yr!C4"),
+])
+
+hits = store.query("REVENUE", "ACME_GROUP", "FY", "2024")   # [] = not found, [Fact] = found
+store.close()
+```
+
+| 方法                                                                                                                        | 用途                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `init_schema()`                                                                                                           | 创建 `fact_metric`，执行 v2 列迁移，创建两个唯一索引                                                                    |
+| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | 批量插入；`dim_key` 冲突时覆写数值 + 来源链路；返回写入条数                                                             |
+| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | 精确参数化查询，返回 0 或 1 行                                                                                           |
+| `count() -> int`                                                                                                          | 事实总数                                                                                                                 |
+| `has_source_doc(source_doc_id) -> bool`                                                                                   | 只要该文档存在*任意*事实（任意审核状态）即为 `True`——用于幂等 / 增量刷新的存在性探针                                    |
+| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | 只读 SELECT 入口，供台账/指标复用                                                                                        |
+| `delete_by_source_doc(source_doc_id) -> int`                                                                              | 物理删除某文档的全部事实（任意审核状态）；幂等                                                                           |
+| `set_review_status(dim_key, status) -> int`                                                                               | 人工审核回写：按 `dim_key` 翻转一条事实的 `review_status`；返回 0 或 1                                                  |
+| `dim_key_for(fact) -> str` _(static)_                                                                                     | 由类型化身份列计算 `Fact` 的 `dim_key`（公开访问器——`dim_key` 绝不是 `Fact` 的字段）                                    |
+| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | 按 `dim_key` 获取一条事实（任意审核状态）；不存在返回 `None`                                                            |
+| `close()`                                                                                                                 | 幂等的连接关闭（GC 时也会经 `weakref.finalize` 自动关闭）                                                                |
+
+表名是 `fact_metric`。`query()` 对
+`(metric_code, entity, period_type, period, channel)` 发起精确匹配 `SELECT`；由于该组合唯一，
+结果永远是 **0 行（未找到）或 1 行（找到）**。这种确定性正是
+[防编造机制不变量](/zh/docs/concepts/anti-fabrication)所依赖的——没有 `found` 事实
+就意味着编排器会把答案重写为"未找到"。
+
+### `dim_key` — upsert 键
+
+`dim_key` 是 upsert 的冲突键：一个规范化、按键排序的 JSON 自然键，仅覆盖
+**身份维度**——`metric`、`entity`、`channel` 与 `period`
+（`period_type + period`，因此 `('FY','2024')` 与 `('HY','2024')` 不同）。`geography` 是
+`identity=False` 的可覆写非键列，**不**在键内。
+
+<Callout type="info">
+  `dim_key` 由 `_compute_dim_key` 从类型化列计算（它绝不读取
+  `dimensions` 袋），在每次写入及旧数据回填时都会重新计算，并且**只存在于存储层**——
+  绝不是 `Fact` 的字段，也绝不会被重建进 `Fact`。让每个身份组合保持
+  0 或 1 行，正是确定性"找到/未找到"读取路径得以成立的原因。
+</Callout>
+
+两个唯一索引并存，编码的是同一套财务唯一性：
+
+- `ux_fact_dim_key` — `UNIQUE (dim_key)`，upsert 的冲突目标。
+- `ux_fact_metric` — `UNIQUE (metric_code, entity, period_type, period, channel)`，
+  旧式复合索引，保留并存。
+
+冲突时，`upsert_facts` 会覆写可覆写列——
+`geography, value, unit, source_doc_id, source_locator` 及全部 v2/溯源字段
+（`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
+valid_as_of, ingested_at, corrected_by, corrected_audit_seq`）——并自行盖上 `ingested_at`。因此重复摄取相同数据
+绝不会让存储膨胀；这是
+[幂等摄取](/zh/docs/guides/ingestion#批次-manifest-台账)的支柱。
+
+### 自动迁移的 schema
+
+`init_schema()` 会对已存在的表 ALTER 补齐所有缺失的 v2 列和 `dim_key` 列，
+然后对 `dim_key` 为 `NULL` 的行做回填（在 Python 中依据每行的
+身份列重新计算）。所有 v2 字段均有默认值，因此旧的 `Fact(...)` 调用不受影响。
+
+## chunk 存储
+
+`ChunkStore`（位于 `retrieval/chunking/chunk_store.py`）是叙事侧的对应物，仿照
+`fact_store` 建模——显式的 `narrative_chunk` schema、参数化 SQL、`execute_read`。一个
+`StoredChunk` 是一个 chunk 的内容加元数据：`chunk_id`、`doc_id`、`seq`、`text`、
+`source_locator`、`para_start`、`para_end`、`title`、`topic`、`entity`、`geography`、
+`period`、`language`、`sensitivity`（默认 `"INTERNAL"`）、`valid_as_of`、`ingested_at`、
+`version` 与 `active`。当前 schema 新增了 `parent_id`、`heading`、`window_text` 与
+`parent_locator`。`init_schema()` 会以空默认值向旧数据库补加这些列，因此
+既有的 chunk 存储仍可读取。
+
+`window_text` 是仅用于生成阶段的扩展上下文。检索命中与引用保留子 chunk 的
+`text`、`chunk_id` 与 `source_locator`；`parent_locator` 是溯源用的反向引用，不是
+替代定位符。受限（RESTRICTED）的子 chunk 会连同其扩展上下文一起在提示词
+组装前被移除。
+
+`replace_doc_chunks(doc_id, chunks, valid_as_of="")` 是**带版本、幂等**的
+写入：重新摄取一个文档会把旧版本的行翻转为 `active=0`，并以
+`version = max+1, active=1` 插入新 chunk。活跃集合始终等于最近一次
+摄取；旧版本保留以供链路追溯。传入空列表则把该文档从活跃集合中撤下。
+
+<Callout type="info">
+  检索在打分*之前*先按 chunk 元数据（`active`、敏感级别、期间……）预过滤。
+  `sensitivity` 列正是下游 [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)
+  的动力来源。
+</Callout>
+
+## 资源管理
+
+两个存储都只打开一个 `sqlite3` 连接，设置 `row_factory = sqlite3.Row`，并注册
+`weakref.finalize`，使连接在 GC 时确定性地关闭——即使调用方
+忘记了 `close()`——从而避免裸 sqlite 连接在零警告闸门下抛出 `ResourceWarning`。
+`close()` 是幂等的。
+
+## 默认数据库路径
+
+默认值来自 [`common/core.py`](/zh/docs/guides/common#core--全局常量)：
+`DEFAULT_FACT_DB = data/fact_metric.db`（同时容纳 `fact_metric` 与 `narrative_chunk`），
+`DEFAULT_MAPPING_DB = data/color_mapping.db`，以及
+`DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`。
+
+## 本领域维护的不变量
+
+- **溯源** — 每条事实和每个 chunk 都携带 `source_doc_id` + 定位符；来源链路
+  永不丢失。
+- **确定性的找到/未找到** — 唯一的 `dim_key` 使每个指标身份仅占一
+  行，因此事实缺失是无歧义的。
+- **字段顺序契约** — `Fact` 的前十个字段按位置冻结；新增只能追加；
+  `dimensions` 绝不是数据库列。
+- **幂等写入** — 事实按 `dim_key` upsert；chunk 按版本替换。
+
+## 相关
+
+<Cards>
+  <Card title="摄取指南" href="/zh/docs/guides/ingestion" />
+  <Card title="抽取指南 — Fact 的来源" href="/zh/docs/guides/extraction" />
+  <Card title="概念：防编造机制" href="/zh/docs/concepts/anti-fabrication" />
+  <Card title="概念：溯源与链路" href="/zh/docs/concepts/provenance" />
+</Cards>

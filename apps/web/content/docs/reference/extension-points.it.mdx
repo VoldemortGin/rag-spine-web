@@ -1,0 +1,331 @@
+---
+title: Punti di estensione
+description: Interfacce tipizzate per provider, store, recupero, chunking, routing, corrispondenza dei flussi di lavoro, connettori e confini di servizio.
+---
+
+La pluggabilità di RAGSpine non è un registro di plugin — è semplice tipizzazione strutturale. Ogni
+dipendenza esterna è un `Protocol` Python; il core dipende dall'astrazione, mai da un
+SDK di terze parti. Aggiungere un provider, un vector store, un reranker o un motore OCR richiede **un solo
+nuovo file**, e ogni SDK pesante viene **importato in modo lazy**, così il core si importa senza problemi e funziona completamente
+offline con il `MockProvider` deterministico.
+
+<Callout type="info">
+  Tutte le interfacce descritte di seguito sono Protocol `@runtime_checkable` — la vostra implementazione non deve ereditare da
+  nulla, deve solo avere le firme di metodo corrette. `mypy --strict` copre il core, e gli
+  SDK `anthropic` / `openai` / `sentence-transformers` / `paddleocr` vengono importati solo all'interno delle
+  implementazioni concrete, mai nell'interfaccia.
+</Callout>
+
+## Le interfacce
+
+<Cards>
+  <Card
+    title="LLMProvider"
+    description="corespine (riesportato tramite agent/llm_provider.py) — chat(messages, tools) restituisce una ChatCompletion; formato chat-completions di OpenAI."
+  ></Card>
+  <Card
+    title="EmbeddingBackend"
+    description="retrieval/lexical/retrieval.py — trasforma batch di testi in vettori per il canale vettoriale iniettabile."
+  ></Card>
+  <Card
+    title="ListwiseJudge"
+    description="retrieval/rerank/listwise_rerank.py — reranking listwise: restituisce gli indici dei candidati in ordine dal migliore."
+  ></Card>
+  <Card
+    title="OcrBackend"
+    description="extraction/extractors/pdf_scanned_extractor.py — riconosce l'immagine di una singola pagina scansionata."
+  ></Card>
+  <Card
+    title="NarrativeRetriever"
+    description="agent/agent.py — l'interfaccia di recupero narrativo iniettata nell'orchestratore."
+  ></Card>
+  <Card
+    title="TaskQueue"
+    description="service/tasks/task_queue.py — coda di job asincrona (FakeQueue nei test, RQQueue in produzione)."
+  ></Card>
+  <Card
+    title="SourceConnector"
+    description="ingestion/source/connector.py — iter_documents() produce RawDoc da una sorgente di knowledge base (filesystem, HTTP, Notion, in-memory)."
+  ></Card>
+  <Card
+    title="RelationExtractor"
+    description="graph/extractor.py — extract(chunks) restituisce gli archi del grafo; lo slot opzionale per le relazioni narrative accanto a build_relation_graph."
+  ></Card>
+  <Card
+    title="Chunker"
+    description="retrieval/chunking/chunker.py — da testo più DocumentMeta a chunk che preservano la tracciabilità; implementazioni integrate ed entry point di terze parti."
+  ></Card>
+  <Card
+    title="LibraryRouter / FilterExtractor"
+    description="retrieval/routing e filtering — selezione deterministica della libreria ed estrazione opzionale di filtri strutturati sui metadati."
+  ></Card>
+  <Card
+    title="TemplateMatcher"
+    description="workflows/matching.py — classifica riferimenti a template eseguibili basati solo su metadati per lo scaffolding in linguaggio naturale."
+  ></Card>
+</Cards>
+
+### Interfacce attuali per recupero e flussi di lavoro
+
+`Chunker.chunk(text, meta, *, max_chars, overlap_chars) -> list[Chunk]` è responsabile della strategia di chunking.
+`make_chunker` supporta le implementazioni deterministica predefinita, layout, parent-child, sentence-window, laws, QA,
+book e semantica, oltre al gruppo di entry point `ragspine.chunkers`.
+Le implementazioni devono preservare `doc_id` e `source_locator`; i dati di gerarchia/finestra sono additivi,
+non un sostituto della tracciabilità.
+
+`LibraryRouter` seleziona uno o più ID `RoutableLibrary`. `MultiIndexRetriever` invoca in modo indipendente
+i `NarrativeRetriever` selezionati e ne fonde i risultati con RRF; in caso di errore del router si ricade
+su tutte le librerie. `FilterExtractor` può proporre predicati sui metadati, ma i filtri restano
+operazioni di restrizione validate.
+
+`TemplateMatcher` riceve riferimenti di catalogo contenenti metadati di corrispondenza, non prompt dei flussi di lavoro né
+credenziali. I matcher integrati lessicale e ONNX restituiscono candidati classificati; la policy di scaffolding
+applica la soglia di punteggio/margine e valida il template selezionato. Un matcher personalizzato non
+acquisisce autorità di scrittura su file o di esecuzione.
+
+### `LLMProvider`
+
+Di proprietà di [`corespine`](https://pypi.org/project/corespine/) e riesportato da
+`src/ragspine/agent/llm_provider.py` — l'unico metodo pilotato dal ciclo di tool-use dell'agente.
+Parla il **formato chat-completions di OpenAI** (un solo metodo `chat`). `AnthropicProvider`
+importa in modo lazy l'SDK `anthropic` e mappa il formato sull'API Anthropic; `MockProvider`
+non richiede né chiave né rete.
+
+<TypeTable
+  type={{
+    chat: {
+      type: '(messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ChatCompletion',
+      description:
+        'Invia la cronologia dei messaggi in formato OpenAI (il system prompt è il primo messaggio) e schemi di tool opzionali; restituisce una ChatCompletion (choices → ResponseMessage con content + tool_calls, più usage / model / id).',
+    },
+  }}
+/>
+
+<Callout type="info">
+  **Migrazione 0.3.0.** Questo ha sostituito il vecchio `create_message(*, system, messages, tools) ->
+  ProviderResponse`. Il contratto ora risiede nel core condiviso della famiglia `corespine`, così
+  ragspine e i suoi pacchetti fratelli condividono un unico contratto di provider — vedere
+  [ADR 0012](/it/docs/decisions/adr-0012).
+</Callout>
+
+### `EmbeddingBackend`
+
+`src/ragspine/retrieval/lexical/retrieval.py` — il punto di dependency injection per il
+canale vettoriale. Il valore predefinito è `none` (BM25 puro); iniettatelo per aggiungere un canale vettoriale.
+
+<TypeTable
+  type={{
+    embed_texts: {
+      type: '(texts: list[str]) -> list[list[float]]',
+      description: 'Trasforma batch di testi in vettori, allineati in ordine con l\'input.',
+    },
+  }}
+/>
+
+### `ListwiseJudge`
+
+`src/ragspine/retrieval/rerank/listwise_rerank.py` — l'interfaccia opzionale del reranker listwise
+basato su LLM. L'implementazione reale è Claude (tramite `build_listwise_prompt` /
+`parse_listwise_response`); i test usano un fake deterministico. In sua assenza si ricade sull'ordine RRF.
+
+<TypeTable
+  type={{
+    judge: {
+      type: '(query: str, candidates: list[str]) -> list[int]',
+      description:
+        'Restituisce gli indici dei candidati (a base 0) ordinati per rilevanza, dal più rilevante. I chiamanti garantiscono che il testo RESTRICTED sia già stato rimosso.',
+    },
+  }}
+/>
+
+### `OcrBackend`
+
+`src/ragspine/extraction/extractors/pdf_scanned_extractor.py` — l'interfaccia OCR/VLM per i PDF
+scansionati. Il backend reale (PaddleOCR) gira su Ubuntu + GPU; i test di logica usano un fake così il
+flusso render → map → threshold → review è completamente testabile su una macchina senza GPU.
+
+<TypeTable
+  type={{
+    recognize: {
+      type: '(image_bytes: bytes, page_no: int) -> OcrPageResult',
+      description: 'Riconosce l\'immagine di una singola pagina (byte PNG) e restituisce un OcrPageResult.',
+    },
+  }}
+/>
+
+### `NarrativeRetriever`
+
+`src/ragspine/agent/agent.py` — l'implementazione di recupero narrativo iniettata in
+`answer_question`. Duck-typed; se omessa, il percorso narrativo degrada in modo onesto.
+
+<TypeTable
+  type={{
+    retrieve: {
+      type: '(query: str, *, filters: dict[str, str] | None = None, top_k: int = 50) -> list[dict[str, object]]',
+      description: 'Recupera i chunk narrativi per una query, con filtri opzionali sui metadati.',
+    },
+  }}
+/>
+
+### `TaskQueue`
+
+`src/ragspine/service/tasks/task_queue.py` — la coda di job asincrona. `RQQueue` (RQ + Redis)
+per la produzione, `FakeQueue` (sincrona inline) per i test. `rq` / `redis` vengono importati in modo lazy
+solo all'interno di `RQQueue`.
+
+<TypeTable
+  type={{
+    enqueue: {
+      type: '(func: JobFunc | str, payload: dict[str, Any], *, job_id: str | None = None, timeout: int | None = None, max_retries: int = 0, result_ttl: int | None = None, failure_ttl: int | None = None) -> str',
+      description:
+        'Accoda un job tramite percorso puntato o callable con un payload serializzabile; restituisce l\'id del job.',
+    },
+    get: {
+      type: '(job_id: str) -> JobStatus | None',
+      description: 'Consulta lo stato di un job (None se sconosciuto).',
+    },
+  }}
+/>
+
+### `SourceConnector`
+
+`src/ragspine/ingestion/source/connector.py` — l'interfaccia delle sorgenti di knowledge base. Un connettore
+produce documenti grezzi da qualunque posto in cui risieda la vostra KB; il `FilesystemConnector` predefinito non richiede alcun
+extra, mentre i connettori HTTP / Notion importano in modo lazy `httpx` dietro l'extra `[connectors]`.
+
+<TypeTable
+  type={{
+    iter_documents: {
+      type: '() -> Iterable[RawDoc]',
+      description:
+        'Produce ogni documento sorgente come RawDoc immutabile (source_doc_id, locator, content: bytes, content_type, metadata).',
+    },
+  }}
+/>
+
+Le implementazioni integrate si registrano per nome in una tabella a livello di modulo; i connettori di terze parti vengono scoperti
+tramite il gruppo di entry point `ragspine.source_connectors` (in caso di conflitto vincono i nomi integrati).
+Selezionatene uno con la factory `make_source_connector(spec=None, **kwargs)` o con la
+variabile d'ambiente `RAGSPINE_SOURCE_CONNECTOR` (`none` / `None` → `None`):
+
+<TypeTable
+  type={{
+    filesystem: {
+      type: "'filesystem' | 'fs' | 'local'",
+      description: 'FilesystemConnector — il predefinito a zero dipendenze; percorre un path locale.',
+    },
+    in_memory: {
+      type: "'in_memory' | 'memory' | 'fixture'",
+      description: 'InMemoryConnector — documenti forniti in-process (test / fixture).',
+    },
+    http: {
+      type: "'http' | 'https' | 'url'",
+      description: 'HttpConnector — recupera via HTTP; richiede l\'extra [connectors] (httpx).',
+    },
+    notion: {
+      type: "'notion'",
+      description: 'NotionConnector — legge una sorgente Notion; richiede l\'extra [connectors] (httpx).',
+    },
+  }}
+/>
+
+### `RelationExtractor`
+
+`src/ragspine/graph/extractor.py` — lo slot opzionale per le relazioni narrative consumato da
+`build_relation_graph(..., relation_extractor=None)`. Con il `None` predefinito, il grafo di base
+è identico byte per byte (nessun arco aggiuntivo). Vedere [ADR 0015](/it/docs/decisions/adr-0015).
+
+<TypeTable
+  type={{
+    extract: {
+      type: '(chunks: Iterable[object]) -> tuple[GraphEdge, ...]',
+      description:
+        'Restituisce gli archi estratti dai chunk forniti. DeterministicRelationExtractor emette archi co_occurs_with basati su regole con tracciabilità pulita; LLMRelationExtractor (opzionale, [llm]) marca ogni arco con derived=model-derived + verified=unverified, sottopone entrambi gli estremi al SecurityGate e non lascia mai che testo RESTRICTED raggiunga il modello.',
+    },
+  }}
+/>
+
+Selezionate tramite `make_relation_extractor(spec=None, *, provider=None, profile=None, **kwargs)` o
+`RAGSPINE_RELATION_EXTRACTOR` (`none` → `None`; `deterministic` / `rule` / `cooccurrence` →
+il predefinito deterministico; `llm` / `on` → l'estrattore LLM, che degrada onestamente a `None`
+quando nessun provider è disponibile).
+
+<Callout type="warn">
+  Un arco estratto dal modello è **utile ma non attendibile**. `LLMRelationExtractor` scrive i
+  marcatori `derived=model-derived` e `verified=unverified` nei metadati di ogni arco, prende la
+  tracciabilità dal chunk (il chiamante) anziché dall'autodichiarazione del modello, e scarta qualsiasi arco il cui
+  estremo venga rifiutato dal `SecurityGate` deterministico. Una relazione asserita dal modello non può mai essere letta come un
+  fatto controllato e verificato.
+</Callout>
+
+## Implementare un Protocol e iniettarlo
+
+Poiché le interfacce sono strutturali, implementate il metodo (o i metodi) e passate l'istanza — nessuna
+registrazione, nessuna classe base. Ecco un `LLMProvider` basato su OpenAI, fondato sulla vera
+firma di `chat` e sul formato `ChatCompletion` (le dataclass provengono da `corespine` e sono
+riesportate da `ragspine.agent.llm_provider`):
+
+```python title="my_openai_provider.py"
+from typing import Any
+
+from openai import OpenAI  # lazy: only your file imports the SDK
+from corespine import ChatCompletion, Choice, ResponseMessage, Usage
+
+
+class OpenAIProvider:
+    """A custom LLMProvider — no subclassing, just the chat method."""
+
+    def __init__(self, model: str = "gpt-4o") -> None:
+        self._client = OpenAI()
+        self._model = model
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatCompletion:
+        # The messages are already in the OpenAI chat-completions shape, so they pass
+        # through; the SDK response is the same shape, so the mapping back is direct.
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools or [],  # adapt / omit as needed
+        )
+        choice = resp.choices[0]
+        message = ResponseMessage(role="assistant", content=choice.message.content)
+        u = resp.usage
+        usage = (
+            Usage(
+                prompt_tokens=u.prompt_tokens,
+                completion_tokens=u.completion_tokens,
+                total_tokens=u.total_tokens,
+            )
+            if u is not None
+            else None
+        )
+        return ChatCompletion(
+            choices=(Choice(index=0, message=message, finish_reason=choice.finish_reason or "stop"),),
+            usage=usage,
+            model=resp.model,
+            id=resp.id,
+        )
+```
+
+Iniettatelo esattamente dove andrebbe `MockProvider`:
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.storage.fact_store import SqliteFactStore
+from my_openai_provider import OpenAIProvider
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("...", store, OpenAIProvider())
+```
+
+<Callout type="warn">
+  La protezione di prevenzione delle risposte inventate del canale strutturato non si fida della prosa del provider per il numero — un
+  fatto trovato viene reso in modo deterministico a partire dal valore del fatto, e un risultato senza fatti viene riscritto come
+  "not found" indipendentemente dall'output del modello. Sostituire il provider non può aggirare la protezione.
+</Callout>

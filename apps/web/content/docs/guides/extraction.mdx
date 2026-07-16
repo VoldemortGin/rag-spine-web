@@ -107,7 +107,7 @@ excluded from color semantics because their fill cannot be trusted.
 
 Key methods: `get(cell_ref)`, `iter_cells()`, `add_warning(message)`, and
 `cells_by_rgb()` — which groups reliably-colored cells by `resolved_rgb`, skipping
-`None` and `cf_affected` cells. See the [StyledGrid IR concept](/docs/concepts/styled-grid).
+`None` and `cf_affected` cells. See [The StyledGrid IR](#the-styledgrid-ir).
 
 ## Extractors
 
@@ -244,7 +244,7 @@ adds a grid warning — unconfirmed mappings can never silently tag a fact.
 `(scope, version)`). Its API: `register_draft(mapping)` (auto-increments version per scope),
 `confirm(scope, version, actor, note=None)`, `reject(...)`, and `get_active(scope)`.
 Facts reference a confirmed mapping by its `mapping_version`, so the lineage survives
-revisions. See [color semantics](/docs/concepts/color-semantics).
+revisions. See [Color semantics](#color-semantics--clustering-legend-versioned-registry).
 
 ## Dual-channel verification
 
@@ -301,6 +301,6 @@ swapped without touching the ingest call site, and the path is testable offline 
 <Cards>
   <Card title="Ingestion guide" href="/docs/guides/ingestion" />
   <Card title="Storage guide — the Fact dataclass" href="/docs/guides/storage" />
-  <Card title="Concept: StyledGrid IR" href="/docs/concepts/styled-grid" />
+  <Card title="StyledGrid IR" href="/docs/guides/extraction#the-styledgrid-ir" />
   <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
 </Cards>

@@ -1,0 +1,135 @@
+---
+title: 'ADR 0014: Dify 工作流服务化（analyze / compile / run）与三层安全执行'
+description: 在现有 ragspine 服务上扩展三个信任级别递增的 Dify 端点——analyze 与 compile 始终可用，run 默认关闭，由静态导入门控、受限进程内沙箱以及（Linux）子进程隔离保护；provider 始终由服务端决定。
+---
+
+> 状态：**proposed** · 日期：2026-06-24
+
+> 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
+
+基于 [0013](/zh/docs/decisions/adr-0013)（Dify YAML → 纯 Python 编译器 + 静态
+优化顾问）。关联 [0009](/zh/docs/decisions/adr-0009)（不绑定框架 +
+仅限宽松许可证）、[0010](/zh/docs/decisions/adr-0010)（安全解耦），以及
+spine 家族边界 ADR（家族仓库，`docs/adr/0001`）。
+已随 **rag-spine 0.5.0** 发布。
+
+## 背景
+
+[ADR 0013](/zh/docs/decisions/adr-0013) 将 Dify `.yml` 编译为可读的纯 Python
+代码（`compile_dify_yaml` / `analyze`）。下一步是把这项能力放到**服务背后**，
+让消费者可以通过 HTTP 访问：获取优化建议、获取可读代码，甚至直接**运行**
+编译产物。运行他人提交的代码是一个**信任边界**问题——设计必须在
+"开箱即用"与"绝不轻率地 `exec`"之间找到一个安全的默认值。
+
+约束：复用现有的 ragspine 服务（app 工厂 / DI / RQ 队列 / 部署）——
+不建第二个服务；测试运行时零真实 LLM API（TestClient + `MockProvider`）；
+provider 由**服务端**环境变量决定（客户端不能注入 `provider_expr`——那会成为
+代码注入面）；家族全同步；`mypy --strict`、`filterwarnings=error`、pydantic
+仅用于边界。
+
+## 决策
+
+**在 ragspine 服务上扩展三个信任级别递增的端点；`run` 默认关闭，且执行时经过
+三层安全防护。**
+
+### 三个端点（`src/ragspine/service/api/routes.py`，编译器延迟导入）
+
+- `POST /v1/dify/analyze` — 仅做静态优化分析（不生成代码、不执行）。
+  **始终可用**；绝对安全。
+- `POST /v1/dify/compile` — 编译为纯 Python **代码字符串**（从不执行）。
+  **始终可用**；安全。
+- `POST /v1/dify/run` 与 `POST /v1/dify/run/jobs`（异步）— 编译 + **受限
+  执行**。这是**信任边界**：默认关闭
+  （`RAGSPINE_DIFY_RUN_ENABLED=false` → 403），只有显式的环境变量选择加入才能解锁；
+  provider 由服务端注入。
+
+错误整形：`DifyCompileError`（错误码 `dify.*`）→ 400；L0 静态门控的
+`DifyUnsafeError`（未执行任何代码）→ 422；执行 / 超时
+`DifyRunError` / `DifyTimeoutError` → 400；功能未启用 → 403。异步运行复用
+现有的 `GET /v1/jobs/{id}`。
+
+### 三层安全防护（`src/ragspine/service/dify/{safety,runner}.py` + `scripts/run_dify_workflow.py`）
+
+- **L0 —— 静态门控（不可绕过，先于执行）。** ① 非空的
+  `GeneratedCode.warnings`（`NotImplementedError` 骨架 / 不支持的节点）→ 拒绝
+  （422）；② 对生成源码的导入做 AST 遍历——任何白名单之外的顶层根模块
+  （仅允许 `__future__` / `dataclasses` / `typing` / `string` /
+  `concurrent` / `json` / `corespine` / `ragspine` / `spineagent`）→ 拒绝。白名单
+  刻意**不含**任何 I/O / 进程 / 网络模块
+  （os / sys / subprocess / socket / shutil / pathlib / importlib）。
+- **L1 —— 受限进程内沙箱。** 一个显式的**安全 builtins 白名单字典**
+  （纯计算 / 容器 / 序列化 + 生成代码使用的异常类型）、执行类/模块体所必需的
+  dunder（`__build_class__`），以及一个**受限的
+  `__import__`**（仅允许 L0 白名单内的根模块——即使动态的 `__import__('os')`
+  也会被拦截）；`open` / `eval` / `exec` / `compile` / `input` 等逃逸面
+  根本不会进入白名单。生成的模块会注册进 `sys.modules`（在
+  `from __future__ import annotations` 下，dataclass 的字符串注解解析需要它）。
+  **基于线程的软超时**（跨平台，不依赖 `SIGALRM`）。
+- **L2 —— 子进程隔离。** `isolation='subprocess'` → 在 Linux 上，使用独立子
+  进程（`Popen(cwd=private tmp)` + `communicate(timeout)` + `kill()` = 对失控
+  进程发 SIGKILL，另加 `resource.setrlimit` 限制 CPU 时间 / 地址空间 / 文件
+  创建）；子进程内部仍然应用 L1 受限沙箱。**非 Linux
+  （macOS / Windows）自动回退到 L1**（rlimit 在那些平台上不可靠，硬隔离收益
+  甚微）。
+
+### Provider 安全与隔离进程 / worker 中的自建 provider
+
+客户端**不能**传入 `provider_expr`（schema 中没有该字段；pydantic 会忽略额外
+字段）。生成的代码固定使用离线默认 provider；运行时由服务端通过
+`run_workflow(provider=...)` 覆盖。子进程 / RQ worker 通过
+`build_provider(provider_config_dict(config))` **自行构建** provider——绝不接收
+传入的 provider 实例或表达式——因此 provider 始终由服务端环境决定。
+
+落地位置：`src/ragspine/service/dify/{safety,runner}.py`、
+`service/tasks/jobs.py:run_dify_workflow_job`、`scripts/run_dify_workflow.py`、
+`service/api/{routes,schemas}.py`，以及 `service/config.py`
+（`dify_run_enabled` / `dify_run_timeout_s` / `dify_run_isolation` + `provider_config_dict`）。
+
+## 安全默认值（本轮全部接受，待评审）
+
+1. **所有安全默认值均已接受：** L0 静态门控 + L1 受限沙箱 + L2
+   子进程隔离全部落地；`run` 默认关闭，且默认使用离线 mock。
+2. **MVP 无认证：** HTTP 层不做认证（与现有的 `/v1/ask` 保持一致）。对外
+   暴露时必须在前面放置认证或网络白名单
+   （反向代理 / ingress）——已在部署各处显著标注
+   （README / `.env.example` / compose / helm values）。
+3. **诚实的沙箱边界：** L1 受限 builtins 是**纵深防御的其中一层**，
+   不是完整的沙箱；硬隔离来自 L2 子进程 + SIGKILL +
+   （Linux）rlimit。非 Linux 回退到 L1 后没有硬资源上限——已在
+   代码与文档中明确说明。
+
+## 已考虑并否决的备选方案
+
+- **`/run` 默认开启。** 否决——运行他人的编译产物是信任
+  边界；安全的默认值必须是关闭。开箱即用的价值由
+  analyze / compile 覆盖，二者绝对安全。
+- **黑名单式受限 builtins（移除危险名字）。** 否决——太容易
+  漏掉一个（初稿就漏了 `__build_class__`，导致 exec 下类定义失败）。
+  改用**显式白名单字典**：只放已知安全的名字，其余一律
+  默认拒绝。
+- **用 `signal.SIGALRM` 做 L1 超时。** 否决——仅限 Unix 且与
+  线程不兼容。改为基于线程的软超时（跨平台）+ L2 子进程 SIGKILL 硬
+  超时。
+- **在 L1 中执行 `os.chdir(tmp)`。** 否决（在实现中踩坑后移除）——
+  `os.chdir` 是进程级副作用；线程软超时无法杀死失控
+  线程，会让**整个进程**的 cwd 留在已删除的 tmp 目录中，并污染
+  之后的子进程创建。而在受限沙箱内，`open` / `os` / `pathlib` 本来就
+  不可达，所以 chdir 毫无收益却带来进程级风险。"在 tmp 内运行"的
+  语义移交给 L2 子进程的 `Popen(cwd=private tmp)`。
+- **允许客户端传入 `provider_expr`。** 否决——直接的代码注入面。
+  provider 由服务端环境决定；隔离进程 / worker 通过
+  `build_provider` 自行构建。
+
+## 后果
+
+- 服务新增三个端点（analyze / compile 安全且始终可用；run 是信任
+  边界，默认关闭）；复用 app 工厂 / DI / RQ 队列 / 部署——没有新
+  服务，没有新配置系统。
+- `[service]` extra 新增 PyYAML（dify 端点延迟导入编译器；pydantic
+  随 fastapi 一起提供）；核心 `dependencies` 保持不变。部署镜像安装
+  `.[service,vector,dify]`。
+- 受限执行始终经过 L0 + L1（Linux 上再加 L2）；provider 始终由
+  服务端决定，客户端永远无法注入。
+- 本记录状态为 **proposed**：安全默认值（无认证 MVP / 诚实的沙箱
+  边界）待评审；任何变更遵循"只替代不编辑"（新记录或状态
+  翻转）。

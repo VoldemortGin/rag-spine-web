@@ -1,0 +1,166 @@
+---
+title: Pipeline
+description: Esportazione del PipelineGraph statico del motore e in cosa differisce dal protocollo v1 di anteprima del flusso di lavoro a sola visualizzazione.
+---
+
+Il dominio `pipeline` (`src/ragspine/pipeline/`) è la risposta code-first di RAGSpine all'unica
+cosa che i framework a grafo (Dify, LangGraph) offrono e che un motore in puro Python altrimenti
+non offre: un **diagramma visuale della pipeline**. Invece di un DSL a grafo che scrivi e poi
+speri corrisponda alla realtà, RAGSpine _deriva_ un `PipelineGraph` statico dal cablaggio reale e
+lo emette come Mermaid, DOT o JSON.
+
+È piccolo, a livello foglia e rigorosamente di sola lettura: non importa nulla dall'orchestratore
+(tutta l'introspezione è duck-typing `getattr`), quindi non può mai perturbare il sistema che
+descrive.
+
+<Callout type="info">
+  Questo modello di topologia del motore è distinto dall'[anteprima del flusso di lavoro
+  v1](/it/docs/guides/workflows#protocollo-di-preview-v1). `PipelineGraph` descrive componenti RAGSpine
+  assemblati ed esporta Mermaid/DOT/JSON. Un'anteprima del flusso di lavoro descrive un singolo flusso di lavoro compatibile con Dify
+  con nodi, archi e geometria redatti. Entrambi sono di sola lettura; nessuno dei due è un formato di esecuzione.
+</Callout>
+
+## Struttura
+
+<Files>
+  <Folder name="pipeline" defaultOpen>
+    <File name="graph.py" />
+    <File name="topology.py" />
+  </Folder>
+</Files>
+
+`graph.py` è il livello dei valori a zero dipendenze (dataclass congelate + esportatori);
+`topology.py` contiene i tre builder che leggono la composizione live. L'API pubblica
+riesporta sei nomi: `Node`, `Edge`, `PipelineGraph`, `agent_topology`,
+`retriever_topology`, `service_topology`.
+
+## Il modello dei valori
+
+`graph.py` definisce tre dataclass congelate:
+
+<TypeTable
+  type={{
+    Node: {
+      type: 'id, label, kind, domain=None, symbol=None',
+      description:
+        'Un nodo della pipeline. kind ∈ stage | store | external | gate | channel. symbol è un percorso di import puntato usato dalla guardia anti-drift (None per i nodi concettuali).',
+    },
+    Edge: {
+      type: 'src, dst, label=None, kind="flow"',
+      description:
+        'Un arco orientato. kind ∈ flow | conditional | data. label ad es. "route=structured" / "hit" / "miss".',
+    },
+    PipelineGraph: {
+      type: 'title, nodes: tuple[Node], edges: tuple[Edge]',
+      description: 'Un grafo immutabile più i suoi esportatori.',
+    },
+  }}
+/>
+
+`PipelineGraph` fornisce tre esportatori e un combinatore:
+
+| Metodo                          | Restituisce         | Output                                                                                                            |
+| ------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `to_mermaid(*, direction="TD")` | `str`           | Un `flowchart` — la forma del nodo è scelta da `kind` (gate `{}`, store `[(...)]`, channel `([...])`, altrimenti un rettangolo). |
+| `to_dot()`                      | `str`           | Un `digraph` Graphviz (`rankdir=TB`).                                                                              |
+| `to_dict()`                     | `dict`          | `{title, nodes[...], edges[...]}` serializzabile in JSON con round-trip.                                                           |
+| `merge(other, *, group=None)`   | `PipelineGraph` | Deduplica i nodi per id (vince il primo), mantiene tutti gli archi; opzionalmente etichetta i nodi aggiunti con `domain=group`.                  |
+
+<Callout type="info">
+  Le esportazioni sono **deterministiche e identiche byte per byte** tra le esecuzioni (ordine di dichiarazione stabile). Il raggruppamento
+  `domain` effettua il round-trip attraverso `to_dict`, ma nella v1 `to_mermaid` / `to_dot` non emettono
+  blocchi subgraph/cluster.
+</Callout>
+
+## I tre builder
+
+`topology.py` deriva un grafo dalla composizione live in duck-typing — un nodo compare solo quando
+il suo componente è effettivamente cablato.
+
+<Cards>
+  <Card
+    title="agent_topology(*, narrative_retriever=None)"
+    description="Il flusso completo della richiesta: parse_intent → clarify_scope (consulta il SecurityGate tramite un arco dati) → rombo di route → rami structured / narrative / composite. I nodi narrativi compaiono solo quando viene iniettato un narrative_retriever."
+  ></Card>
+  <Card
+    title="retriever_topology(retriever)"
+    description="La sotto-pipeline dell'HybridRetriever: prefilter → BM25 [+vector] [+multi-query] → RRF → top_k. Il nodo vector compare se e solo se retriever.embedding_backend è impostato; il nodo multi-query se e solo se query_rewriter è impostato. Il reranking è deliberatamente escluso da questo sottografo."
+  ></Card>
+  <Card
+    title="service_topology(app)"
+    description="La topologia del servizio: short-circuit FAQ a monte dell'agent, più il percorso di ingestione asincrona (routes → queue → jobs). In duck-typing su app.state.faq_cache e app.state.queue."
+  ></Card>
+</Cards>
+
+<Callout type="info">
+  `HybridRetriever.topology()` (nel dominio [retrieval](/it/docs/guides/retrieval)) è un sottile
+  delegatore verso `retriever_topology` — così un retriever configurato può renderizzare se stesso senza che il
+  pacchetto pipeline importi l'orchestratore.
+</Callout>
+
+## La CLI — `scripts/topology.py`
+
+`scripts/topology.py` renderizza una qualsiasi delle tre topologie offline e in modo deterministico (costruisce
+assemblaggi di default/mock — niente Redis, nessuna API key). Eseguila dalla radice del progetto:
+
+```bash
+python scripts/topology.py                                  # agent → Mermaid → stdout
+python scripts/topology.py --which retriever --of dot
+python scripts/topology.py --of json --out docs/generated/topology.json
+```
+
+Flag:
+
+- `--of {mermaid,dot,json}` — formato di output (default `mermaid`).
+- `--which {agent,retriever,service}` — quale topologia (default `agent`).
+- `--out PATH` — scrive su un file (crea le directory padre); ometti per stampare su stdout. Scrivere nella
+  directory `docs/generated/` ignorata da git mantiene puliti i diff dei diagrammi rigenerati.
+
+Dietro le quinte la CLI costruisce ogni topologia da un assemblaggio di default/offline: `retriever` →
+`retriever_topology(HybridRetriever([]))` (uno scheletro puro-BM25 su un corpus vuoto);
+`service` → `create_app(...)` con `MockProvider` / `FakeQueue` / `FAQCache` vuoto, poi
+`service_topology(app)`; `agent` → `agent_topology(narrative_retriever=object())` (una
+sentinella affinché i rami narrative/composite siano visibili).
+
+## API Python
+
+```python
+from ragspine.pipeline import agent_topology
+
+graph = agent_topology(narrative_retriever=object())
+print(graph.to_mermaid())   # Mermaid flowchart string
+print(graph.to_dot())       # Graphviz digraph string
+
+import json
+print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
+```
+
+## Vedi anche
+
+<Cards>
+  <Card
+    title="Agente"
+    href="/it/docs/guides/agent"
+    description="Il flusso della richiesta renderizzato da agent_topology."
+  />
+  <Card
+    title="Recupero"
+    href="/it/docs/guides/retrieval"
+    description="L'HybridRetriever il cui .topology() delega qui."
+  />
+  <Card
+    title="Servizio"
+    href="/it/docs/guides/service"
+    description="L'app FastAPI che service_topology introspetta."
+  />
+  <Card
+    title="CLI e script"
+    href="/it/docs/getting-started/cli-and-scripts"
+    description="topology.py e gli altri script nella radice del repo."
+  />
+  <Card
+    title="Anteprima del flusso di lavoro"
+    href="/it/docs/guides/workflows#protocollo-di-preview-v1"
+    description="La proiezione del grafo versionata e redatta renderizzata dal sito web dei template."
+  />
+</Cards>

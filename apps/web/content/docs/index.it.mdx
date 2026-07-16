@@ -1,0 +1,105 @@
+---
+title: Introduzione
+description: RAGSpine è un motore RAG Python offline-first con recupero deterministico a doppio canale, provenienza, scaffolding del flusso di lavoro e superfici opzionali di compatibilità HTTP.
+---
+
+**RAGSpine** è un motore RAG backend indipendente dai framework, assemblato con normali funzioni Python
+e `Protocol` tipizzati. Il suo canale strutturato risponde alle domande la cui evidenza è una tabella di fatti;
+il suo canale narrativo recupera testo citato. L'orchestratore instrada tra i due e sostituisce una
+risposta non supportata con un rifiuto esplicito. Un `MockProvider` deterministico mantiene il percorso di base
+utilizzabile senza una chiave API.
+
+RAGSpine include ora anche strumenti per i flussi di lavoro. Il comando `ragspine` può trasformare una descrizione
+in linguaggio naturale in un flusso di lavoro Dify 0.6 sicuro, riutilizzare un template incluso simile, serializzare JSON o YAML
+ed emettere un'anteprima versionata del grafo. I documenti di flusso di lavoro JSON, YAML e TOML possono essere normalizzati in una
+mappatura compatibile con JSON. Questi strumenti di compatibilità non trasformano il motore in Dify o n8n, e
+il runtime non scarica né esegue mai un flusso di lavoro proveniente dal marketplace a monte.
+
+## Cosa viene garantito
+
+- **Nessun valore non supportato.** Una ricerca strutturata fallita diventa `not_found`, indipendentemente dalla
+  prosa del modello.
+- **Tracciabilità delle fonti.** I fatti e gli estratti narrativi conservano le informazioni sul documento e sul locatore.
+- **Isolamento dei contenuti riservati.** I nodi figli riservati vengono rimossi prima dell'assemblaggio del prompt;
+  l'espansione parent/window non può reintrodurli.
+- **Esecuzione esplicita.** Lo scaffolding del flusso di lavoro, il parsing, la conversione, la compilazione e l'anteprima sono
+  operazioni non esecutive. Le rotte di esecuzione di Dify e n8n sono disabilitate per impostazione predefinita.
+- **Estremità collegabili.** Provider, embedding, store, reranker, chunker, code, connettori e
+  altre integrazioni entrano attraverso interfacce tipizzate.
+
+## Da dove iniziare
+
+<Cards>
+  <Card
+    title="Installazione"
+    href="/it/docs/getting-started/installation"
+    description="Installa il pacchetto base o un insieme preciso di funzionalità opzionali."
+  />
+  <Card
+    title="Guida rapida"
+    href="/it/docs/getting-started/quickstart"
+    description="Esegui offline, crea lo scaffolding di un flusso di lavoro e avvia il servizio opzionale."
+  />
+  <Card
+    title="Guida ai flussi di lavoro"
+    href="/it/docs/guides/workflows"
+    description="Catalogo, corrispondenza, formati, conversione Dify/n8n, anteprima v1 e confini di sicurezza."
+  />
+  <Card
+    title="Recupero"
+    href="/it/docs/guides/retrieval"
+    description="Recupero economy, ibrido, filtrato per metadati, multi-indice e parent-child."
+  />
+  <Card
+    title="API HTTP"
+    href="/it/docs/reference/http-api"
+    description="Endpoint del motore, del catalogo, compatibili con Dify e compatibili con n8n."
+  />
+  <Card
+    title="Architettura"
+    href="/it/docs/architecture/overview"
+    description="Domini, direzione delle dipendenze e confine di esecuzione."
+  />
+</Cards>
+
+## Versione del repository e pacchetto pubblicato
+
+La documentazione attuale segue il sorgente `main` del repository, i cui metadati di pacchetto sono
+`0.11.0`. Quel numero è una versione dell'albero dei sorgenti, non un'affermazione che PyPI serva già la 0.11.0.
+Per un comportamento rilasciato riproducibile, verifica la versione selezionata dal tuo gestore di pacchetti con
+`ragspine version`; usa un'installazione editabile dai sorgenti quando segui la documentazione `main` non ancora rilasciata.
+
+## Domini principali
+
+<Cards>
+  <Card
+    title="Estrazione"
+    href="/it/docs/guides/extraction"
+    description="Dai documenti a una rappresentazione intermedia che preserva la tracciabilità."
+  />
+  <Card
+    title="Ingestione"
+    href="/it/docs/guides/ingestion"
+    description="Fatti strutturati e chunk narrativi, in modo idempotente."
+  />
+  <Card
+    title="Archiviazione"
+    href="/it/docs/guides/storage"
+    description="Store SQLite per fatti, chunk, mappature, code e manifest."
+  />
+  <Card
+    title="Agente"
+    href="/it/docs/guides/agent"
+    description="Intento, chiarimento, uso degli strumenti, cronologia e guardia deterministica."
+  />
+  <Card
+    title="Servizio"
+    href="/it/docs/guides/service"
+    description="Radice di composizione FastAPI e coda asincrona opzionale."
+  />
+  <Card
+    title="Pipeline"
+    href="/it/docs/guides/pipeline"
+    description="Topologia statica del motore e proiezioni di anteprima del flusso di lavoro."
+  />
+</Cards>

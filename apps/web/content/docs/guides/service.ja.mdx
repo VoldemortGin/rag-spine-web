@@ -1,0 +1,135 @@
+---
+title: サービス
+description: FastAPI の構成、非同期インジェスト、ワークフローカタログと互換 API、認証境界、およびデフォルト無効の実行。
+---
+
+`ragspine.service` は、エンジンの上に置かれるオプションのコンポジションルートです。`[service]` を
+インストールすると、FastAPI、uvicorn、RQ、Redis のサポートが得られます。サービスはリクエスト/ジョブが
+所有するストアを開き、型付けされた縫い目（seam）を通じてプロバイダーとマッチャーを注入し、
+トレースバックを含まない不透明なエラーを返します。
+
+## アプリファクトリ
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config=None,
+    provider=None,
+    queue=None,
+    faq_cache=None,
+    workflow_matcher=None,
+)
+```
+
+省略された依存関係は `ServiceConfig.from_env()` から組み立てられます。インスタンスは
+`app.state` に保持されるため、テストでの差し替えも容易です。`studio_dir` が既存のディレクトリを
+指している場合、その静的ビルドが `/studio` にマウントされます。空のディレクトリや存在しない
+ディレクトリの場合、このルートは追加されません。
+
+## エンドポイントグループ
+
+| グループ                    | パス                                                              | 処理を実行するか？                          | 認証                                         |
+| -------------------------- | ----------------------------------------------------------------- | -------------------------------------- | ------------------------------------------- |
+| エンジン                    | `/healthz`、`/readyz`、`/v1/ask*`、インジェスト/ジョブ               | ask とキュー操作                          | 組み込みなし                                  |
+| カタログ                    | `/v1/workflow-templates*`、`/v1/workflow-scaffold`                | いいえ                                   | 組み込みなし                                  |
+| コンパイラ/コンバーター       | `/v1/dify/analyze`、`/compile`、`/v1/n8n/convert`、`/v1/topology` | いいえ                                   | 組み込みなし                                  |
+| 内部実行                    | `/v1/dify/run*`、`/v1/n8n/run`                                    | はい（有効化時）                           | 実行フラグ。独自の認証の背後にデプロイすること   |
+| Dify 互換公開 API           | `/v1/workflows/run*`、`/v1/info`、`/v1/parameters`                | 有効化時に run ルートを実行                 | Bearer アプリキー                             |
+| n8n 互換公開 API            | `/api/v1/*`                                                       | CRUD。有効化時に Webhook が実行可能        | `X-N8N-API-KEY`                             |
+| n8n Webhook                | `/webhook/{path}`                                                 | 有効化時、マッチしたアクティブなワークフロー  | 意図的になし                                  |
+
+汎用エンジンおよび内部 `/v1/dify/*` ルートには、ユーザー認証は用意されていません。公開する前に、
+localhost/プライベートネットワークにバインドするか、認証付きリバースプロキシを追加してください。
+
+## エンジンとインジェスト
+
+`POST /v1/ask` と `/v1/ask/stream` は、FAQ ゲート、インテント/セキュリティ判定、検索、
+捏造防止のためのリライト、出典追跡情報の組み立てを実行します。SSE エンドポイントは、
+ストリームを開く前にすべてのガードを完了します。`AskRequest.history` はあくまでオプションの
+生成コンテキストであり、検索の根拠になることはありません。
+
+構造化インジェストは `.xlsx`、`.xlsm`、`.pptx`、`.pdf` を受け付けます。ナラティブジョブは
+`.pptx` と `.pdf` を受け付けます。`RAGSPINE_ALLOWED_UPLOAD_ROOT` が解決後のパスを制約します。
+API はドット区切りのジョブ参照をキューに投入し、ワーカーがパスを再検証し、自身の SQLite
+接続を自ら管理します。
+
+`FakeQueue` はテスト用の同期・インメモリ実装です。`RQQueue` は Redis バックエンドの本番用
+アダプターです。キューのステータスは `queued`、`started`、`finished`、`failed` で、レポートには
+件数/ステータスのみが含まれ、ファクトの生の値やチャンクのテキストは含まれません。
+
+## ワークフローカタログとコンパイラ
+
+カタログの一覧ページにはメタデータのみが含まれます。詳細レスポンスとひな形生成レスポンスには、
+正規化されたワークフロー、Dify YAML、プレビュー v1 が追加されます。ワークフローのひな形生成は、
+セマンティックマッチング、字句マッチングへのフォールバック、または固定グラフの生成を行うことが
+ありますが、出力を実行することは決してありません。
+
+Dify の analyze/compile のリクエストボディには、正規化された `workflow` オブジェクトまたは
+レガシーな `yaml` 文字列のちょうど一方だけを含めます。未知のフィールドは拒否されます。
+analyze は静的解析のみです。compile は Python コード文字列を返し、それを実行することは
+決してありません。n8n 変換も同様に純粋であり、明示的な互換性警告を返します。
+
+一部のワークフロー POST リクエストのボディは、FastAPI がバッファリングする前に 2 MiB に
+制限されます。対象は `/v1/workflow-scaffold` と `/v1/dify/{analyze,compile,run,run/jobs}` です。
+デコード後のワークフロードキュメントには、より厳しい 1 MiB のパーサー制限が適用されます。
+バリデーションエラーのレスポンスからは、Pydantic がエコーする `input` および `ctx` フィールドが
+除去されるため、拒否されたシークレットが反射されることはありません。
+
+## デフォルト無効の実行
+
+`RAGSPINE_DIFY_RUN_ENABLED` のデフォルトは `false` です。明示的に有効化されるまで、
+`/v1/dify/run`、`/v1/dify/run/jobs`、`/v1/n8n/run`、Dify 互換のワークフロー実行、および n8n
+Webhook 実行はフェイルクローズ（安全側で拒否）します。プロバイダー、モデル、ベース URL、
+Dify アプリのワークフローファイルはサーバー設定から供給され、クライアントがプロバイダー式や
+キーを注入することはできません。
+
+実行はコンパイルされ、L0 静的ゲートによって検査されます。デフォルトの `inprocess` 分離は、
+制限付きの builtins/imports とタイムアウトを適用しますが、OS レベルのサンドボックスでは
+ありません。`subprocess` は Linux のリソース制限を追加します。macOS と Windows では
+インプロセスの制限にフォールバックします。信頼できないワークフローの実行は、別途強化された
+サービス境界として扱ってください。
+
+## Dify 互換公開 API
+
+`RAGSPINE_DIFY_PUBLIC_APPS` は、
+`app-key=/srv/workflows/support.yml;other-key=/srv/workflows/report.yml` のような
+セミコロン区切りのレジストリです。リクエストには `Authorization: Bearer app-key` を使用します。
+レジストリが存在しない、無効である、またはキーが未知の場合、これらのルートは `401` を返します。
+
+この API は `POST /v1/workflows/run`、`GET /v1/workflows/run/{id}`、`GET /v1/info`、
+`GET /v1/parameters` をサポートします。run リクエストでは `inputs`、`user`、`response_mode` を
+指定します。ワークフロー自体は指定しません。ストリーミングは実行後に SSE を使用し、トレース
+イベントを再生します。run の詳細データは、直近 100 件の run を保持するプロセスローカルの LRU で
+あり、アプリキーごとに分離されています。永続的な履歴ではありません。
+
+## n8n 互換公開 API と Webhook
+
+`RAGSPINE_N8N_API_KEY` を設定し、クライアントは `X-N8N-API-KEY` を送信します。キーが設定されて
+いない場合、すべての `/api/v1/*` リクエストは `401` を返します。ワークフローの CRUD とアクティブ化、
+および実行の一覧/取得/削除は、ファイルシステムのルート `RAGSPINE_N8N_STORE_PATH`（デフォルトは
+`data/n8n_store`）によって支えられています。一覧の limit はデフォルト 100 で、1〜250 に
+クランプされ、カーソルを使用します。
+
+`GET|POST /webhook/{path}` には、Webhook の挙動に合わせて意図的に API キーチェックがありません。
+このルートはアクティブなワークフローの Webhook ノードにのみマッチし、実行が有効化されている
+ことを依然として要求します。クエリパラメータと JSON オブジェクトのボディが inputs を構成し、
+重複する場合はボディのキーが優先されます。このルートの前段には、イングレス制御、TLS、
+レート制限、リクエストサイズポリシーを配置してください。
+
+## サービスの起動
+
+リポジトリのルートから:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+RAGSPINE_CHUNK_DB_PATH=data/chunks.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+
+# separate process; Redis required
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```
+
+正確なルートについては [HTTP API](/ja/docs/reference/http-api) を、環境変数の一覧については
+[設定](/ja/docs/reference/configuration) を参照してください。

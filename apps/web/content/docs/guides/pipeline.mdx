@@ -1,6 +1,6 @@
 ---
 title: Pipeline
-description: Pipeline-topology export — derive a static PipelineGraph from RAGSpine's real wiring and render it as Mermaid, DOT, or JSON, via the agent / retriever / service builders and the topology.py CLI.
+description: Static engine PipelineGraph export, and how it differs from the display-only workflow preview v1 protocol.
 ---
 
 The `pipeline` domain (`src/ragspine/pipeline/`) is RAGSpine's code-first answer to the one
@@ -12,6 +12,13 @@ emits it as Mermaid, DOT, or JSON.
 It is small, leaf-level, and strictly read-only: it imports nothing from the orchestrator
 (all introspection is `getattr` duck-typing), so it can never perturb the system it
 describes.
+
+<Callout type="info">
+  This engine-topology model is distinct from [workflow preview
+  v1](/docs/guides/workflows#preview-protocol-v1). `PipelineGraph` describes assembled RAGSpine
+  components and exports Mermaid/DOT/JSON. A workflow preview describes one Dify-compatible workflow
+  with redacted nodes, edges, and geometry. Both are read-only; neither is an execution format.
+</Callout>
 
 ## Layout
 
@@ -150,5 +157,10 @@ print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
     title="CLI & scripts"
     href="/docs/getting-started/cli-and-scripts"
     description="topology.py and the other repo-root scripts."
+  />
+  <Card
+    title="Workflow preview"
+    href="/docs/guides/workflows#preview-protocol-v1"
+    description="The versioned, redacted graph projection rendered by the template website."
   />
 </Cards>

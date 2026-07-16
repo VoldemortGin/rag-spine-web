@@ -1,0 +1,311 @@
+---
+title: 抽出（Extraction）
+description: ドキュメントを frozen な StyledGrid IR へ。スタイルと色を認識する xlsx/pptx/pdf 抽出器、ページ単位の PDF ルーティング、バージョン管理されたカラーセマンティクスレジストリ、そしてレビューキューへ流れ込む二重チャネルのクロスチェック。
+---
+
+**extraction** ドメインは、オフィスドキュメントを frozen でスタイルを認識する中間表現
+（**StyledGrid IR**）へと変換します — 単なる「テキスト分割」ではありません。すべての抽出器は
+決定的処理を最優先とし、色とスタイルを認識し、ファクトを直接生成するか、下流のインジェスト向けに
+`StyledGrid` を出力します。重量級のパーサー（Docling、PaddleOCR）は `Protocol` シームの背後に
+置かれ、遅延インポートされるため、コアはオフラインで動作します。
+
+<Callout type="info">
+  このパッケージは `src/ragspine/extraction/` にあります。ドメインごとの契約は
+  `src/ragspine/extraction/CLAUDE.md` です。IR（`ir.py`）はコード内で*プロジェクト全体で最も安定した
+  インターフェース*と説明されています — 抽出器はこの IR に収束し、下流のすべて（カラーセマンティクス、
+  インジェスト、レビュー、評価）がこれを消費します。
+</Callout>
+
+## レイアウト
+
+<Files>
+  <Folder name="extraction" defaultOpen>
+    <File name="ir.py — StyledGrid IR（StyledCell / StyledGrid）" />
+    <Folder name="extractors">
+      <File name="xlsx_extractor.py — 決定的な Facts" />
+      <File name="xlsx_styled_extractor.py — StyledGrid（テーマ/tint の RGB）" />
+      <File name="pptx_extractor.py — 決定的な Facts（MVP）" />
+      <File name="pptx_styled_extractor.py — StyledGrid + NoteFragment" />
+      <File name="pdf_digital_extractor.py — GridExtractor シーム（Docling）" />
+      <File name="pdf_scanned_extractor.py — OcrBackend シーム（OCR/VLM）" />
+    </Folder>
+    <Folder name="color">
+      <File name="color_semantics.py — クラスタリング、凡例、MappingRegistry" />
+    </Folder>
+    <Folder name="routing">
+      <File name="pdf_router.py — ページ単位のトリアージ → RoutingDecision" />
+    </Folder>
+    <Folder name="verification">
+      <File name="dual_channel_verifier.py — クロスチェック → レビューキュー" />
+    </Folder>
+  </Folder>
+</Files>
+
+## StyledGrid IR
+
+`ir.py` は 2 つの dataclass を定義します。`StyledGrid` は 1 つのワークシートまたは 1 つの表ページ
+であり、その `cells` は `cell_ref` から `StyledCell` への疎なマップです。
+
+### `StyledCell`
+
+スタイルを認識する単一のセルです。
+
+<TypeTable
+  type={{
+    value: { type: 'object', description: 'セルの値。' },
+    cell_ref: { type: 'str', description: "Excel 形式の 'C4'、またはグリッド形式の 'R{row}C{col}'。" },
+    resolved_rgb: {
+      type: 'str | None',
+      default: 'None',
+      description: "塗りつぶし色（'RRGGBB' 形式）、または None。",
+    },
+    number_format: { type: 'str', default: '"General"', description: 'OOXML の数値書式。' },
+    bold: { type: 'bool', default: 'False' },
+    is_merged_origin: { type: 'bool', default: 'False' },
+    merge_span: { type: 'tuple[int, int] | None', default: 'None' },
+    cf_affected: {
+      type: 'bool',
+      default: 'False',
+      description: '条件付き書式の領域内 — 色は信頼できない。',
+    },
+    confidence: {
+      type: 'float | None',
+      default: 'None',
+      description: 'OCR チャネルのみ。決定的抽出では None。',
+    },
+  }}
+/>
+
+`StyledCell.rgb_tag_key()` は色クラスタリング用のキーを返します。`cf_affected` の場合は `None`、
+それ以外は `resolved_rgb` です。条件付き書式の領域内のセルは、その塗りつぶしを信頼できないため、
+カラーセマンティクスから意図的に除外されます。
+
+### `StyledGrid`
+
+<TypeTable
+  type={{
+    sheet: {
+      type: 'str',
+      description: "ワークシートのタイトル、または 'page{N}_table{M}' / 'slide{N}_table{M}'。",
+    },
+    source_doc_id: { type: 'str' },
+    source_file_hash: {
+      type: 'str | None',
+      default: 'None',
+      description: 'ソースファイルの sha256 — バージョン系譜。',
+    },
+    cells: {
+      type: 'dict[str, StyledCell]',
+      default: '{}',
+      description: 'cell_ref → StyledCell の疎なマップ。',
+    },
+    warnings: { type: 'list[str]', default: '[]' },
+    n_rows: { type: 'int', default: '0' },
+    n_cols: { type: 'int', default: '0' },
+  }}
+/>
+
+主要メソッドは `get(cell_ref)`、`iter_cells()`、`add_warning(message)`、そして
+`cells_by_rgb()` — これは信頼できる色付きセルを `resolved_rgb` でグループ化し、
+`None` と `cf_affected` のセルはスキップします。[StyledGrid IR](#styledgrid-ir) を参照してください。
+
+## 抽出器
+
+設計上、抽出のターゲットは 2 種類あります。
+
+- **ファクト抽出器**（`xlsx_extractor`、`pptx_extractor`）は、既知のスキーマ
+  （例: 5 か年サマリー表）に対して
+  [`Fact`](/ja/docs/guides/storage#fact-データクラス) オブジェクトを直接生成します
+  — 捏造ゼロ、LLM ゼロ。
+- **スタイル抽出器**（`*_styled_extractor`、`pdf_*`）は、汎用のインジェストパス向けに、
+  色とスタイルを保持した `StyledGrid` IR を生成します。
+
+<Tabs items={["xlsx", "pptx", "pdf（デジタル）", "pdf（スキャン）"]}>
+<Tab value="xlsx">
+
+`xlsx_styled_extractor.extract_grids(path)` はワークシートごとに 1 つの `StyledGrid` を返します。
+OOXML の**テーマ + tint** を実際の `RRGGBB` 値へ解決し（`resolve_theme_color`）、結合セルを展開し、
+数値書式を保持し、条件付き書式の領域を検出します — 該当セルに `cf_affected=True` を付け、
+カラーレイヤーがそれらをスキップできるようグリッドに警告を追加します。`compute_file_hash(path)` は
+バージョン系譜に使われる sha256 を返します（PDF ルーターでも再利用されます）。
+
+よりシンプルな `xlsx_extractor.extract_facts(path) -> tuple[list[Fact], list[str]]` は、既知の
+サマリースキーマ（A 列に指標名、1 行目に期間ヘッダー）をそのまま `Fact` オブジェクトへ
+マッピングし、デフォルトで `channel="TOTAL"` と `unit="USD_M"` を設定します。
+
+```python
+from ragspine.extraction.extractors.xlsx_styled_extractor import extract_grids
+
+grids = extract_grids("report.xlsx")        # list[StyledGrid], one per sheet
+for cell in grids[0].iter_cells():
+    print(cell.cell_ref, cell.value, cell.resolved_rgb)
+```
+
+</Tab>
+<Tab value="pptx">
+
+2 つのモジュールが共存しています。`pptx_extractor.extract_facts(path)` はネイティブの表と
+**ネイティブのチャートデータ**（チャート XML から読み取り、画像からは決して読まない）を
+`Fact` オブジェクトへ読み込みます — OCR ゼロ、LLM ゼロ。より新しい `pptx_styled_extractor` は
+2 つのパスを追加します。
+
+- `extract_grids(path)` — ネイティブの表 → `StyledGrid`（sheet は `'slide{N}_table{M}'`、
+  cell_ref は `'R{row}C{col}'`）。塗りつぶし色はスライドのテーマカラースキーム経由で解決します。
+- `extract_note_fragments(path) -> list[NoteFragment]` — **数字を含む**テキストボックスと
+  スピーカーノートのフラグメントを、スライド順にソートして、ナラティブレイヤー向けに返します。
+
+`NoteFragment` は `slide_no`、`source_kind`（`"textbox"` / `"notes"`）、`locator`
+（例: `'slide2/notes'`）、`text`、`glossary_hits` を持ちます。スタンプ定数は
+`EXTRACTOR_VERSION = "pptx_styled_v0"` です。
+
+</Tab>
+<Tab value="pdf（デジタル）">
+
+`pdf_digital_extractor.extract_grids(path)` は、**Docling** をラップして*デジタル* PDF の
+すべての表を抽出します（表ごとに 1 つの `StyledGrid`）。Docling は関数本体の内部で遅延インポート
+され、モジュールのトップレベルでは決してインポートされません。このチャネルでは `resolved_rgb` は
+常に `None` です。スキャン済み・読み取り不能・表なしの PDF は、例外も OCR も発生させずに `[]` を
+返します。Docling は `do_ocr=False`、`do_table_structure=True` で構成されます。
+
+このモジュールは `GridExtractor` シームも定義しています — [後述](#protocol-シーム)を参照してください。
+
+</Tab>
+<Tab value="pdf（スキャン）">
+
+`pdf_scanned_extractor.extract_grids(path, backend, *, min_confidence=0.85, queue=None)` は
+ページを PNG にレンダリングし（`pypdfium2`、`RENDER_DPI = 200`）、注入された
+`OcrBackend.recognize` を呼び出し、認識された表ごとに 1 つの `StyledGrid` を構築します。
+低信頼度のセル（`confidence < min_confidence`）もグリッドには入りますが、グリッドに警告が追加され、
+`queue` が渡されている場合は、理由 `"low_confidence_ocr"`、`priority=30` でレビュー用にキューへ
+登録されます。
+
+中立的な結果型は `OcrCell`（`row`、`col`、`text`、`confidence`）、`OcrTable`、`OcrPageResult`
+です。実バックエンドの `PaddleOcrVlBackend`（PaddleOCR の `PPStructureV3`、GPU）は pytest の
+`gpu` マーカーの背後に置かれ、モジュール非依存のロジックはフェイクバックエンドを使ってオフラインで
+テストされます。スタンプ: `EXTRACTOR_VERSION = "pdf_scanned_paddleocrvl_v0"`。
+
+</Tab>
+</Tabs>
+
+## PDF ルーティング — ページ単位のトリアージ
+
+抽出の前に、PDF はページごとにトリアージされます。`routing/pdf_router.route(path)` は、ファイルの
+`verdict`、ページごとの `PageInfo`、そして _mixed_ なファイルの場合には各ページ番号を
+パイプライン名にマッピングする `channel_plan` を持つ `RoutingDecision` を返します。
+
+`classify_page(page, page_no)` は、抽出可能なテキスト文字数と画像カバー率という 2 つのシグナルを、
+`TEXT_MIN_CHARS = 50` と `IMG_COVER_SCAN = 0.55` に照らして、ページ単位の `kind` を導出します。
+
+| 文字数 | 画像カバー率 | kind       |
+| ------ | ------------ | ---------- |
+| `≥ 50` | `< 0.55`     | `digital`  |
+| `≥ 50` | `≥ 0.55`     | `ocr_scan` |
+| `< 50` | `≥ 0.55`     | `img_scan` |
+| `< 50` | `< 0.55`     | `low_text` |
+
+`route()` は 90% のしきい値でページをファイルの verdict（`digital` / `scanned` / `ocr_scan` /
+`mixed` / `unreadable`）へ集約し、producer/creator メタデータを `origin_meta` に読み込み、
+producer が PowerPoint / Keynote / Impress からのエクスポートと見られる場合は
+`ask_for_pptx=True` を設定します（呼び出し側が代わりにネイティブのソースを要求できるように）。
+暗号化された、または破損したファイルは `error` を設定した `verdict="unreadable"` を返します —
+決して例外を投げません。
+
+<Callout type="warn">
+  `digital` にルーティングされたページは `digital_extractor` パイプラインへ進みます。それ以外の kind
+  （スキャン / OCR / 低テキスト）はすべて `scanned_extractor` へ進みます。ルーターは*判断する*だけです —
+  実際の処理は対応する抽出器が行います。
+</Callout>
+
+## カラーセマンティクス — クラスタリング、凡例、バージョン管理されたレジストリ
+
+`color/color_semantics.py` は **L2 制御下推論**レイヤーです。セルの塗りつぶし色をビジネス上の
+意味へマッピングしますが、それは人間がマッピングを確認した後に限られます。パイプラインは次の
+とおりです。
+
+<Steps>
+<Step>
+**クラスタリング** — `cluster_colors(grid) -> list[ColorCluster]` は、信頼できる色付きセルを
+RGB でグループ化し、`(-count, rgb)` でソートします。
+</Step>
+<Step>
+**凡例検出** — `detect_legend(grid) -> list[LegendEntry]` は、テキストラベルに隣接する
+色ブロックのセルを見つけ、色→意味の*ドラフト*を生成します。
+</Step>
+<Step>
+**確認** — ドラフトは `MappingRegistry` に入り、SME が確認するまで `status="draft"` のままです。
+新しいバージョンを確認すると、以前のアクティブなバージョンは（削除されるのではなく）置き換えられます。
+</Step>
+<Step>
+**適用** — `apply_mapping(grid, mapping) -> dict[str, dict[str, str]]` は
+`{cell_ref: {tag_key: tag_value}}` を返します。マッピングが `active` で**ない**場合は `{}` を返し、
+グリッドに警告を追加します — 未確認のマッピングが暗黙のうちにファクトにタグを付けることは決してできません。
+</Step>
+</Steps>
+
+`MappingRegistry` は独立した sqlite ストアです（`color_mapping` テーブル、PK は
+`(scope, version)`）。API は `register_draft(mapping)`（scope ごとにバージョンを自動インクリメント）、
+`confirm(scope, version, actor, note=None)`、`reject(...)`、`get_active(scope)` です。
+ファクトは確認済みマッピングを `mapping_version` で参照するため、系譜は改訂をまたいで維持されます。
+[カラーセマンティクス](#カラーセマンティクス--クラスタリング凡例バージョン管理されたレジストリ)を参照してください。
+
+## 二重チャネル検証
+
+`verification/dual_channel_verifier.verify(facts_a, facts_b, queue=None, tolerance=0.0)` は、
+同一の表に対する 2 つの独立した抽出結果をクロスチェックします（docstring の例: Docling による
+表パース vs テキストレイヤーからの再構築）。各サイドは `ChannelFact` のリストで、
+`dim_key` = `(metric_code, entity, period_type, period, channel)` で整列されます。
+
+- **一致**（同じキーで、値が `tolerance` の範囲内）→ 自動パス。
+- **衝突**（同じキーで、値が異なる）→ 理由 `"dual_channel_conflict"`、`priority=10` で
+  キューへ登録。
+- **単一チャネルのみ**（キーが片側にのみ存在）→ 理由 `"single_channel_only"`、`priority=50` で
+  キューへ登録。
+
+戻り値は `VerificationResult`（`agreed`、`conflicts`、`only_in_a`、`only_in_b`、
+`n_auto_passed`、`n_enqueued`）です。`queue=None` の場合は分類のみを行い、何もキューに登録しません。
+priority の数値が小さいため、衝突は単一チャネルのみのケースより先にレビューされます。この純粋ロジックは
+Docling に依存しません。
+
+## Protocol シーム
+
+重量級の依存関係は `@runtime_checkable` な `Protocol` を通じて注入されるため、インジェストの
+呼び出し箇所に触れることなくパーサーを差し替えられ、フェイクを使ってこのパスをオフラインでテスト
+できます。
+
+<Cards>
+  <Card title="GridExtractor" href="/ja/docs/concepts/provenance">
+    `pdf_digital_extractor`。`version: str` と `extract_grids(path)` を持ちます。デフォルト実装は
+    `version = "pdf_digital@1"` の `DoclingGridExtractor` — この値が各ファクトの
+    `extractor_version` に刻印されます。デジタルパーサーの出力が変わったらこの値を上げてください。
+  </Card>
+  <Card title="OcrBackend">
+    `pdf_scanned_extractor`。`recognize(image_bytes, page_no) -> OcrPageResult`。デフォルトの
+    実バックエンドは `PaddleOcrVlBackend`。テストではフェイクを注入します — オフラインでは PaddleOCR は不要です。
+  </Card>
+</Cards>
+
+<Callout type="info">
+  **`GridExtractor.version` は契約の一部です。** これはファクトの系譜に書き込まれる `extractor_version`
+  となり、差し替えられたパーサー（Docling → pdfplumber / camelot / …）を出典追跡の中で識別可能に
+  保ちます。
+</Callout>
+
+## このドメインが守る不変量
+
+- **決定的処理を最優先、捏造ゼロ** — ネイティブの表とチャートデータは構造的に読み取ります。
+  OCR/LLM はシームの背後にあるフォールバックであり、決してデフォルトではありません。
+- **色の信頼性** — `cf_affected` なセルと未確認のマッピングが、暗黙のうちにタグを生成することは
+  決してありません。
+- **バージョン系譜** — `source_file_hash` + `extractor_version`（+ `mapping_version`）が、
+  抽出されたすべての値とともに移動します。
+- **プラガビリティ** — 重量級のパーサーは遅延インポートされる `Protocol` シームであり、コアは
+  オフラインで動作します。
+
+## 関連情報
+
+<Cards>
+  <Card title="Ingestion ガイド" href="/ja/docs/guides/ingestion" />
+  <Card title="Storage ガイド — Fact データクラス" href="/ja/docs/guides/storage" />
+  <Card title="StyledGrid IR" href="/ja/docs/guides/extraction#styledgrid-ir" />
+  <Card title="概念: 出典追跡（Provenance）と系譜" href="/ja/docs/concepts/provenance" />
+</Cards>

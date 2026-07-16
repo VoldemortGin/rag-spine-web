@@ -1,0 +1,32 @@
+---
+title: 'ADR 0001: Doppio canale deterministico anziché un singolo percorso LLM'
+description: Utilizzare due canali deterministici (numerico strutturato + RAG narrativo) con l'LLM confinato alla sintesi, mai all'invenzione di fatti.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+Gli ADR sono registri storici immutabili — esenti dal tracciamento della deriva (nessun `covers`).
+Per annullare questa decisione, aggiungere un nuovo ADR che la sostituisca anziché modificare
+questo file.
+
+<Callout type="warn" title="Il documento di origine è uno scheletro">
+  Nel repository questo ADR esiste come schema di sezioni la cui prosa risiede ancora in segnaposto `TODO`.
+  Il contenuto previsto di ciascuna sezione, trascritto fedelmente da tali
+  segnaposto, è riportato di seguito.
+</Callout>
+
+## Contesto
+
+> _Da documentare:_ perché un design deterministico e indipendente dai framework invece di
+> Dify/LangGraph; il requisito che la prevenzione delle risposte inventate e la provenienza delle fonti siano
+> imposte a livello di codice.
+
+## Decisione
+
+> _Da documentare:_ un canale numerico strutturato + un canale RAG narrativo, ciascuno
+> deterministico; l'LLM confinato alla sintesi, mai all'invenzione di fatti.
+
+## Conseguenze
+
+> _Da documentare:_ i compromessi — più codice/invarianti da mantenere in cambio di un comportamento verificabile,
+> utilizzabile offline e resistente alle risposte inventate.

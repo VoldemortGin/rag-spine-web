@@ -1,0 +1,99 @@
+---
+title: ADR 0017 — La cronologia della conversazione è contesto solo per la generazione
+description: Aggiungere una cronologia di prima classe senza consentire ai turni precedenti di entrare nel parsing dell'intento, nel recupero, nelle decisioni di sicurezza o nelle evidenze.
+---
+
+**Status:** accepted
+
+**Date:** 2026-07-14
+
+> Record immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Vincolato dall'ADR 0005 del motore (nuova capacità accanto al percorso predefinito identico byte per byte) e dall'ADR
+0010 del motore (intento/sicurezza deterministici indipendenti dal contesto rivolto al modello). Risponde alla
+lacuna di prodotto multi-turno emersa dall'ADR 0006 di spinestudio.
+
+<Callout type="info">
+  I numeri degli ADR sono locali al repository. I riferimenti in questo record sorgente puntano agli ADR del motore RAGSpine;
+  lo storico [ADR 0012](/it/docs/decisions/adr-0012) del sito web è un record diverso, a livello di famiglia.
+</Callout>
+
+## Contesto
+
+`answer_question(question, store, provider, ...)` era single-shot e senza stato, privo di un parametro
+per la cronologia. Quando il livello di prodotto ha aggiunto la chat multi-turno, l'unico modo per fornire a un modello il contesto
+precedente era concatenare la cronologia nella stringa `question`.
+
+Questo avvelenava il parsing deterministico dell'intento. Un numero di una risposta precedente come `1320` poteva essere letto
+come periodo `FY1320`, trasformando silenziosamente una ricerca a metrica singola in un confronto errato e compromettendo
+il routing deterministico e la correttezza della prevenzione delle risposte inventate. Il livello di prodotto ha quindi mantenuto l'iniezione
+della cronologia disattivata per impostazione predefinita, in attesa che il motore esponesse un parametro di prima classe che
+separasse strutturalmente l'input del parsing dal contesto di generazione.
+
+## Decisione
+
+Aggiungere una keyword opzionale `history: Sequence[tuple[str, str]] | None = None` a
+`answer_question`. Ogni turno è `(role, text)` con i ruoli previsti `user` o `assistant`. Propagare la
+stessa forma e semantica attraverso il servizio `/v1/ask` e `/v1/ask/stream` come `AskRequest.history`.
+
+### Il valore predefinito `None` è identico byte per byte
+
+`_history_messages(None) == []`. Le sequenze di messaggi del tool-loop e narrative rimangono invariate senza
+cronologia. Una regressione parametrizzata in `tests/agent/test_history.py::test_default_none_is_byte_identical`
+copre i comportamenti strutturato trovato, non trovato, multi-sottotask e narrativo.
+
+### La cronologia non entra mai nel parsing deterministico dell'intento
+
+Il parser vede solo il `question` corrente: `intent = parser.parse(question, …)`. Il gate di
+sicurezza riesamina allo stesso modo quella domanda grezza. `_history_messages` converte i turni precedenti in messaggi
+in formato OpenAI inseriti tra il prompt di sistema e il turno utente corrente in `_run_tool_loop` e
+`_run_narrative`. La domanda corrente resta l'ultimo messaggio utente, quindi il parsing dell'ultimo turno utente
+di MockProvider non viene inquinato.
+
+La forma pubblica della cronologia è una tupla piatta `(role, text)`. Non può trasportare un ruolo system/tool né
+introdurre di nascosto `tool_calls`; i ruoli sconosciuti vengono normalizzati a user. Questa separazione strutturale tra input del parsing
+e contesto di generazione risolve il punto dolente del prodotto.
+
+### La prevenzione delle risposte inventate sopravvive alla cronologia
+
+Il canale strutturato continua a renderizzare in modo deterministico una risposta trovata a partire dai fatti degli strumenti oppure riscrive un
+mancato riscontro come not-found. La cronologia non produce alcuna evidenza; la provenienza continua a puntare solo a riscontri reali di strumenti/recupero.
+Un test negativo colloca un fatto fabbricato — `Shanghai FY2099 REVENUE = 999` — nella cronologia e
+verifica che un mancato riscontro nella knowledge base resti un rifiuto, non citi mai `999` e abbia `sources` vuoto.
+
+La query di recupero narrativa rimane esclusivamente la domanda corrente. La cronologia non entra mai nel recupero.
+
+### L'isolamento a doppia uscita RESTRICTED è invariato
+
+La cronologia aggiunge soltanto messaggi di contesto di generazione. Non tocca mai il recupero, quindi le uscite `link/` e
+`rerank/` continuano a rimuovere i contenuti RESTRICTED. `tests/conformance/test_history_isolation.py`
+vincola entrambe le forme di cronologia e include una prova inversa non vacua con retriever che fa trapelare dati.
+
+La firma resta entro il budget di complessità di onboarding del motore: `history` è keyword-only
+con un valore predefinito, quindi il costo di onboarding per la prima risposta non cambia. Il record del motore corrispondente è
+[`docs/adr/0012-onboarding-complexity-budget.md`](https://github.com/VoldemortGin/ragspine/blob/main/docs/adr/0012-onboarding-complexity-budget.md),
+non l'ADR di famiglia con lo stesso numero del sito web.
+
+## Alternative considerate (respinte)
+
+- Continuare a concatenare la cronologia in `question`: è esattamente il difetto in questione; avvelena il parsing deterministico
+  e la prevenzione delle risposte inventate.
+- Accettare messaggi OpenAI `list[dict]` arbitrari: i chiamanti potrebbero iniettare `system`, `tool_calls` o
+  risultati di strumenti fabbricati. Le tuple piatte `(role, text)` sono deliberatamente incapaci di assumere quella forma.
+- Fornire la cronologia al parser dell'intento per la risoluzione di coreferenze/ellissi: questo riaprirebbe il percorso
+  di avvelenamento. Il parsing deterministico dipende solo dalla domanda corrente; il riporto opzionale dello slot `ConversationSession`
+  rimane separato.
+- Alimentare il recupero narrativo con la cronologia: la cronologia diventerebbe una fonte di evidenza non citata. La
+  query di recupero rimane esclusivamente la domanda corrente.
+
+## Conseguenze
+
+- Il motore dispone di un parametro di contesto multi-turno di prima classe; un prodotto può abilitare la cronologia senza
+  corrompere il routing deterministico o la prevenzione delle risposte inventate.
+- Il comportamento predefinito identico byte per byte, la separazione parsing/contesto, la prevenzione delle risposte inventate e l'isolamento
+  RESTRICTED sono vincolati da test.
+- I nuovi artefatti sono `answer_question(history=)`, `_history_messages`, `AskRequest.history` su entrambe
+  le route ask, `tests/agent/test_history.py`, `tests/conformance/test_history_isolation.py` e
+  `tests/service/api/test_api_ask_history.py`.
+- `ConversationSession` non viene toccato. È ortogonale e in futuro potrebbe costruire la lista della cronologia
+  a partire dai turni memorizzati.

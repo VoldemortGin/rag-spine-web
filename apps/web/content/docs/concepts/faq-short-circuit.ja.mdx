@@ -1,0 +1,76 @@
+---
+title: FAQ ショートサーキット
+description: LLM をバイパスする、SME 検証済みの質問→回答キャッシュ — 捏造防止ガードの手前に位置するため、保守的な除外条件の背後に置かれている。
+---
+
+FAQ キャッシュは、既知の質問に対して SME 検証済みの回答を返し、LLM・ファクトストア・リトリーバーを完全にバイパスします。これはレイテンシとコストの最適化であると同時に、**高リスクなレイヤー**でもあります。なぜなら、捏造防止ガードの _手前_ に位置しているからです。誤ったショートサーキットは、下流のあらゆる安全チェックをスキップしてしまいます。
+
+<Callout type="warn">
+  FAQ レイヤーは[捏造防止](/ja/docs/concepts/anti-fabrication)の手前に位置するため、その除外条件は意図的に保守的になっています：構造化数値、競合他社、リアルタイム、期限切れ、無効化済み、および `RESTRICTED` の項目は**決して**ショートサーキットされません。
+</Callout>
+
+## 配置される場所
+
+`/v1/ask` ルート（`service/api/routes.py`）では、FAQ ルックアップが最初に実行されます：
+
+```python
+# 1) FAQ short-circuit — on hit, never touches provider / fact store / retriever
+hit = faq_cache.lookup(req.question, reference_date=ref)
+if hit is not None:
+    return AskResponse(..., route="faq", answer=hit.answer, sources=[...])
+
+# 2) miss -> normal workflow (anti-fabrication guard, dual channel, ...)
+result = answer_question(req.question, store, provider, ...)
+```
+
+`lookup` は純粋関数です（`service/faq/faq_cache.py`）：境界判定のために `parse_intent` / `clarify_scope` を参照しますが、LLM・ファクトストア・リトリーバーには決して到達しません。マッチングは正規化済みの完全一致 / エイリアス一致のみ（NFKC + casefold + 空白の畳み込み + 末尾句読点の除去）で、ファジーマッチングや埋め込みによるマッチングは行いません。
+
+## 保守的な除外条件
+
+以下の _いずれか_ に該当する場合、`lookup` は**ミス**（`None`）を返します — これらの除外条件は、キャッシュインデックスを参照する _前_ にチェックされます：
+
+<Accordions>
+  <Accordion title="スコープ外 / 競合他社エンティティ">
+    `clarify_scope` が `CLARIFY_OUT_OF_SCOPE_ENTITY` を返した場合、またはパースされた `external_entity` が設定されている場合、その質問は外部 / 競合他社のエンティティに関するものです — 決してショートサーキットせず、セキュリティ上の拒否パスが維持されます。
+  </Accordion>
+  <Accordion title="構造化数値の質問">
+    ルートが `ROUTE_STRUCTURED` である場合、または構造化スロット（`metric` / `entity` /
+    `period`、あるいはその複数値形式）のいずれかが埋められた場合、その質問は最新の数値を求めています — キャッシュされた文字列ではなく、構造化チャネルとその出典追跡を通過しなければなりません。
+  </Accordion>
+  <Accordion title="リアルタイム / 時間依存の手がかり">
+    （正規化済みの）質問にリアルタイムの手がかり — “今天”、“现在”、“最新”、“current”、
+    “latest”、“股价” など — が含まれる場合、固定のキャッシュ回答は陳腐化してしまうため除外されます。手がかりのスキャンにはインデックスと同じ NFKC/casefold 正規化が使われるため、全角のバリアントがすり抜けることはありません。
+  </Accordion>
+  <Accordion title="期限切れ（有効期間外）">
+    各項目は `valid_from` / `valid_until` を持つことができます。参照日がその閉区間の外にある場合 — あるいは日付のパースに失敗した場合 — 期間外として扱われ、除外されます。
+  </Accordion>
+  <Accordion title="無効化済み">
+    `enabled = false` の項目はインデックス構築時にフィルタリングされ、ルックアップ時にも防御的に再チェックされます。
+  </Accordion>
+  <Accordion title="RESTRICTED 機密度">
+    `sensitivity` が `RESTRICTED`（大文字小文字を区別せず、前後の空白をトリム）である項目は決してショートサーキットされません — [RESTRICTED 分離](/ja/docs/concepts/restricted-isolation)と整合しています。
+  </Accordion>
+</Accordions>
+
+## FAQ 項目
+
+項目は SME による検証とバージョン管理を受けており、ヒットは自身の出典情報（`FAQHit.source`）を保持します：
+
+```json
+{
+  "id": "what-is-ragspine",
+  "question": "RAGSpine 是什么？",
+  "aliases": ["What is RAGSpine?"],
+  "answer": "RAGSpine 是一个无框架的后端 RAG 引擎……",
+  "source": "internal/faq-handbook.md",
+  "version": 3,
+  "enabled": true,
+  "valid_from": "2026-01-01",
+  "valid_until": null,
+  "sensitivity": "INTERNAL"
+}
+```
+
+<Callout type="info">
+  ヒットは `route: "faq"` を `cache` ブロック（`hit`、`type`、`faq_id`、`version`、`source`）とともに返します。トレースには `cache_hit`、`faq_id`、`faq_version` のみが記録され、回答テキストは決して記録されません。FAQ の JSON は環境変数 `RAGSPINE_FAQ_SOURCE` 経由で読み込みます。
+</Callout>

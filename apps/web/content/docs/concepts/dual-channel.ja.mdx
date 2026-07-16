@@ -1,0 +1,152 @@
+---
+title: 二重チャネル
+description: 決定論的な構造化/数値チャネルとナラティブ RAG チャネルを、複合的な質問を分割して両方を実行する単一のエージェントルーターで統合します。
+---
+
+RAGSpine は、根本的に異なる 2 種類の質問に対して、根本的に異なる 2 つのメカニズムで回答します — そして、質問がどちら(または両方)を必要とするかは、単一のエージェントが判断します。
+
+- **「数値はいくつか?」** → **構造化チャネル**: ファクトテーブルと function-calling。決定論的であり、値の合成は行いません。
+- **「なぜ / 何が起きたのか?」** → **ナラティブチャネル**: ドキュメントチャンクに対するハイブリッド検索、オプションのリストワイズ再ランキング、そして引用付きの LLM 合成。
+
+ルーターは `agent/agent.py`(`answer_question`)にあり、インテント解析と確認ゲートは `agent/intent.py` にあります。
+
+<Callout type="info">
+  この 2 つのチャネルが 1 つの「モデルに聞く」パスに混ざることは決してありません。数値ファクトを生成することが許されているのは構造化チャネルだけであり、しかもモデルの文章を信頼せずにそれを行います —
+  [捏造防止](/ja/docs/concepts/anti-fabrication) を参照してください。
+</Callout>
+
+## エージェントのルーティング方法
+
+すべての質問はまず、LLM を一切使わない設定駆動のルールパーサー(`RuleIntentParser`、`IntentParser` Protocol の背後で差し替え可能)によって **4 つのインテントスロット** に解析されます:
+
+<TypeTable
+  type={{
+    metric: {
+      type: 'string | null',
+      description: '用語集を通じて正規化されたメトリックコード(例: REVENUE)。存在しない場合は None。',
+    },
+    entity: {
+      type: 'string | null',
+      description: '正規化されたエンティティコード(例: ACME_CN)。存在しない場合は None。',
+    },
+    period: {
+      type: '(period_type, value) | null',
+      description: '例: ("FY", "2024")、("HY", "2024H1")、("QUARTER", "2025Q1")。',
+    },
+    channel: { type: 'string', description: 'デフォルトは TOTAL(例: AGENCY / BANCA / TOTAL)。' },
+  }}
+/>
+
+ルーティングは、解析されたスロットと語彙的な手がかりから決定されます(`parse_intent`):
+
+<Cards>
+  <Card title="structured">
+    数値インテント — `metric` が認識されたか、「多少」/「what is」のような数値の手がかりがある場合。回答は数値であり、ファクトストアから取得されます。
+  </Card>
+  <Card title="narrative">
+    要因分析 / 規制 / トレンド / 「なぜ」のインテント。回答は検索されたスニペットから合成され、それぞれに引用が付きます。
+  </Card>
+  <Card title="composite">
+    両方を同時に — 認識されたメトリック **と** ナラティブの手がかり(例:「なぜ売上が減少したのか?」)。エージェントは構造化パスを実行し、その後に要因分析セクションを追記します。
+  </Card>
+</Cards>
+
+ルーティングの前に、**確認ゲートウェイ**(`clarify_scope`)が意図的な非対称性を適用します:
+
+- **metric** の欠落 → _まず質問する_(メトリックの推測は実質的な誤りにつながるため)。
+- **entity / period** の欠落 → _仮定を明示した上で回答する_(デフォルトはホームグループ / 直近の完了した会計年度とし、仮定を明示し、ワンクリックでの絞り込みを提供します)。
+- **スコープ外 / 競合他社のエンティティ** → いずれのチャネルも実行する前に拒否します([RESTRICTED の隔離](/ja/docs/concepts/restricted-isolation) と決定論的セキュリティゲートを参照)。
+
+## 構造化チャネル: `found` / `not_found` / `unrecognized` の三状態
+
+構造化チャネルにおいてファクトを生成する唯一のプリミティブは `query_metric` ツール(`agent/query_tools.py`)です。その実行関数は各パラメータを用語集を通じて正規化し、`fact_metric` ストアに問い合わせます。返されるのは **3 つ** のステータスのいずれかであり — 決して推測ではありません:
+
+<Tabs items={["found", "not_found", "unrecognized_param"]}>
+  <Tab value="found">
+    正確な値が存在します。値、単位、すべての管理されたディメンションコード、
+    および完全なリネージを返します:
+
+    ```json
+    {
+      "status": "found",
+      "value": 1320,
+      "unit": "USD_M",
+      "metric_code": "REVENUE",
+      "entity": "ACME_CN",
+      "period_type": "FY",
+      "period": "2024",
+      "channel": "TOTAL",
+      "source": { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="not_found">
+    すべてのパラメータは正規化されましたが、ファクトテーブルに一致する行がありません。**補間も
+    推論も行いません** — エージェントはこれを誠実な拒否に書き換えます。
+
+    ```json
+    {
+      "status": "not_found",
+      "normalized": { "metric_code": "REVENUE", "entity": "ACME_CN", "period": "2025", "channel": "TOTAL" }
+    }
+    ```
+
+  </Tab>
+  <Tab value="unrecognized_param">
+    パラメータを管理されたコードに正規化できませんでした(用語集は推測せずに
+    `None` を返します)。問題のパラメータとその生の値が明示されます。
+
+    ```json
+    { "status": "unrecognized_param", "param": "entity", "raw": "some unknown company" }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  用語集の正規化関数(`normalize_metric` / `normalize_entity` / `normalize_period`)は、認識できないものすべてに対して
+  `None` を返します。この `None` が `unrecognized_param` になります — 最善の推測によるコードへと
+  強制変換されることは決してありません。
+</Callout>
+
+## ナラティブチャネル
+
+ルートが `narrative` の場合、エージェントは注入された `NarrativeRetriever` を呼び出します(`_run_narrative`)。デフォルトのチェーン(`retrieval/`)は次のとおりです:
+
+<Steps>
+  <Step>
+    **ハイブリッド検索** — CJK 対応の Okapi BM25 + 注入可能なベクトルチャネル(デフォルト: なし = 純粋な
+    BM25)を Reciprocal Rank Fusion(`rrf_fuse`、`k=60`)で融合し、さらに用語集駆動のマルチクエリ
+    書き換えを行います。
+  </Step>
+  <Step>
+    **リストワイズ再ランキング** — オプションの LLM リストワイズジャッジ(`listwise_rerank`)が上位
+    候補を並べ替えます。何らかの失敗時には RRF の順序にフォールバックします。
+  </Step>
+  <Step>
+    **引用付きの合成** — LLM は提供されたスニペットのみから回答し、モデルが引用し損ねた
+    出典ドキュメント名はエージェントが強制的に追記します。
+  </Step>
+</Steps>
+
+リトリーバーが接続されていない場合、または検索が何も返さない場合、ナラティブチャネルは回答を捏造するのではなく、誠実に縮退します(「未検索 / 未接続」)。
+
+## 複合パス: 両方を実行し、比較し、マージする
+
+複合的な質問に対しては、エージェントはまず構造化パスを実行し、次にナラティブパスを実行してマージします:
+
+```text
+<structured answer, with the number(s) + lineage>
+
+归因分析：
+<narrative answer, synthesized from cited snippets>
+```
+
+両チャネルの出典は連結されます。構造化側が複数のサブタスク(ユーザーが明示的に列挙した複数のメトリック / エンティティ / 期間)に展開される場合、エージェントは各 `query_metric` サブタスクを **LLM を使わずに決定論的に** 実行し(`_multi_subtask_answer`)、比較可能な期間がちょうど 2 つの場合には、その差分を自ら計算します。
+
+<Callout type="info">
+  捏造防止は統一的にではなく、**パスごとに** 適用されます: 構造化パスはファクト値から決定論的に
+  回答を合成し、マルチサブタスクパスは LLM をまったく呼び出さず、ナラティブパスはモデルの文章を
+  信頼しつつ引用を強制します。この非対称性は意図的なものです。
+</Callout>

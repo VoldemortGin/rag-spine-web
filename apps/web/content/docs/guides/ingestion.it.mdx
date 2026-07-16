@@ -1,0 +1,250 @@
+---
+title: Ingestione
+description: IR/testo → store. Ingestione di fatti strutturati con un registro manifest dei batch, ingestione di chunk narrativi e una macchina a stati per la coda di revisione umana degli SME — tutto idempotente.
+---
+
+Il dominio di **ingestione** prende l'output dell'estrazione (IR StyledGrid, testo narrativo) e lo scrive
+negli [store](/it/docs/guides/storage). Ha tre corsie: **strutturata** (fatti
+numerici), **narrativa** (chunk di documenti) e **revisione** (la coda human-in-the-loop che
+intercetta tutto ciò di cui il percorso deterministico non è sicuro). Ogni corsia è idempotente —
+rieseguire un'ingestione non deve produrre scritture duplicate.
+
+<Callout type="info">
+  Pacchetto: `src/ragspine/ingestion/`. Contratto: `src/ragspine/ingestion/CLAUDE.md`.
+</Callout>
+
+## Struttura
+
+<Files>
+  <Folder name="ingestion" defaultOpen>
+    <Folder name="structured">
+      <File name="ingestion.py — ingest_excel / ingest_file → IngestReport" />
+      <File name="ingestion_manifest.py — registro ManifestStore + metriche" />
+    </Folder>
+    <Folder name="narrative">
+      <File name="narrative_extract.py — documento → NarrativeDoc (segmenti + localizzatori)" />
+      <File name="narrative_ingest.py — ingestione in batch dei chunk → NarrativeIngestReport" />
+    </Folder>
+    <Folder name="review">
+      <File name="review_queue.py — macchina a stati ReviewQueue + traccia di audit" />
+    </Folder>
+  </Folder>
+</Files>
+
+## Ingestione strutturata
+
+`structured/ingestion.py` orchestra un documento dall'inizio alla fine:
+**estrazione → normalizzazione (glossario) → tag colore → upsert**. Ci sono due punti di ingresso:
+
+- `ingest_excel(path, store, registry, queue, *, dry_run=False, extractor_version="xlsx_styled@1", manifest=None, batch_id=None)` —
+  solo xlsx.
+- `ingest_file(path, store, registry, queue, *, dry_run=False, manifest=None, batch_id=None, valid_as_of=None, grid_extractor=None)` —
+  il dispatcher multi-formato unificato: instrada in base al suffisso verso l'estrattore corretto (xlsx /
+  xlsm / pptx, oppure PDF tramite il [router](/it/docs/guides/extraction#instradamento-pdf--triage-per-pagina))
+  e riutilizza la logica di ingestione condivisa.
+
+Entrambi restituiscono un **`IngestReport`** (un oggetto di conteggi, non numeri grezzi):
+
+<TypeTable
+  type={{
+    source_path: { type: 'str' },
+    source_doc_id: { type: 'str' },
+    file_hash: { type: 'str | None', default: 'None' },
+    dry_run: { type: 'bool', default: 'False' },
+    n_grids: { type: 'int', default: '0' },
+    n_facts_extracted: { type: 'int', default: '0' },
+    n_facts_ingested: { type: 'int', default: '0' },
+    n_tags_applied: { type: 'int', default: '0' },
+    n_enqueued_review: { type: 'int', default: '0' },
+    warnings: { type: 'list[str]', default: '[]' },
+    status: { type: 'str', default: '"ok"' },
+    error: { type: 'str | None', default: 'None' },
+  }}
+/>
+
+Internamente, a ogni griglia vengono applicati i tag colore tramite la mappatura attiva (`apply_mapping`), quindi viene trasformata in
+oggetti [`Fact`](/it/docs/guides/storage#la-dataclass-fact) e scritta con
+`store.upsert_facts(...)`. I fatti vengono marcati con la loro lineage —
+`source_doc_id`, `source_locator`, `source_file_hash`, `extractor_version`,
+`mapping_version` e `review_status=REVIEW_AUTO_APPROVED`.
+
+```python
+from ragspine.ingestion.structured.ingestion import ingest_file
+
+report = ingest_file("report.xlsx", store, registry, queue)
+print(report.n_facts_ingested, report.n_enqueued_review)
+```
+
+### Quando l'ingestione mette invece in coda per la revisione
+
+Il percorso strutturato è conservativo. Un file viene instradato verso la [coda di revisione](#la-coda-di-revisione)
+invece di essere ingerito automaticamente quando:
+
+- nessuna griglia riesce a risolvere un'entità eppure il file contiene dati estraibili — motivo
+  _"实体无法解析，需人工指认"_ (entità non risolvibile, richiede identificazione umana);
+- il file ha celle colorate ma lo scope **non ha alcuna mappatura colore attiva** — motivo
+  _"颜色映射未确认，需 SME 确认图例"_ (mappatura colore non confermata, lo SME deve confermare la legenda);
+- un PDF sembra un'esportazione di PowerPoint (richiedere il file pptx sorgente) oppure è una scansione che necessita di OCR.
+
+Con `dry_run=True`, l'estrazione e la reportistica vengono eseguite per intero ma `n_facts_ingested` e
+`n_enqueued_review` restano `0` — lo store e la coda rimangono intatti.
+
+## Il registro manifest dei batch
+
+`structured/ingestion_manifest.py` registra _cosa è stato eseguito_. `ManifestStore` (sqlite,
+tabelle `manifest_batch` + `manifest_input`) apre un batch, registra ogni file di input e chiude
+il batch con uno stato finale e una durata. Ogni batch è un `ManifestRecord`:
+
+| campo                                 | significato                                           |
+| ------------------------------------- | ------------------------------------------------- |
+| `batch_id`                            | fornito dal chiamante, oppure auto `batch-{uuid4 hex[:12]}` |
+| `status`                              | `running` → `done` / `failed`                     |
+| `inputs`                              | righe `{path, hash, format, …}` per file           |
+| `n_facts` · `n_warnings` · `n_failed` | conteggi aggregati                                  |
+| `duration_s` · `failures`             | tempistiche + errori per file                          |
+
+API: `open_batch(batch_id=None)`, `record_input(...)`, `close_batch(batch_id, status="done")`,
+`get_batch(id)`, `list_batches()`. Due helper di osservabilità li accompagnano:
+`compute_metrics(manifest_store, queue, store)` (totali dei fatti, arretrato di revisione, fasce di
+confidenza, tasso di warning) e `list_versions(store, registry)` (versioni attive degli estrattori +
+mappature colore).
+
+<Callout type="warn">
+  **Dove risiede davvero l'idempotenza.** Il contratto definisce il manifest "la guardia", ed è il
+  registro di audit di ogni esecuzione (percorso / hash / conteggi / fallimenti). Ma la garanzia letterale di assenza di
+  scritture duplicate proviene dall'**upsert a chiave univoca** dello store dei fatti (`store.upsert_facts`, con chiave su
+  [`dim_key`](/it/docs/guides/storage#dim_key--la-chiave-di-upsert)): rieseguire un batch riesegue estrazione e
+  upsert, e la chiave univoca impedisce allo store di crescere. `batch_id` **non** è derivato dal contenuto
+  — è fornito dal chiamante oppure è un uuid casuale.
+</Callout>
+
+## Ingestione narrativa
+
+La corsia narrativa è composta da due moduli con una separazione netta:
+
+<Tabs items={["narrative_extract", "narrative_ingest"]}>
+<Tab value="narrative_extract">
+
+Estrazione di testo pura e deterministica — zero OCR, zero LLM, nessuno store. `extract_narrative(path)`
+smista in base al suffisso (`SUPPORTED_SUFFIXES = {.pptx, .pdf, .docx, .docm, .txt}`) verso l'estrattore
+corrispondente e restituisce un **`NarrativeDoc`**: `doc_id`, `file_hash`, un elenco di `NarrativeSegment`
+(`text` + `source_locator`), `skipped_pages` e `warnings`. I locator hanno l'aspetto di
+`'slide={N},frame={M}'`, `'slide={N},notes'`, `'page={N}'`, oppure (per il testo semplice) `'para={N}'`.
+`NarrativeDoc.to_text()` unisce i segmenti con righe vuote — quella stringa è il contratto di input
+del chunking.
+
+I file `.txt` semplici seguono lo stesso percorso narrativo — trattati come prosa continua, mai forzati
+in fatti strutturati. `extract_txt_narrative(path)` legge UTF-8 (con `errors="replace"`),
+divide sulle righe vuote in blocchi di paragrafi, normalizza ogni blocco ed emette un
+`NarrativeSegment` per ogni blocco non vuoto con un `source_locator="para={N}"` a base 1. È
+privo di dipendenze e deterministico.
+
+</Tab>
+<Tab value="narrative_ingest">
+
+Orchestrazione batch: **estrazione → chunking → scrittura nello store dei chunk**, idempotente ed eseguibile in dry-run.
+`ingest_narrative(inputs, store, *, meta_by_doc=None, dry_run=False, chunker=None)` accetta una
+cartella, un file o un elenco, e restituisce un `NarrativeIngestReport` (un elenco di
+`FileReport` per file, più `counts()`). Con `chunker=None`, ogni file usa
+`chunk_document(doc.to_text(), doc_meta)`; un `Chunker` iniettato può selezionare il comportamento parent-child,
+sentence-window, layout, dominio o semantico. I campi di gerarchia/finestra risultanti vengono
+persistiti nello store dei chunk invece di essere ricostruiti solo in memoria. I chunk vengono
+scritti con `store.replace_doc_chunks(...)` nel
+[ChunkStore](/it/docs/guides/storage#larchivio-di-chunk).
+
+Lo stato per file è uno tra `ingested` / `skipped` / `failed` / `no_text`. L'idempotenza usa una
+tabella `narrative_doc` (`doc_id → file_hash`) nello stesso DB sqlite: se l'hash registrato
+corrisponde al file, il file viene **saltato** senza rieseguire l'estrazione. Le chiavi di `meta_by_doc` sono
+validate rispetto a `ALLOWED_META_KEYS` (`title`, `topic`, `entity`, `geography`, `period`,
+`language`, `sensitivity`, `valid_as_of`) — i campi sconosciuti sollevano `ValueError`. Il periodo è
+preso dai metadati oppure dedotto dal nome del file tramite `period_from_filename(name)`.
+
+</Tab>
+</Tabs>
+
+<Callout type="info">
+  La sensibilità viene applicata qui: un `meta["sensitivity"]` esplicito ha la precedenza, altrimenti
+  viene eseguito `classify_sensitivity(...)` da [common](/it/docs/guides/common#sensibilità). È questo che
+  in seguito consente al recupero di applicare l'isolamento RESTRICTED.
+</Callout>
+
+## La coda di revisione
+
+`review/review_queue.py` è la **macchina a stati** per la revisione umana degli SME che intercetta tutto
+ciò di cui il percorso deterministico non è sicuro — OCR a bassa confidenza, conflitti tra canali,
+mappature colore non confermate, entità non risolvibili. È basata su sqlite (stesso DB dello store dei
+fatti, tabelle diverse: `review_item` + un `review_audit` append-only).
+
+La macchina a stati ha tre stati stringa e due transizioni:
+
+```text
+pending ──approve──▶ approved   (terminal)
+pending ──reject───▶ rejected   (terminal)
+```
+
+`STATUS_PENDING = "pending"`, `STATUS_APPROVED = "approved"`, `STATUS_REJECTED = "rejected"`.
+Gli stati approvato e rifiutato sono terminali — rielaborare un elemento terminale (o agire su un
+elemento inesistente) solleva `IllegalTransitionError`.
+
+Un **`ReviewItem`** contiene `reason`, `payload` (JSON), `locator`, `priority` (predefinito `100`,
+**più basso = revisionato prima**), `id`, `status`, `actor`, `note` e `corrected_value`.
+
+API:
+
+| metodo                                                    | effetto                                               |
+| --------------------------------------------------------- | ---------------------------------------------------- |
+| `enqueue(reason, payload, locator, priority=100) -> int`  | inserisce un elemento in attesa + scrive una riga di audit `enqueue` |
+| `list_pending() -> list[ReviewItem]`                      | elementi in attesa, ordinati per `priority ASC, id ASC`        |
+| `approve(item_id, actor, note=None)`                      | → approvato                                           |
+| `reject(item_id, actor, note=None, corrected_value=None)` | → rifiutato (opzionalmente registra una correzione)          |
+| `get(item_id)` · `audit_trail(item_id)`                   | recupera l'elemento / cronologia `AuditRecord` append-only       |
+
+Ogni transizione appende un `AuditRecord` (`enqueue` / `approve` / `reject`) — il tracciato è
+append-only e non viene mai modificato, quindi la cronologia delle revisioni è completamente ricostruibile. Vedi
+[Coda di revisione nel glossario](/it/docs/concepts/glossary#coda-di-revisione).
+
+## Connettori sorgente
+
+Entrambe le corsie ingeriscono da percorsi locali per impostazione predefinita, ma la sorgente è essa stessa un punto di estensione pluggabile.
+`ingestion/source/connector.py` definisce il Protocol `SourceConnector` — un singolo
+`iter_documents() -> Iterable[RawDoc]` che restituisce ogni documento come un `RawDoc` frozen
+(`source_doc_id`, `locator`, `content: bytes`, `content_type`, `metadata`).
+
+Il `FilesystemConnector` predefinito è privo di dipendenze. `InMemoryConnector` fornisce documenti
+in-process (test / fixture). `HttpConnector` e `NotionConnector` raggiungono knowledge
+base remote e importano in modo lazy `httpx` dietro l'extra `[connectors]`. Sceglierne uno con
+`make_source_connector(spec, **kwargs)` o `RAGSPINE_SOURCE_CONNECTOR`; i connettori di terze parti si
+registrano tramite il gruppo di entry-point `ragspine.source_connectors` (in caso di
+conflitto vincono i nomi built-in). Vedi [Punti di estensione → SourceConnector](/it/docs/reference/extension-points#sourceconnector).
+
+```python
+from ragspine.ingestion.source.connector import make_source_connector
+
+# None / "none" → None; "filesystem"/"fs" → local walk; "http"/"notion" → remote ([connectors]).
+connector = make_source_connector("filesystem")
+for raw in connector.iter_documents():
+    ...  # raw is a RawDoc: source_doc_id, locator, content bytes, content_type, metadata
+```
+
+<Callout type="info">
+  L'extra `[connectors]` installa soltanto `httpx` (con licenza permissiva, importato in modo lazy). Senza alcun
+  connettore selezionato, l'ingestione legge i percorsi locali esattamente come prima — identica byte per byte.
+</Callout>
+
+## Invarianti garantite da questo dominio
+
+- **Ingestione idempotente** — le riesecuzioni strutturate eseguono upsert su `dim_key`; le riesecuzioni narrative saltano
+  in caso di `file_hash` corrispondente. Rieseguire l'ingestione non raddoppia mai lo store.
+- **Provenienza preservata** — ogni fatto e ogni chunk mantiene il proprio `source_doc_id` + locator.
+- **Auto-ingestione conservativa** — tutto ciò che è ambiguo (entità / mappatura / confidenza /
+  conflitto) va a un essere umano, non silenziosamente nello store.
+- **Audit append-only** — le transizioni di revisione vengono registrate, mai sovrascritte.
+
+## Correlati
+
+<Cards>
+  <Card title="Guida all'estrazione" href="/it/docs/guides/extraction" />
+  <Card title="Guida all'archiviazione" href="/it/docs/guides/storage" />
+  <Card title="Guida alle funzioni comuni — sensibilità e glossario" href="/it/docs/guides/common" />
+  <Card title="Voce di glossario sulla coda di revisione" href="/it/docs/concepts/glossary#coda-di-revisione" />
+</Cards>

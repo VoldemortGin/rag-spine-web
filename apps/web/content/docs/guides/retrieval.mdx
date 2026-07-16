@@ -34,6 +34,14 @@ Two properties are non-negotiable here and enforced in code:
       <File name="embedding_backends.py" />
       <File name="store.py" />
     </Folder>
+    <Folder name="filtering">
+      <File name="metadata_filter.py" />
+      <File name="automatic.py" />
+    </Folder>
+    <Folder name="routing">
+      <File name="router.py" />
+      <File name="multi_index.py" />
+    </Folder>
     <Folder name="rerank">
       <File name="listwise_rerank.py" />
     </Folder>
@@ -46,6 +54,21 @@ Two properties are non-negotiable here and enforced in code:
 The pipeline reads left to right: `chunking` produces and versions chunks → `lexical`
 (with optional `vector`) scores and fuses them → `rerank` reorders the top candidates →
 `link` adapts the result into the agent and drops RESTRICTED.
+
+## Current retrieval product presets
+
+`RAGSPINE_RETRIEVAL_MODE=auto` keeps the configured hybrid behavior. The aliases `hybrid` and
+`vector` also allow the embedding/vector path. `economy`, `bm25`, and `lexical` are an explicit
+zero-embedding preset: service assembly does not construct an embedding backend or a vector store.
+
+Metadata predicates support `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, and `between`.
+They are deterministic, order-preserving narrowing operations. Automatic filter extraction is a
+separate optional stage; a failed or absent extraction never broadens past the unfiltered candidate
+set silently.
+
+For multiple libraries, `MultiIndexRetriever` asks a router for library IDs, runs each selected
+index independently, and fuses the ranked lists with RRF. Results carry `library_id` provenance.
+If routing fails, the safe availability fallback searches every configured library.
 
 ## chunking — paragraph-granular chunker + versioned store
 
@@ -68,7 +91,7 @@ offline and deterministic.
     Chunk: {
       type: 'dataclass',
       description:
-        'One chunk: chunk_id (`{doc_id}#c{seq}`), doc_id, seq, text, source_locator (`{prefix}#para{start}` or `…#para{start}-{end}`, 1-based inclusive), para_start, para_end, plus inherited metadata.',
+        'One chunk: chunk_id, doc_id, seq, text, source_locator, paragraph range, inherited metadata, and additive parent_id / heading / window_text / parent_locator expansion fields.',
     },
   }}
 />
@@ -83,8 +106,9 @@ source, which keeps citations honest (see [Provenance](/docs/concepts/provenance
 `chunking/chunk_store.py` is the **versioned chunk store** (SQLite, mirroring the fact
 store: explicit schema, parameterized SQL, a read-only `execute_read` entry point).
 
-- `StoredChunk` — every `Chunk` field plus ingestion metadata: `valid_as_of`, `ingested_at`,
-  `version` (default `1`), `active` (default `True`).
+- `StoredChunk` — every `Chunk` field, including parent/window fields, plus ingestion metadata:
+  `valid_as_of`, `ingested_at`, `version` (default `1`), `active` (default `True`). Older SQLite
+  schemas are migrated additively.
 - `ChunkStore(db_path)` — `init_schema()` creates the `narrative_chunk` table and is
   idempotent. `replace_doc_chunks(doc_id, chunks, valid_as_of="") -> int` does a **versioned
   replacement**: it bumps `version = max(version) + 1`, marks old rows `active=0`, inserts
@@ -287,10 +311,9 @@ isolation and provenance invariants — a new layer never weakens anti-fabricati
 by the stage they act on.
 
 <Callout type="info">
-  The default stays deterministic and offline; selecting a layer is a deliberate opt-in.
-  Numbers always stay in the [structured channel](/docs/architecture/channels) — every layer
-  below only shapes *narrative* retrieval. The per-release list is in the
-  [Changelog](/docs/changelog).
+  The default stays deterministic and offline; selecting a layer is a deliberate opt-in. Numbers
+  always stay in the [structured channel](/docs/architecture/channels) — every layer below only
+  shapes *narrative* retrieval. The per-release list is in the [Changelog](/docs/changelog).
 </Callout>
 
 ### Indexing & chunking
@@ -300,8 +323,9 @@ by the stage they act on.
   fabrication) to the **index/embed text only**. `chunk.text`, `source_locator`, and citations
   stay byte-identical.
 - **Layout-aware & parent-child** (`RAGSPINE_CHUNKER=layout|parent_child`) — split on
-  structural boundaries instead of fixed char budget; children carry a `parent_id` for
-  small-to-big expansion at synthesis.
+  structural boundaries instead of fixed char budget. Children carry `parent_id`, `heading`,
+  `window_text`, and `parent_locator`; the store persists them and retrieval expands the selected
+  child into separate generation-only `prompt_text`.
 - **Sentence-window & semantic** (`RAGSPINE_CHUNKER=sentence_window|semantic`) — one chunk per
   sentence with a synthesis-time window, or embedding-boundary splits (semantic uses
   `[embed-onnx]`).
@@ -311,10 +335,17 @@ by the stage they act on.
   markdown / numbered heading), and **qa** pairs each question (`Q:` / `问：` / a `?`-ending line)
   with the answer paragraphs that follow under a shared `parent_id`. Everything else — the
   budget, `parent_id`, and locators — is inherited from the base chunker.
+
+<Callout type="warn">
+  Parent/window expansion never changes citation identity. `text`, `chunk_id`, and `source_locator`
+  remain the matching child; expanded context uses `prompt_text`. A `RESTRICTED` child is dropped
+  before `_to_snippet`, together with its window, so a safe-looking parent cannot reintroduce
+  restricted text.
+</Callout>
 - **RAPTOR multi-granularity tree** (`make_raptor_retriever` / `RAGSPINE_RAPTOR*`) — recursive
-  **deterministic** threshold clustering; per-cluster `is_synthesis` summaries carry the union
-  of their members' provenance and are **never citable facts**. Retrieval can pull a leaf
-  (detail) or an internal node (theme).
+**deterministic** threshold clustering; per-cluster `is_synthesis` summaries carry the union of
+their members' provenance and are **never citable facts**. Retrieval can pull a leaf (detail) or an
+internal node (theme).
 
 ### Representation & rerank
 
@@ -330,10 +361,10 @@ by the stage they act on.
   term-expansion scoring (interpretable like BM25, stronger), shipped as a reranker.
 
 <Callout type="info">
-  The cross-encoder, ColBERT, and SPLADE rerankers all run **inside** `listwise_rerank`, so
-  they inherit **RESTRICTED exit #1** for free — a RESTRICTED candidate never reaches the
-  reranker. ColBERT / SPLADE ship as **rerankers**; their multi-vector / sparse *retrieval
-  backends* (indexes) are an honest follow-up.
+  The cross-encoder, ColBERT, and SPLADE rerankers all run **inside** `listwise_rerank`, so they
+  inherit **RESTRICTED exit #1** for free — a RESTRICTED candidate never reaches the reranker.
+  ColBERT / SPLADE ship as **rerankers**; their multi-vector / sparse *retrieval backends* (indexes)
+  are an honest follow-up.
 </Callout>
 
 ### Query transformation
@@ -355,8 +386,8 @@ competitor sub-query is refused, so home numbers never leak.
 ### Post-retrieval
 
 - **MMR · lost-in-the-middle · compression** (`RAGSPINE_POSTPROCESSOR`, e.g.
-  `"mmr,lost_in_middle"`) — a deterministic `NodePostprocessor` chain that runs *after* rerank
-  and *before* prompt assembly: MMR diversity de-dup, lost-in-the-middle reordering (best hits
+  `"mmr,lost_in_middle"`) — a deterministic `NodePostprocessor` chain that runs _after_ rerank
+  and _before_ prompt assembly: MMR diversity de-dup, lost-in-the-middle reordering (best hits
   to the head and tail), and extractive context compression. Compression writes a separate
   `prompt_text` key that the agent prefers for the prompt, leaving `text` and every reference
   field byte-identical. The LLMLingua-2 / LLM compressor is a seam follow-up.

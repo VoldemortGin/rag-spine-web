@@ -1,0 +1,44 @@
+---
+title: 'ADR 0008: Prompt — un PromptRegistry pacchettizzato sotto ragspine/prompts/<locale>/'
+description: Esternalizzare i prompt in file di template pacchettizzati e indicizzati per locale dietro un Protocol PromptRegistry, riempiti a runtime con i valori del DomainProfile.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Esente dal tracciamento della deriva (nessun `covers`). Sostituire, non modificare.
+
+Parte della direzione di prodotto [0002](/it/docs/decisions/adr-0002).
+
+## Contesto
+
+I prompt devono uscire dal codice inline. Un prompt è tridimensionale: un **template**
+(con segnaposto) × una **locale** ([0007](/it/docs/decisions/adr-0007))
+× **valori di `DomainProfile`** ([0004](/it/docs/decisions/adr-0004)), e
+l'invariante "nessuna azienda/dominio hardcoded" implica che i template debbano essere riempiti a runtime, mai
+in forma letterale. La posizione originariamente proposta — una cartella `prompts/` nella radice del repository — **non
+viene distribuita nel wheel** (`packages=['ragspine']`), quindi gli utenti `pip install` (il pubblico di
+[0003](/it/docs/decisions/adr-0003)) non la riceverebbero.
+
+## Decisione
+
+Esternalizzare i prompt in file di template **pacchettizzati** in
+`ragspine/prompts/<locale>/<category>/*.jinja`, dietro un **Protocol `PromptRegistry`**
+(implementazione predefinita basata su file, sovrascrivibile dall'utente). I segnaposto vengono riempiti a
+runtime a partire dal `DomainProfile`. Mantenere i prompt **centralizzati** (un unico albero, indicizzato per locale), non co-locati per
+modulo di dominio.
+
+## Alternative considerate (respinte)
+
+- **Cartella `prompts/` nella radice del repository (la proposta originale)**: corretta nell'esternalizzare,
+  ma nella posizione sbagliata — non verrebbe distribuita agli utenti `import ragspine`.
+- **`ragspine/<domain>/prompts/<locale>/` co-locato**: coerente con la co-locazione "trova per
+  cartella" della documentazione, ma disperde una risorsa localizzabile su otto domini. Respinta
+  perché i lettori in questo caso sono traduttori / contributori di pacchetti di locale, che vogliono una sola
+  directory per locale, non una caccia trasversale ai domini (un pattern di accesso diverso da quello della documentazione del codice).
+
+## Conseguenze
+
+- I prompt vengono distribuiti con il wheel e sono sovrascrivibili come qualsiasi altro backend.
+- Un pacchetto di locale ([0007](/it/docs/decisions/adr-0007)) consiste in parte
+  nel "depositare un nuovo albero di prompt `<locale>/`."
+- I traduttori modificano template piatti senza toccare il codice; i diff restano facilmente revisionabili.

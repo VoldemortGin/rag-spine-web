@@ -1,0 +1,238 @@
+---
+title: ストレージ
+description: sqlite 永続化レイヤー — 数値ファクトストアとナラティブチャンクストア、いずれも完全なソースリネージ付き。Fact データクラス、dim_key アップサートキー、そして決定的な found/not-found 読み取り。
+---
+
+**storage** ドメインは、RAGSpine の 2 つのチャネルを支える sqlite 永続化レイヤーです。すなわち
+**ファクトストア**（数値メトリクス）と**チャンクストア**（ナラティブ）です。どちらも完全なソース
+リネージを保持し — すべての行が、自分がどのドキュメントとロケーターに由来するかを知っています —
+そしてどちらも同じ規律あるスタイルに従います：明示的なスキーマ、パラメータ化された SQL、そして
+オブザーバビリティコードが生のコネクションに決して触れないための読み取り専用エントリポイント
+`execute_read` です。
+
+<Callout type="info">
+  ファクトストアは `src/ragspine/storage/fact_store.py` にあります（契約：
+  `src/ragspine/storage/CLAUDE.md`）。ナラティブの**チャンクストア**は retrieval サブツリーの
+  `src/ragspine/retrieval/chunking/chunk_store.py` にあります — これは概念上同一のストレージレイヤーの
+  ナラティブ側の半分であり、そのスキーマは意図的に `fact_store` を鏡写しにしています。両者は同じ sqlite
+  ファイル `data/fact_metric.db` を、別々のテーブルとして共有します。
+</Callout>
+
+## レイアウト
+
+<Files>
+  <Folder name="storage" defaultOpen>
+    <File name="fact_store.py — Fact データクラス + FactStore Protocol + SqliteFactStore（テーブル fact_metric）" />
+  </Folder>
+  <Folder name="retrieval/chunking">
+    <File name="chunk_store.py — StoredChunk + ChunkStore（テーブル narrative_chunk）" />
+  </Folder>
+</Files>
+
+## Fact データクラス
+
+`Fact` は 1 つのメトリクスデータポイントです：ディメンション + 値 + リネージ（+ v2 の
+スタイルセマンティクスおよびバージョンリネージのフィールド）。これは `@dataclass` です（frozen では
+ありません）。フィールドの**順序は契約の一部**です：先頭の 10 個は位置固定（positional-frozen）であり、
+新しいフィールドは末尾への追加のみが許されます。
+
+<TypeTable
+  type={{
+    metric_code: { type: 'str', description: "1 — 例：'REVENUE'。" },
+    entity: { type: 'str', description: '2 — 統制されたエンティティコード。' },
+    geography: { type: 'str', description: '3 — 非アイデンティティ、上書き可能。' },
+    channel: { type: 'str', description: "4 — 例：'TOTAL'、'AGENCY'。" },
+    period_type: { type: 'str', description: "5 — 'FY' / 'HY' / 'QUARTER'。" },
+    period: { type: 'str', description: "6 — 例：'2024'。" },
+    value: { type: 'float', description: '7 — 数値そのもの。' },
+    unit: { type: 'str', description: "8 — 例：'USD_M'、'PCT'。" },
+    source_doc_id: { type: 'str', description: '9 — リネージ。' },
+    source_locator: { type: 'str', description: "10 — リネージ（例：'sheet=5yr!C4'）。" },
+    tags: { type: 'dict[str, object]', default: '{}' },
+    source_file_hash: { type: 'str | None', default: 'None' },
+    extractor_version: { type: 'str | None', default: 'None' },
+    mapping_version: { type: 'int | None', default: 'None' },
+    confidence: { type: 'float | None', default: 'None' },
+    review_status: { type: 'str', default: 'REVIEW_AUTO_APPROVED' },
+    valid_as_of: { type: 'str | None', default: 'None' },
+    ingested_at: { type: 'str | None', default: 'None' },
+    corrected_by: {
+      type: 'str | None',
+      default: 'None',
+      description: '訂正リネージ — 訂正を適用した SME。',
+    },
+    corrected_audit_seq: {
+      type: 'int | None',
+      default: 'None',
+      description: '訂正リネージ — その値の背後にあるレビュー監査 seq。',
+    },
+    dimensions: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'インメモリのバッグであり、DB カラムでは**ない**。',
+    },
+  }}
+/>
+
+<Callout type="warn">
+  **先頭の 10 フィールドは位置固定（positional-frozen）です** — `metric_code, entity, geography, channel,
+  period_type, period, value, unit, source_doc_id, source_locator`。評価ハーネスは `Fact(*row)` で
+  10 要素のタプルをバインドします。いずれかを並べ替えたり削除したりするとハーネスが壊れます。新しい
+  フィールドは**追加のみ**で、末尾に付け足します — `dimensions` が最後のフィールドです。
+</Callout>
+
+この 10 個の位置引数フィールドは取り違えやすいため、メトリクスファクトはキーワード専用の
+クラスメソッド `Fact.metric(*, metric_code, entity, period_type, period, value, unit,
+source_doc_id, source_locator, channel="TOTAL", geography="", **extra)` で構築してください —
+順序に依存せず、`channel` / `geography` にはデフォルトがあり、追加型の v2 フィールドは `**extra`
+経由で渡されます。返るのは通常の `Fact` なので、位置引数 10 タプルの契約（`Fact(*row)`）は
+損なわれません。
+
+`dimensions` はインメモリの任意ディメンションバッグで、**DB カラムからは除外されます**。その
+`__post_init__` ガードは、キーが構造 / リネージ / `dim_key` の予約名と衝突した場合に `ValueError` を
+送出し、バッグが空のときはアイデンティティのミラー
+（`{metric, entity, channel, period}`）を導出します。これはカラムに書き込まれることも、
+`Fact(**data)` として再構築されることも決してありません。
+
+### レビューステータス
+
+`review_status` は可視性を制御します。デフォルト可視の読み取りは
+`VISIBLE_REVIEW_STATUSES = (REVIEW_AUTO_APPROVED, REVIEW_APPROVED)` のみを返します。完全な集合は
+`auto_approved`、`pending`、`approved`、`rejected`、`blocked` です。
+
+## FactStore
+
+`FactStore` は `@runtime_checkable` な **Protocol** です — コアが import する縫い目（seam）であり
+（型ヒント / `isinstance` の対象としてのみ使用します。インスタンス化すると例外が送出されます）、
+実際に構築するクラスはゼロ依存の sqlite デフォルト実装 `SqliteFactStore` です。直接構築するか、
+`make_fact_store(spec, **kwargs)` ファクトリ / 環境変数 `RAGSPINE_FACT_STORE` を通じて構築します
+（サードパーティ製バックエンドはエントリポイントグループ `ragspine.fact_stores` に登録します）。
+
+```python
+from ragspine.storage.fact_store import Fact, SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+
+store.upsert_facts([
+    Fact("REVENUE", "ACME_GROUP", "ASIA", "TOTAL", "FY", "2024",
+         1234.5, "USD_M", "doc-42", "sheet=5yr!C4"),
+])
+
+hits = store.query("REVENUE", "ACME_GROUP", "FY", "2024")   # [] = not found, [Fact] = found
+store.close()
+```
+
+| メソッド                                                                                                                    | 目的                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `init_schema()`                                                                                                           | `fact_metric` を作成し、v2 カラムマイグレーションを実行し、2 つのユニークインデックスを作成する                                          |
+| `upsert_facts(facts, ingested_at=None) -> int`                                                                            | バッチ挿入。`dim_key` の競合時は値 + リネージを上書きし、書き込んだ件数を返す                                  |
+| `query(metric_code, entity, period_type, period, channel="TOTAL", review_statuses=VISIBLE_REVIEW_STATUSES) -> list[Fact]` | 完全一致のパラメータ化ルックアップ。0 行または 1 行を返す                                                                         |
+| `count() -> int`                                                                                                          | ファクトの総数                                                                                                            |
+| `has_source_doc(source_doc_id) -> bool`                                                                                   | そのドキュメントのファクトが（レビューステータスを問わず）_1 件でも_ 存在すれば `True` — 冪等 / 増分リフレッシュのための存在プローブ |
+| `execute_read(sql, params=()) -> list[sqlite3.Row]`                                                                       | 台帳/メトリクスの再利用のための読み取り専用 SELECT エントリポイント                                                              |
+| `delete_by_source_doc(source_doc_id) -> int`                                                                              | あるドキュメントのファクトを（レビューステータスを問わず）物理削除する。冪等                                                        |
+| `set_review_status(dim_key, status) -> int`                                                                               | 人間によるレビューの書き戻し：`dim_key` で 1 件のファクトの `review_status` を切り替える。0 または 1 を返す                                  |
+| `dim_key_for(fact) -> str` _(static)_                                                                                     | `Fact` の `dim_key` を型付きアイデンティティカラムから計算する（公開アクセサ — `dim_key` は決して `Fact` のフィールドにはならない） |
+| `get_by_dim_key(dim_key) -> Fact \| None`                                                                                 | `dim_key` で 1 件のファクトを取得する（レビューステータスを問わない）。存在しなければ `None`                                              |
+| `close()`                                                                                                                 | 冪等なコネクションクローズ（`weakref.finalize` により GC 時にも自動でクローズされる）                                            |
+
+テーブルは `fact_metric` です。`query()` は
+`(metric_code, entity, period_type, period, channel)` に対する完全一致の `SELECT` を発行します。
+この組み合わせはユニークなので、結果は常に **0 行（not found）または 1 行（found）** です。この
+決定性こそが[捏造防止の不変量](/ja/docs/concepts/anti-fabrication)が依拠するものです — `found` な
+ファクトが存在しなければ、オーケストレーターは回答を「not found」に書き換えます。
+
+### `dim_key` — アップサートキー
+
+`dim_key` はアップサートの競合キーです：**アイデンティティディメンションのみ** — `metric`、
+`entity`、`channel`、`period`（`period_type + period` なので `('FY','2024')` と `('HY','2024')` は
+別物）— にわたる、正規化されたソート済み JSON の自然キーです。`geography` は
+`identity=False` の上書き可能な非キーカラムであり、キーには**含まれません**。
+
+<Callout type="info">
+  `dim_key` は `_compute_dim_key` によって型付きカラムから計算され（`dimensions` バッグは決して
+  読みません）、すべての書き込み時とレガシーバックフィル時に再計算されます。そして**ストレージ専用**です —
+  決して `Fact` のフィールドにはならず、決して `Fact` に再構築されません。各アイデンティティの
+  組み合わせを 0 行または 1 行に保つことこそが、決定的な found/not-found 読み取りパスを守っています。
+</Callout>
+
+2 つのユニークインデックスが併存し、同一のファイナンス上の一意性をエンコードしています：
+
+- `ux_fact_dim_key` — `UNIQUE (dim_key)`。アップサートの競合ターゲット。
+- `ux_fact_metric` — `UNIQUE (metric_code, entity, period_type, period, channel)`。レガシーの
+  複合インデックスで、並行して維持されています。
+
+競合時、`upsert_facts` は上書き可能なカラム —
+`geography, value, unit, source_doc_id, source_locator` に加えてすべての v2 / 来歴フィールド
+（`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
+valid_as_of, ingested_at, corrected_by, corrected_audit_seq`）— を上書きし、`ingested_at` を自ら記録します。したがって同じデータを
+再取り込みしてもストアが増えることは決してありません。これが
+[冪等なインジェスチョン](/ja/docs/guides/ingestion#バッチマニフェスト台帳)の背骨です。
+
+### 自動マイグレーションするスキーマ
+
+`init_schema()` は、既存のテーブルに対して不足している v2 カラムと `dim_key` カラムを ALTER で追加し、
+その後 `dim_key` が `NULL` の行をバックフィルします（各行のアイデンティティカラムから Python で
+再計算します）。v2 フィールドはすべてデフォルト値を持つため、既存の `Fact(...)` 呼び出しは
+変更不要です。
+
+## チャンクストア
+
+`ChunkStore`（`retrieval/chunking/chunk_store.py`）はナラティブ側の対応物で、`fact_store` を手本に
+しています — 明示的な `narrative_chunk` スキーマ、パラメータ化された SQL、`execute_read`。
+`StoredChunk` は 1 つのチャンクのコンテンツとメタデータです：`chunk_id`、`doc_id`、`seq`、`text`、
+`source_locator`、`para_start`、`para_end`、`title`、`topic`、`entity`、`geography`、
+`period`、`language`、`sensitivity`（デフォルト `"INTERNAL"`）、`valid_as_of`、`ingested_at`、
+`version`、`active`。現行のスキーマには `parent_id`、`heading`、`window_text`、`parent_locator` が
+追加されています。`init_schema()` はこれらのカラムを空のデフォルト値付きで古いデータベースに追加するため、
+既存のチャンクストアは引き続き読み取り可能です。
+
+`window_text` は生成専用の拡張コンテキストです。検索ヒットと引用は子チャンクの
+`text`、`chunk_id`、`source_locator` を保持します。`parent_locator` は来歴のバックリファレンスであり、
+ロケーターの置き換えではありません。RESTRICTED な子チャンクは、プロンプト組み立ての前に、その
+拡張コンテキストごと除去されます。
+
+`replace_doc_chunks(doc_id, chunks, valid_as_of="")` が**バージョン付きで冪等な**書き込みです：
+ドキュメントを再取り込みすると、旧バージョンの行を `active=0` に切り替え、新しいチャンクを
+`version = max+1, active=1` で挿入します。アクティブ集合は常に最新の取り込みと一致し、旧バージョンは
+リネージのために残ります。空のリストを渡すと、そのドキュメントはアクティブ集合から取り下げられます。
+
+<Callout type="info">
+  検索はスコアリングの*前に*チャンクメタデータ（`active`、機密度、期間など）で事前フィルタリング
+  します。`sensitivity` カラムこそが、下流の [RESTRICTED 分離](/ja/docs/concepts/restricted-isolation)
+  を支えるものです。
+</Callout>
+
+## リソース管理
+
+どちらのストアも `row_factory = sqlite3.Row` を設定した 1 本の `sqlite3` コネクションを開き、
+`weakref.finalize` を登録するので、呼び出し側が `close()` を忘れても GC 時にコネクションが
+決定的にクローズされます — これにより、むき出しの sqlite コネクションがゼロ警告ゲートの下で
+`ResourceWarning` を送出することを防ぎます。`close()` は冪等です。
+
+## デフォルトのデータベースパス
+
+デフォルト値は [`common/core.py`](/ja/docs/guides/common#core--グローバル定数) に由来します：
+`DEFAULT_FACT_DB = data/fact_metric.db`（`fact_metric` と `narrative_chunk` の両方を保持）、
+`DEFAULT_MAPPING_DB = data/color_mapping.db`、
+`DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`。
+
+## このドメインが守る不変量
+
+- **出典追跡** — すべてのファクトとチャンクは `source_doc_id` + ロケーターを持ち、リネージが
+  失われることは決してありません。
+- **決定的な found/not-found** — ユニークな `dim_key` が各メトリクスアイデンティティを 1 行に
+  保つので、ファクトの不在は曖昧さなく判定できます。
+- **フィールド順序の契約** — `Fact` の先頭 10 フィールドは位置固定です。追加は末尾への
+  append のみで、`dimensions` は決してカラムになりません。
+- **冪等な書き込み** — ファクトは `dim_key` でアップサートされ、チャンクはバージョンで置き換えられます。
+
+## 関連
+
+<Cards>
+  <Card title="インジェスチョンガイド" href="/ja/docs/guides/ingestion" />
+  <Card title="抽出ガイド — Fact の源" href="/ja/docs/guides/extraction" />
+  <Card title="コンセプト：捏造防止" href="/ja/docs/concepts/anti-fabrication" />
+  <Card title="コンセプト：出典追跡とリネージ" href="/ja/docs/concepts/provenance" />
+</Cards>

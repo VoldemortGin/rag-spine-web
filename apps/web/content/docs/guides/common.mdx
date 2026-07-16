@@ -139,7 +139,7 @@ Unrecognized input returns `None`; it never guesses.
 | `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | relative period (今年/去年/上季度…) → `(period_type, period)` |
 
 Period normalization produces the same `period_type` values used by the
-[fact store](/docs/guides/storage#dim_key-the-upsert-key): `FY` (`FY2024` / `2024`),
+[fact store](/docs/guides/storage#dim_key--the-upsert-key): `FY` (`FY2024` / `2024`),
 `HY` (`2024H1`), and `QUARTER` (`2025Q1`).
 
 ```python

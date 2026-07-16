@@ -1,206 +1,74 @@
 ---
 title: Channels
-description: The structured channel (function-calling over the fact store), the narrative channel (hybrid retrieve → listwise rerank → cited synthesis), and the composite path that runs both and merges.
+description: Structured facts, narrative retrieval, composite answers, and provenance-aware graph utilities.
 ---
 
-RAGSpine answers two fundamentally different kinds of question with two fundamentally
-different mechanisms, and the agent's router decides which one — or both — a question needs.
-This page describes the internal pipeline of each channel; for the _why_ and the routing
-decision, see the [Dual-channel concept](/docs/concepts/dual-channel).
-
-<Cards>
-  <Card title="Structured channel">
-    “What’s the number?” — function-calling over a fact table. Deterministic; the value is never
-    synthesized by the model.
-  </Card>
-  <Card title="Narrative channel">
-    “Why / what happened?” — hybrid retrieval over document chunks, optional rerank, then LLM
-    synthesis with forced citations.
-  </Card>
-  <Card title="Composite">
-    Both at once — run the structured path, then append a narrative attribution section, and
-    concatenate sources.
-  </Card>
-</Cards>
+RAGSpine uses different evidence mechanisms for numeric facts and explanatory text. The agent
+selects `structured`, `narrative`, or `composite`; graph utilities remain an explicit supporting
+surface rather than a hidden fourth routing branch.
 
 ## Structured channel
 
-The structured channel's only fact-producing primitive is the `query_metric` tool
-(`agent/query_tools.py`), driven through the tool-use loop in `agent/agent.py`
-(`_run_tool_loop`, capped at `MAX_TOOL_ITERATIONS = 5`). Its execution function normalizes
-every parameter through the glossary, queries the `fact_metric` store, and returns one of
-**three** statuses — never a guess:
+`query_metric` normalizes metric, entity, period, and channel through controlled glossaries and
+queries `FactStore`. Its result is exactly one of `found`, `not_found`, or
+`unrecognized_param`.
 
-<Tabs items={["found", "not_found", "unrecognized_param"]}>
-  <Tab value="found">
-    The exact row exists. Returns the value, unit, every controlled dimension code, and full
-    lineage. The agent then rebuilds the answer line from this value (it does **not** trust
-    the model's prose for the number).
+- On `found`, final numeric prose is rebuilt from the stored fact, and carries
+  `source_doc_id`/locator.
+- On `not_found`, the result is a fixed number-free refusal.
+- On an unrecognized parameter, the response identifies the unsupported input instead of guessing.
 
-    ```json
-    {
-      "status": "found",
-      "value": 1320,
-      "unit": "USD_M",
-      "metric_code": "REVENUE",
-      "entity": "ACME_CN",
-      "period_type": "FY",
-      "period": "2024",
-      "channel": "TOTAL",
-      "source": { "doc": "ACME_FY2024_Review.pptx", "locator": "slide=2,table=1,row=REVENUE,col=FY2024" }
-    }
-    ```
-
-  </Tab>
-  <Tab value="not_found">
-    Every parameter normalized, but no matching row in the fact table. **No interpolation, no
-    inference** — the agent rewrites this to an honest refusal.
-
-    ```json
-    {
-      "status": "not_found",
-      "normalized": { "metric_code": "REVENUE", "entity": "ACME_CN", "period": "2025", "channel": "TOTAL" }
-    }
-    ```
-
-  </Tab>
-  <Tab value="unrecognized_param">
-    A parameter could not be normalized to a controlled code — the glossary returns `None`
-    rather than guessing. The offending parameter and its raw value are named.
-
-    ```json
-    { "status": "unrecognized_param", "param": "entity", "raw": "some unknown company" }
-    ```
-
-  </Tab>
-</Tabs>
-
-<Callout type="warn">
-  The glossary normalizers (`normalize_metric` / `normalize_entity` / `normalize_period`) return
-  `None` on anything they don't recognize, and that `None` becomes `unrecognized_param` — it is
-  never coerced into a best-guess code. A present-but-unknown channel is passed through literally,
-  so a typo'd channel yields `not_found` rather than a silent fallback to `TOTAL`.
-</Callout>
-
-When the user explicitly lists several metrics / entities / periods, the structured side
-expands into sub-tasks executed **deterministically without the LLM** (`_multi_subtask_answer`)
-— and for exactly two comparable periods, the agent computes the difference itself.
+The model cannot supply a replacement number for a failed lookup.
 
 ## Narrative channel
 
-When the route is `narrative`, the agent calls an injected `NarrativeRetriever`
-(`_run_narrative`). The default chain (`retrieval/`) runs in a fixed order:
-
-<Steps>
-  <Step>
-    **Metadata pre-filter.** Before any scoring, candidate chunks are filtered by metadata (topic /
-    entity / geography / period / language). For the versioned chunk store this filter is pushed
-    down to storage (`ChunkStore.iter_chunks`, active versions only).
-  </Step>
-  <Step>
-    **Glossary multi-query rewrite.** `GlossaryQueryRewriter` (a `QueryRewriter` Protocol impl)
-    expands the query into variants — substituting recognized terms with their controlled code, then
-    with sibling synonyms sharing that code. Pure-rule, zero LLM.
-  </Step>
-  <Step>
-    **Hybrid retrieve.** For each rewritten query, CJK-aware Okapi BM25 (unigram + adjacent bigram
-    tokenization) produces a ranking; if and only if an `EmbeddingBackend` is injected, a
-    cosine-similarity vector ranking is added too. The default is **none = pure BM25**.
-  </Step>
-  <Step>
-    **RRF fusion.** All rankings are merged with Reciprocal Rank Fusion (`rrf_fuse`) at the standard
-    constant `DEFAULT_RRF_K = 60`, sorted by `(-fused_score, chunk_id)` for a deterministic
-    tie-break, and truncated to `top_k` (default 50).
-  </Step>
-  <Step>
-    **Listwise rerank.** An optional LLM listwise judge (`listwise_rerank`, behind the
-    `ListwiseJudge` Protocol) reorders the top candidates. On any judge exception or invalid output
-    it falls back to the RRF order — it never raises.
-  </Step>
-  <Step>
-    **Synthesize with citations.** The LLM answers **only from the supplied snippets**, and the
-    agent force-appends any source document name the model failed to cite.
-  </Step>
-</Steps>
-
-<Callout type="info">
-  **RESTRICTED isolation.** Sensitivity-`RESTRICTED` content is filtered at **two** exits before it
-  can reach a prompt: the rerank layer keeps `RESTRICTED` chunks out of the judge prompt, and the
-  link adapter (`NarrativeIndexRetriever.retrieve`) physically drops them from the returned snippets
-  before synthesis. Both checks use the same case-insensitive `RESTRICTED` test — see [RESTRICTED
-  isolation](/docs/concepts/restricted-isolation).
-</Callout>
-
-If no retriever is wired, or retrieval returns nothing, the narrative channel degrades
-honestly ("not retrieved / not yet wired") rather than inventing an answer.
-
-## Composite path — run both, compare, merge
-
-For a composite question (a recognized metric **and** a narrative cue, e.g. _"why did revenue
-fall?"_), the agent runs the structured path first, then runs the narrative path and merges:
-
 ```text
-<structured answer, with the number(s) + lineage>
-
-归因分析：
-<narrative answer, synthesized from cited snippets>
+question
+  → optional deterministic/automatic metadata filters
+  → optional library router
+  → per-library lexical and optional vector search
+  → reciprocal-rank fusion
+  → optional rerank / postprocess
+  → child-hit expansion for parent/window prompt context
+  → cited generation
 ```
 
-Sources from both channels are concatenated. The two channels never blur into a single
-"ask the model" path — the structured side remains the only thing allowed to produce a
-numeric fact, and it does so without trusting model prose.
+Retrieval modes `economy`, `bm25`, and `lexical` construct no embedding backend or vector store.
+Hybrid/auto modes can use ONNX embeddings when installed. The metadata filter operators are `eq`,
+`ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, and `between`; filtering only narrows and preserves
+the incoming order.
 
-## Graph multi-hop (opt-in)
+`MultiIndexRetriever` searches routed libraries independently, RRF-fuses their results, and retains
+`library_id` provenance. If routing fails, it searches all registered libraries rather than silently
+returning nothing.
 
-Alongside the two router channels, 0.7.0 adds a **standalone** structured-graph surface
-(`graph/`) — deliberately **not** a third branch of the router (`answer_question` is
-byte-unchanged), but a separate opt-in `GraphQuery` entry for the multi-hop questions the flat
-top-k and exact-SQL channels structurally cannot answer:
+### Parent-child and sentence-window evidence
 
-<Cards>
-  <Card title="Subsidiary roll-up" description="Walk parent_of edges, run one exact fact query per subsidiary, and sum with every contributing Fact cited." />
-  <Card title="Peer comparison" description="Compare an entity against its competitor edges, each side backed by its own cited facts." />
-  <Card title="Derivation tracing" description="Walk derives edges (a dimension's derived_from / derivation) with per-edge provenance." />
-</Cards>
+Small chunks produce precise hits, while a parent or window can improve generation context. The
+chunk store persists `parent_id`, `heading`, `window_text`, and `parent_locator`. A returned snippet
+keeps the **child** `text`, `chunk_id`, and `source_locator`; expansion is placed in separate
+`prompt_text`, with `parent_locator` as a backreference. Citations therefore point to the matched
+child, not to an invented aggregate.
 
-The graph is built **deterministically over the controlled dimensions** — zero LLM triple
-extraction, every node and edge carrying lineage — so it stays fully cited and
-anti-fabrication-safe, and it inherits the same `SecurityGate` (a competitor entity is refused)
-and RESTRICTED isolation (a RESTRICTED-sourced node never surfaces in a traversal). Backends
-plug in behind a `GraphStore` Protocol (in-process default, `networkx` adapter behind
-`[graph]`); a Microsoft-style narrative-GraphRAG extraction / community layer ships as an
-opt-in **skeleton** behind `[graph]` + `[llm]`. See the
-[Retrieval guide](/docs/guides/retrieval) and [Changelog](/docs/changelog).
+Restricted children are discarded before snippet construction. Their parent/window content is
+discarded with them, so expansion cannot bypass isolation.
 
-## At a glance
+## Composite route
 
-|                   | Structured                      | Narrative                             | Composite                   |
-| ----------------- | ------------------------------- | ------------------------------------- | --------------------------- |
-| **Answers**       | "what's the number"             | "why / what happened"                 | both                        |
-| **Backing store** | `fact_metric` (numeric)         | versioned chunk store                 | both                        |
-| **Mechanism**     | `query_metric` function-calling | hybrid retrieve → rerank → synthesize | run both, append `归因分析` |
-| **Model trust**   | none — value from fact store    | prose trusted, citations forced       | per-path                    |
-| **Failure mode**  | `not_found` / `unrecognized`    | honest degrade if unwired/empty       | per-path                    |
+A composite question executes the structured facts and narrative attribution paths separately,
+then merges their answers and source lists. Narrative prose cannot promote itself into structured
+numeric evidence. Conversation history is generation context only and likewise cannot become
+evidence.
 
-<Cards>
-  <Card
-    title="Dual-channel concept"
-    href="/docs/concepts/dual-channel"
-    description="The routing decision and the four intent slots, in depth."
-  />
-  <Card
-    title="Anti-fabrication"
-    href="/docs/concepts/anti-fabrication"
-    description="Why the structured channel discards model prose for the number."
-  />
-  <Card
-    title="Retrieval guide"
-    href="/docs/guides/retrieval"
-    description="Tuning BM25, injecting a vector backend, and wiring the reranker."
-  />
-  <Card
-    title="Agent guide"
-    href="/docs/guides/agent"
-    description="The orchestrator, intent parsing, and the clarification gateway."
-  />
-</Cards>
+## Graph utilities
+
+The `graph` domain provides deterministic structured relation graphs for roll-ups, comparisons,
+and derivation tracing, plus opt-in narrative relation extraction. Model-derived edges are marked
+`model-derived` and `unverified`, preserve caller-supplied lineage, and are screened by the same
+security boundary. GraphRAG helpers do not replace the dual-channel router.
+
+## Workflow graphs are separate
+
+Workflow preview v1 is a redacted UI projection of a Dify-compatible graph. It describes nodes,
+edges, labels, and geometry only; it is not narrative evidence, an engine topology, or an executable
+format. See [Workflows](/docs/guides/workflows#preview-protocol-v1).

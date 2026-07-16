@@ -11,25 +11,17 @@ import {
   type SharedProps,
 } from 'fumadocs-ui/components/dialog/search';
 import { useDocsSearch } from 'fumadocs-core/search/client';
-import { oramaStaticClient } from 'fumadocs-core/search/client/orama-static';
-import { create } from '@orama/orama';
+import { flexsearchStaticClient } from 'fumadocs-core/search/client/flexsearch-static';
 import { useI18n } from 'fumadocs-ui/contexts/i18n';
-
-function initOrama() {
-  return create({
-    schema: { _: 'string' },
-    // https://docs.orama.com/docs/orama-js/supported-languages
-    language: 'english',
-  });
-}
+import { defaultLocale, isLocale } from '@/lib/i18n';
 
 export default function DefaultSearchDialog(props: SharedProps) {
-  const { locale } = useI18n(); // (optional) for i18n
+  const { locale } = useI18n();
+  const searchLocale = locale !== undefined && isLocale(locale) ? locale : defaultLocale;
   const { search, setSearch, query } = useDocsSearch({
-    client: oramaStaticClient({
-      initOrama,
-      // exactOptionalPropertyTypes: only pass `locale` when defined (StaticOptions.locale is `string`).
-      ...(locale !== undefined ? { locale } : {}),
+    client: flexsearchStaticClient({
+      from: `/api/search/${searchLocale}`,
+      locale: searchLocale,
     }),
   });
 

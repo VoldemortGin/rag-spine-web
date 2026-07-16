@@ -17,15 +17,39 @@ def answer_question(
     reference_date: date | None = None,
     narrative_retriever: NarrativeRetriever | None = None,
     intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
 ) -> AgentResult: ...
 ```
 
-`AgentResult` carries `answer`, `route`, `clarification`, `tool_results`, and `sources`. The
-flow below is strictly ordered — the early returns must not be reordered, because the
-clarification and refusal decisions deliberately fire _before_ any tool, retrieval, or LLM
-call.
+`AgentResult` carries `answer`, `route`, `clarification`, `tool_results`, and `sources`. With the
+default `decomposer=None`, the normal single-question path is strictly ordered: its clarification
+and refusal decisions fire before its tool, retrieval, or generation calls. The optional
+decomposition pre-step and the HTTP FAQ pre-step sit outside that normal path and are called out
+separately below.
+
+`history` is generation context only. It is normalized into provider messages after intent and
+clarification, between the system message and the current question. It never participates in
+intent parsing, security decisions, retrieval queries, or evidence/citation assembly. A
+decomposed request passes the same history to each guarded subquestion.
 
 <Steps>
+
+<Step>
+### Optional decomposition — opt-in pre-step
+
+When a `decomposer` is injected, `answer_question` calls it before entering the normal
+single-question intent/clarification path. The shipped `LLMQueryDecomposer` may therefore make one
+provider call at this point. It is opt-in; the default `None` makes no such call.
+
+If the decomposer returns more than one subquestion, each subquestion recursively runs the full
+`answer_question` path with decomposition disabled, independently applying intent parsing,
+clarification, the security gate, retrieval, and anti-fabrication rewriting. The final
+`route="decomposed"` result is a deterministic concatenation with deduplicated sources; synthesis
+does not call the model. A one-item result, malformed response, or provider failure falls back to
+the original normal path.
+
+</Step>
 
 <Step>
 ### Intent parse — four slots
@@ -69,17 +93,18 @@ constants. The branches are checked in this exact order:
 
 <Tabs items={['out_of_scope_entity', 'ask_first', 'answer_with_assumptions', 'none']}>
   <Tab value="out_of_scope_entity">
-    **Refuse — checked first, before everything.** The gate calls a deterministic
+    **Refuse — checked first on the normal single-question path.** The gate calls a deterministic
     `SecurityGate.screen(...)` on the **raw question** (not the parsed `external_entity` field), so
     swapping in an LLM parser cannot defeat the refusal. If the verdict is out-of-scope/competitor,
-    `answer_question` returns the refusal message immediately — no tool, no retrieval, no LLM call.
+    `answer_question` returns the refusal message immediately on this path — no tool, retrieval, or
+    further LLM call.
     This is the `CLARIFY_OUT_OF_SCOPE_ENTITY` early return.
   </Tab>
   <Tab value="ask_first">
     **Ambiguous → ask.** If `intent.metric is None` (and the route is not narrative), the gate
     returns `CLARIFY_ASK_FIRST` with a question listing the supported metrics. Guessing the metric
     would be a substantive error, so the agent asks instead of assuming — and returns the clarifying
-    question with no LLM call.
+    question with no further LLM call.
   </Tab>
   <Tab value="answer_with_assumptions">
     **Missing entity / period → assume and surface it.** A missing `entity` defaults to the home
@@ -103,8 +128,9 @@ constants. The branches are checked in this exact order:
 <Step>
 ### FAQ short-circuit — the service edge
 
-This step exists only when the HTTP service fronts the engine (`POST /v1/ask`). Before the
-route handler opens the fact store or retriever, it calls `faq_cache.lookup(question, ...)`.
+This step exists only when the HTTP service fronts the engine (`POST /v1/ask`). It is an outer
+pre-step: before the route handler calls `answer_question` or opens the fact store or retriever, it
+calls `faq_cache.lookup(question, ...)`.
 A vetted hit returns an `AskResponse(route="faq", ...)` with the cached answer and provenance
 — it **never reaches the provider, fact store, or retriever**.
 
@@ -177,22 +203,28 @@ never the answer, fact value, or chunk text.
 ## The full path at a glance
 
 ```text
+HTTP service outer pre-step (before answer_question):
+  faq_cache.lookup → vetted hit returns; else call answer_question
+
 answer_question(question, store, provider, …)
+  0. optional decomposer:
+       >1 subquestions → answer each with full guards, then deterministic route="decomposed"
+       one/failure     → continue through the normal single-question path
   1. parse → ParsedIntent { metric, entity, period, channel, route }   # no LLM
   2. clarify_scope(intent):
-       out_of_scope_entity      → return refusal            (no tool / retrieval / LLM)
-       ask_first (no metric)    → return clarifying question (no LLM)
+       out_of_scope_entity      → return refusal            (no further tool / retrieval / LLM)
+       ask_first (no metric)    → return clarifying question (no further LLM)
        answer_with_assumptions  → set defaults + banner, continue
-  3. (HTTP edge only) faq_cache.lookup → vetted hit returns; else fall through
-  4. route on intent.route:
+     history → provider generation messages only; never intent/security/retrieval/evidence
+  3. route on intent.route:
        narrative  → _run_narrative
        structured → single: _run_tool_loop (query_metric, ≤5 iters)
                      multi : _run_subtasks (deterministic, no LLM)
        composite  → structured, then append _run_narrative under 归因分析
-  5. anti-fabrication guard (_structured_answer):
+  4. anti-fabrication guard (_structured_answer):
        found              → discard model text, rebuild from fact value + lineage
        not_found          → rewrite to honest refusal
        unrecognized_param → name the bad parameter
        (narrative path: trust prose, force citations)
-  6. return AgentResult { answer, route, tool_results, sources }
+  5. return AgentResult { answer, route, tool_results, sources }
 ```

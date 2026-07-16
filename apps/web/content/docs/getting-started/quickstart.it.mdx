@@ -1,0 +1,99 @@
+---
+title: Guida rapida
+description: Esegui la demo deterministica, crea lo scaffolding di un flusso di lavoro compatibile con Dify, invoca l'API Python e avvia il servizio opzionale.
+---
+
+I comandi che fanno riferimento a `scripts/` sono comandi per il checkout dei sorgenti e devono essere eseguiti dalla
+radice del repository RAGSpine. Il comando `ragspine` installato funziona da qualsiasi directory.
+
+## 1. Verifica il motore offline
+
+```bash
+ragspine quickstart
+ragspine version
+```
+
+In un checkout dei sorgenti, l'esecuzione end-to-end più estesa con le fixture è:
+
+```bash
+.venv/bin/python scripts/run_demo.py
+```
+
+Estrae e importa fatti sintetici, li interroga, verifica la tracciabilità delle fonti e termina con
+`ALL CHECKS PASSED` in caso di successo. Non è richiesta alcuna chiave API.
+
+## 2. Crea un flusso di lavoro a partire da una singola frase
+
+La forma più breve interpreta un primo argomento posizionale sconosciuto come `workflow create`:
+
+```bash
+ragspine "A RAG form-understanding paper workflow using CNN"
+```
+
+Il comando prova innanzitutto a trovare una corrispondenza tra i 1.000 template inclusi. Se la corrispondenza non è
+sufficientemente affidabile, crea un flusso di lavoro Dify 0.6 fisso `start → llm → end`. Per impostazione predefinita il comando scrive un
+nuovo file YAML e non lo esegue. Le forme esplicite equivalenti includono:
+
+```bash
+ragspine workflow create "invoice extraction and approval" --stdout
+ragspine workflow create "support triage" --format json -o support.json
+ragspine workflow create --template conditional-response-routing -o routing.yml
+ragspine workflow list
+ragspine workflow show conditional-response-routing --format json
+ragspine workflow preview conditional-response-routing
+```
+
+Il matcher predefinito `auto` utilizza il matcher ONNX quando `[embed-onnx]` è disponibile e in caso contrario
+ricade sulla corrispondenza lessicale deterministica. Usa `--matcher lexical` per un percorso
+garantito senza modelli, `--no-reuse` per forzare la generazione e `--force` solo quando sostituisci un normale
+file esistente. I link simbolici e i file speciali vengono sempre rifiutati.
+
+Consulta la [guida ai flussi di lavoro](/it/docs/guides/workflows) per la provenienza del catalogo, i limiti di formato e lo
+schema di anteprima.
+
+## 3. Interroga tramite Python
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+print(result.answer)
+print(result.sources)
+```
+
+`answer_question` restituisce evidenze citate o un rifiuto esplicito. La `history` opzionale della conversazione
+è esclusivamente contesto di generazione: non viene mai usata come evidenza di recupero né come input per le
+decisioni di intento e di sicurezza.
+
+## 4. Avvia il servizio HTTP opzionale
+
+Installa `[service]`, poi in un checkout dei sorgenti:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/v1/workflow-templates?limit=10
+curl -s http://127.0.0.1:8000/v1/workflow-scaffold \
+  -H 'content-type: application/json' \
+  -d '{"description":"invoice extraction and approval"}'
+```
+
+Le route del catalogo e dello scaffolding sono di sola lettura e non eseguono nulla. Le route di esecuzione di Dify e n8n sono disabilitate
+a meno che `RAGSPINE_DIFY_RUN_ENABLED=true`. Le route generali del motore non includono l'autenticazione
+applicativa; colloca il servizio dietro un reverse proxy autenticato o su una rete privata
+prima di esporlo.
+
+Per elaborare i job di importazione in coda, esegui Redis e un secondo processo dal checkout dei sorgenti:
+
+```bash
+RAGSPINE_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/python scripts/run_worker.py
+```

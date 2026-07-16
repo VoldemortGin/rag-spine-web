@@ -1,0 +1,94 @@
+---
+title: 防编造机制
+description: 当结构化通道没有返回 found 事实时，编排器确定性地把回答改写为"查不到"——靠控制流，而不是 prompt。
+---
+
+防编造机制是 RAGSpine 的立身不变量：**系统绝不发明数字。**
+当结构化通道没有返回 `found` 事实时，编排器把回答改写为
+诚实的"查不到"——不管模型生成了什么。
+
+<Callout type="warn">
+  **保证。** 在结构化路径上，数值回答由事实值确定性地
+  合成。若没有任何事实为 `found`，回答就是显式拒答。模型的文字
+  绝不是数字的来源。
+</Callout>
+
+## 它存在于控制流，而不是 prompt
+
+系统提示确实会告诉模型去调用 `query_metric`，并在工具返回 `not_found`
+时说"查不到"。但 prompt 是请求，不是保证——模型可以
+无视它。所以 RAGSpine 不依赖它。强制执行在**代码**里，在
+`agent/agent.py` 中：
+
+- `_structured_answer` 对工具结果分区。只要有 `found`，回答就
+  **由事实值本身**构建——`实体 期间 指标（渠道）：值 单位（来源…）`——
+  在 found 路径上模型的自由文本回答被整体丢弃。
+- 若没有任何 `found` 但存在 `not_found`，回答由
+  `_not_found_answer` 改写。
+- 若某个参数为 `unrecognized_param`，则由 `_unrecognized_answer` 改写。
+
+```python
+# agent/agent.py — _structured_answer (paraphrased shape)
+found = [r for r in tool_results if r.get("status") == "found"]
+if found:
+    # deterministic synthesis from fact values — model prose is NOT used
+    return _render_from_facts(found)
+not_found = [r for r in tool_results if r.get("status") == "not_found"]
+if not_found:
+    return _not_found_answer(not_found[0]), []     # forced refusal
+unrecognized = [r for r in tool_results if r.get("status") == "unrecognized_param"]
+if unrecognized:
+    return _unrecognized_answer(unrecognized[0]), []
+```
+
+<Callout type="info">
+  在 **found** 路径上丢弃模型文字本身就是一项防编造机制措施：否则接入真实 LLM 时，
+  它可能在真实数字旁的文字里夹带一个额外编造的数字。found
+  回答只由事实值渲染。（回归测试：
+  `test_found_path_discards_fabricated_extra_number`。）
+</Callout>
+
+## 诚实拒答示例
+
+询问数据中不存在的值，你得到的是拒答——绝不是猜测：
+
+```bash
+.venv/bin/python scripts/ask.py --provider mock --db data/fact_metric.db \
+  "中国内地FY2025的REVENUE是多少"
+```
+
+```text
+查不到：REVENUE / ACME_CN / 2025（渠道 TOTAL）未在事实表中找到。
+为避免误导，不提供任何推测数字；可尝试调整期间或实体后重问。
+```
+
+对比一个**确实存在**的值——回答携带确定性的数字
+及其谱系：
+
+```text
+ACME_CN FY2024 REVENUE：1320 USD_M（来源：ACME_FY2024_Review.pptx · slide=2,table=1,row=REVENUE,col=FY2024）
+```
+
+## 按路径区分的语义（不是单一开关）
+
+守卫在各路径上的施加方式刻意不同：
+
+| 路径                                          | 机制                                                                    | 信任模型文字？            |
+| -------------------------------------------- | ---------------------------------------------------------------------- | ------------------------- |
+| **结构化**（`_structured_answer`）           | found → 由事实值渲染；无 found → 强制拒答                               | 否                        |
+| **多子任务**（`_multi_subtask_answer`）      | 每个子任务确定性执行；绝不调用 LLM                                      | 不适用                    |
+| **叙事**（`_run_narrative`）                 | 信任综合文字但**强制来源引用**；不做 found 事实改写                     | 是，但强制引用            |
+
+## 请求如何标示守卫已触发
+
+隐私感知的 trace（参见[来源溯源](/zh/docs/concepts/provenance)与
+`common/observability`）记录一个布尔值 `fabrication_guard_triggered`——当存在
+工具结果但**没有任何一个**是 `found` 时为 true（即该请求落入
+`not_found` / `unrecognized` 拒答）。它记录的是标志位，绝不记录回答文本或
+事实值。
+
+<Callout type="warn">
+  Provider 故障也诚实降级。如果 LLM 调用抛出 `ProviderError`（网络/API/
+  超时），agent 返回一条固定的降级消息，其中**没有数字、没有猜测**——它
+  绝不靠编造来填补空缺。
+</Callout>

@@ -1,0 +1,76 @@
+---
+title: 'ADR 0002: Direzione di prodotto — una libreria RAG generica, con licenze pulite e svincolata dai framework'
+description: La stella polare complessiva — separare gli invarianti rigidi dalla flessibilità morbida guidata da config/Protocol — con l'indice degli otto ADR per decisione 0003–0010.
+---
+
+> Stato: **accettato** · Data: 2026-06-17
+
+> Registro immutabile. Gli ADR sono esenti dal tracciamento della deriva (nessun `covers`). Per revocare una
+> decisione, aggiungere un nuovo ADR che sostituisca quello precedente invece di modificarlo.
+
+Questo è l'ADR ombrello. Registra la stella polare e indicizza otto ADR per decisione
+(0003–0010) definiti in un'intervista di progettazione strutturata il 2026-06-17.
+
+## Contesto
+
+RAGSpine possedeva un rigore solido e imposto dal codice (prevenzione delle risposte inventate, provenienza, isolamento
+RESTRICTED, trace rispettose della privacy) ma una strategia mai scelta: pubblico, ambito e la
+scommessa finanza-vs-generale erano tutti indecisi, e un ampio corpo di funzionalità era stato costruito
+ma non collegato alla pipeline in esecuzione. Abbiamo risolto la strategia dall'alto verso il basso,
+partendo dai bivi fondazionali.
+
+## Decisione
+
+**Stella polare:** una spina dorsale RAG deterministica, con licenze pulite e svincolata dai framework — una
+libreria che si assembla in puro Python, dove prevenzione delle risposte inventate / provenienza /
+isolamento delle fonti sono **invarianti imposti dal codice, non suggerimenti nei prompt**;
+agnostica rispetto al dominio tramite config, multilingue tramite locale-pack, con ogni backend sostituibile via
+`Protocol`.
+
+**Il filo conduttore attraverso tutte e otto le decisioni:** separare le _garanzie_ dalla
+_flessibilità_. Gli invarianti (prevenzione delle risposte inventate, provenienza, isolamento, licenze delle dipendenze,
+il gate di sicurezza) sono rigidi, deterministici e non estendibili tramite plugin. Tutto il
+resto (dominio, lingua, LLM, embedding, reranker, strategia di parsing) è morbido —
+guidato da config o da `Protocol`.
+
+| #   | Decisione                                                                          | ADR                              |
+| --- | --------------------------------------------------------------------------------- | -------------------------------- |
+| 1   | Pubblico = **libreria OSS** generica su cui altri possano costruire                 | [0003](/it/docs/decisions/adr-0003) |
+| 2   | **Generalità completa** tramite `DomainProfile`; la finanza è un esempio incluso           | [0004](/it/docs/decisions/adr-0004) |
+| 3   | **Core snello + isolamento di experimental/extras**; nessun codice dormiente nel core            | [0005](/it/docs/decisions/adr-0005) |
+| 4   | Qualità = **invarianti come property test** + un benchmark di recupero reale         | [0006](/it/docs/decisions/adr-0006) |
+| 5   | Multilingue = **architettura per 5, rilascio di 2** (cinese + inglese), locale pack      | [0007](/it/docs/decisions/adr-0007) |
+| 6   | Prompt = `ragspine/prompts/<locale>/` pacchettizzati dietro un `PromptRegistry`         | [0008](/it/docs/decisions/adr-0008) |
+| 7   | indipendente dai framework = **nessun lock-in di framework + solo licenze permissive**; default snello | [0009](/it/docs/decisions/adr-0009) |
+| 8   | Parsing dell'intento = **gate di sicurezza deterministico** + `IntentParser` estendibile tramite plugin       | [0010](/it/docs/decisions/adr-0010) |
+
+## Conseguenze
+
+Filoni di lavoro a breve termine che ne derivano (nessuna ulteriore decisione necessaria):
+
+- `CompanyProfile` → `DomainProfile`; spostare il vocabolario di metriche hardcoded fuori da
+  `common/glossary.py` nella config.
+- Schema del canale strutturato: 4-tupla `fact_metric` → dimensioni arbitrarie definite dall'utente.
+- Estrarre un `SecurityGate` deterministico dal parser dell'intento; rendere `IntentParser` un Protocol.
+- `PromptRegistry` + `ragspine/prompts/<locale>/`.
+- Cucitura dei locale: registro dei tokenizer + catalogo dei messaggi + `LocaleProfile`.
+- CI: gate sulle licenze delle dipendenze; collegare `scripts/check_doc_drift.py`.
+- Un secondo esempio di dominio non finanziario + un benchmark di recupero reale (trasformare
+  "generale" e "hybrid > BM25" da affermazione a evidenza).
+- Riscrivere il README / il linguaggio di posizionamento.
+
+**Posizioni derivate (non oggetto di intervista separata; segnalare se errate):**
+
+- Il livello `service/` FastAPI + RQ è un **esempio di deployment di riferimento**, non una garanzia
+  del core (discende da 0003 + 0005). La sua autenticazione mancante non è quindi una priorità
+  a breve termine, a meno che non si promuova il servizio a deliverable di prima classe.
+- Il comportamento completamente guidato dalla config è assorbito da `DomainProfile` (0004).
+
+**Rischi:**
+
+- La generalizzazione completa (0004) è la scommessa più pesante — un vero refactoring con il rischio di
+  diluire il rigore che derivava _dai_ vincoli finanziari originali. L'implementazione
+  deve tenere la linea: generalizzare senza indebolire alcun invariante.
+- Le otto decisioni insieme descrivono una superficie ampia per una v0.1 nuova di zecca
+  a singolo autore. Sequenziare il lavoro come "rendere prima credibile il core snello, poi promuovere
+  i moduli sperimentali uno alla volta", non tutti insieme.

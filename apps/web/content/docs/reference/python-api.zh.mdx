@@ -1,0 +1,136 @@
+---
+title: Python API
+description: 核心编排、存储、检索、工作流格式/脚手架/预览，以及 Dify/n8n 转换的入口点。
+---
+
+本页突出介绍稳定的组合面。在源码 checkout 中运行 `make docs` 可获得
+符号级的 pdoc 站点。
+
+## Agent 编排
+
+```python
+from collections.abc import Sequence
+from datetime import date
+
+def answer_question(
+    question: str,
+    store: FactStore,
+    provider: LLMProvider,
+    *,
+    reference_date: date | None = None,
+    narrative_retriever: NarrativeRetriever | None = None,
+    intent_parser: IntentParser | None = None,
+    decomposer: QueryDecomposer | None = None,
+    history: Sequence[HistoryTurn] | None = None,
+) -> AgentResult: ...
+```
+
+`HistoryTurn` 是 `tuple[str, str]`。只有 `assistant` 被识别为助手角色；其他
+角色统一归一化为用户。历史只为生成而插入在 system 消息与当前问题之间。
+它绝不会进入意图解析、安全决策、检索查询或
+证据/引用组装。
+
+`AgentResult` 暴露 `answer`、`answer_plain`、`route`、可选的 `clarification`、`tool_results`
+与 `sources`。`answer_plain` 省略内联引用后缀，供单独渲染 `sources`
+的 UI 使用。
+
+```python
+from ragspine.agent.agent import answer_question
+from ragspine.agent.llm_provider import MockProvider
+from ragspine.storage.fact_store import SqliteFactStore
+
+store = SqliteFactStore("data/fact_metric.db")
+store.init_schema()
+result = answer_question("China FY2024 revenue", store, MockProvider())
+```
+
+`FactStore` 是可在运行时检查的 `Protocol`；请实例化 `SqliteFactStore`，而不是 Protocol 本身。
+`Fact.metric(...)` 是仅限关键字参数的辅助方法，用于构造事实而不会写串冻结的
+身份字段。每条存储的事实都保留 `source_doc_id` 与 `source_locator`。
+
+## 叙事存储与检索
+
+叙事 `Chunk`/`StoredChunk` 记录包含追加式的 `parent_id`、`heading`、`window_text` 与
+`parent_locator` 字段。既有 SQLite 数据库以追加方式迁移。父子扩展与句子
+窗口扩展发生在存储/检索层：子 chunk 命中保留自己的文本、chunk ID
+与定位符用于引用，而 `window_text` 可以成为单独的、仅用于生成的 `prompt_text`。
+受限的子 chunk 在扩展前即被丢弃，无法经由父级/窗口泄露。
+
+检索支持元数据过滤操作符 `eq`、`ne`、`in`、`nin`、`gt`、`gte`、`lt`、`lte`
+与 `between`。过滤器只做收窄，并保持结果顺序。`MultiIndexRetriever` 独立查询每个
+选中的库，用 RRF 融合排名，并附加 `library_id` 溯源；
+路由器失败时搜索所有已配置的库。经济模式既不构造 embedding
+后端也不构造向量存储。
+
+## 工作流文档
+
+```python
+from ragspine.workflows.formats import (
+    dump_dify_yaml,
+    dump_json,
+    load_workflow,
+    parse_workflow,
+)
+
+workflow = load_workflow("workflow.toml")
+same_shape = parse_workflow('{"app":{"mode":"workflow"}}', format="json")
+json_text = dump_json(workflow)
+yaml_text = dump_dify_yaml(workflow)
+```
+
+所有接受的 JSON/YAML/TOML 输入都归一化为 JSON 兼容的映射。TOML 文本
+除非从 `.toml` 路径加载，否则需要显式指定格式。格式解析器拒绝重复键、非有限
+数值、不安全的 YAML 以及过大或嵌套过深的文档；文件加载器还会拒绝链接与非普通文件。
+
+## 目录与脚手架
+
+```python
+from ragspine.workflows import scaffold_workflow
+
+result = scaffold_workflow(
+    "invoice extraction and approval",
+    template_id=None,
+    reuse=True,
+)
+print(result.workflow)
+print(result.yaml)
+```
+
+工作流脚手架对文件系统而言是纯的：它返回配置，绝不写入或
+执行。目录 API 的 list/get 返回防御性副本。显式指定模板返回置信度 `1`；
+否则匹配使用配置的分数/差距阈值，并回退到固定生成。
+
+CLI 还额外处理安全的原子/独占文件创建。
+
+## Preview v1
+
+工作流预览构建器返回一个仅供展示的 JSON 兼容对象，含
+`preview_schema_version: 1`、`nodes` 与 `edges`。它包含几何信息与标签，不含提示词、
+变量、凭据、provider 配置或可执行代码。渲染前请校验
+版本；不要把 preview JSON 回喂给执行器。
+
+## Dify 与 n8n
+
+`ragspine.dify` 把 Dify YAML 解析为中间表示，对其分析，并为
+`ragspine` 或 `spineagent` 目标生成命令式 Python。代码生成不是执行。
+
+`ragspine.n8n.n8n_to_dify` 与 `ragspine.n8n.dify_to_n8n` 执行纯转换，返回
+目标映射与警告。不支持的语义会被报告，而不是被默默宣称
+等价。原始 n8n 元数据在可能的情况下保留以支持往返转换。
+
+## 应用工厂
+
+```python
+from ragspine.service.api.app import create_app
+
+app = create_app(
+    config,
+    provider=provider,
+    queue=queue,
+    faq_cache=faq_cache,
+    workflow_matcher=workflow_matcher,
+)
+```
+
+service 包是可选的。其工作流执行面默认禁用，且无法
+接受客户端提供的 provider 表达式。

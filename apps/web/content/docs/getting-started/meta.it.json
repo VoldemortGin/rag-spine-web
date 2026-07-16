@@ -1,0 +1,5 @@
+{
+  "title": "Per iniziare",
+  "icon": "Rocket",
+  "pages": ["installation", "quickstart", "cli-and-scripts"]
+}

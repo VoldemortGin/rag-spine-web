@@ -1,0 +1,199 @@
+---
+title: Funzioni comuni
+description: Primitive trasversali condivise da ogni dominio — il profilo aziendale/di dominio configurabile, la classificazione deterministica della sensibilità, il glossario delle dimensioni, l'osservabilità rispettosa della privacy e le costanti di percorso globali.
+---
+
+Il dominio **common** contiene le primitive trasversali da cui dipendono tutti gli altri domini:
+il **profilo aziendale/di dominio** configurabile (così nessuna azienda è mai codificata in modo fisso), il
+modello deterministico di **sensibilità**, il **glossario** delle dimensioni, l'**osservabilità**
+rispettosa della privacy e l'unica fonte di verità per i percorsi globali. Queste primitive non hanno
+dipendenze dal resto del sistema — sono la base del grafo di import.
+
+<Callout type="info">
+  Pacchetto: `src/ragspine/common/`. Contratto: `src/ragspine/common/CLAUDE.md`.
+</Callout>
+
+## Struttura
+
+<Files>
+  <Folder name="common" defaultOpen>
+    <File name="company_profile.py — DomainProfile / CompanyProfile + caricatore" />
+    <File name="core.py — costanti di percorso globali (unica fonte di verità)" />
+    <File name="glossary.py — sinonimi delle dimensioni + normalizzazione" />
+    <File name="observability.py — request_id + trace strutturato" />
+    <File name="sensitivity.py — classificatore deterministico di sensibilità" />
+  </Folder>
+</Files>
+
+## Profilo aziendale / di dominio
+
+`company_profile.py` rende RAGSpine un copilota gestionale generico anziché un'applicazione
+finanziaria codificata in modo fisso. Identità, sinonimi, dimensioni e l'elenco dei concorrenti provengono tutti da un file TOML
+(`config/company.toml`); in assenza del file si ricade silenziosamente sui valori predefiniti ACME integrati.
+
+Il profilo è una frozen dataclass immutabile. `CompanyProfile` è un **alias** a livello di modulo
+per la stessa classe `DomainProfile` — entrambi i nomi funzionano nei controlli `isinstance` e nei costruttori.
+
+<TypeTable
+  type={{
+    home_company_name: { type: 'str' },
+    home_entity_code: { type: 'str' },
+    home_entity_synonyms: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'alias → codice entità.',
+    },
+    entity_geography: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'codice entità → area geografica.',
+    },
+    external_entities: {
+      type: 'dict[str, str]',
+      default: '{}',
+      description: 'alias concorrente → nome visualizzato.',
+    },
+    home_entity_labels: { type: 'dict[str, str]', default: '{}' },
+    sensitivity: { type: 'SensitivityPolicy', default: 'SensitivityPolicy()' },
+    dimensions: { type: 'tuple[DimensionSpec, ...]', default: '()' },
+  }}
+/>
+
+Ogni dimensione dichiarata è un `DimensionSpec` immutabile (ADR 0004): `name`, `label`, `kind`
+(`categorical` / `temporal` / `measure`), `synonyms`, `units`, `labels`, `default`,
+`required`, `clarify` (`ask_first` / `assume` / `none`), `identity`, `expand`,
+`derived_from` / `derivation`, e i flag della whitelist di prevenzione delle risposte inventate. Il profilo predefinito
+dichiara cinque dimensioni — `metric`, `entity`, `period` (temporale), `channel`
+(predefinito `TOTAL`, non espandibile) e `geography` (`identity=False`, derivato da `entity`).
+
+```python
+from ragspine.common.company_profile import load_company_profile
+
+profile = load_company_profile()          # explicit path > $RAGSPINE_COMPANY_CONFIG > config/company.toml
+print(profile.home_entity_code)           # 'ACME_GROUP' by default
+```
+
+`load_company_profile(path=None)` risolve il percorso di configurazione (argomento esplicito →
+variabile d'ambiente `RAGSPINE_COMPANY_CONFIG` → `config/company.toml`), lo analizza con `tomllib`/`tomli`,
+e ricade sul valore predefinito integrato in caso di file mancante o non analizzabile — senza mai sollevare eccezioni,
+senza mai stampare nulla.
+
+<Callout type="warn">
+  **Guidato dalla configurazione, nessuna azienda codificata in modo fisso.** Identità, metriche e concorrenti provengono dal profilo.
+  La mappa `external_entities` (alias concorrente → nome visualizzato) è il modo in cui l'agente riconosce una
+  domanda su un concorrente fuori ambito. Non codificare in modo fisso un'azienda da nessuna parte.
+</Callout>
+
+## Sensibilità
+
+`sensitivity.py` è il livello deterministico di classificazione dei dati applicato dal percorso di
+[ingestione narrativa](/it/docs/guides/ingestion#ingestione-narrativa) e da cui dipende a valle
+l'[isolamento RESTRICTED](/it/docs/concepts/restricted-isolation). I livelli sono
+semplici stringhe — non esiste alcun enum. L'unica costante con nome è `RESTRICTED = "RESTRICTED"`;
+il valore predefinito per i contenuti non contrassegnati è `"INTERNAL"`.
+
+Le regole risiedono in un `SensitivityPolicy` immutabile (letto dalla sezione di configurazione `[sensitivity]`,
+nessuna parola aziendale codificata in modo fisso):
+
+<TypeTable
+  type={{
+    default_level: { type: 'str', default: '"INTERNAL"' },
+    escalate_unknown_to_restricted: {
+      type: 'bool',
+      default: 'False',
+      description: 'Interruttore rigoroso: tratta tutto ciò che è sconosciuto come RESTRICTED.',
+    },
+    restricted_filename_patterns: { type: 'list[str]', default: '[]' },
+    restricted_keywords: { type: 'list[str]', default: '[]' },
+  }}
+/>
+
+`classify_sensitivity(filename, text, policy) -> str` è una funzione pura (zero chiamate
+esterne) che restituisce il primo livello corrispondente, in ordine di priorità:
+
+<Steps>
+  <Step>il nome file / percorso corrisponde a una voce di `restricted_filename_patterns` → `RESTRICTED`</Step>
+  <Step>altrimenti il testo corrisponde a una voce di `restricted_keywords` → `RESTRICTED`</Step>
+  <Step>altrimenti `escalate_unknown_to_restricted` è `True` → `RESTRICTED`</Step>
+  <Step>altrimenti restituisce `policy.default_level` (predefinito `"INTERNAL"`)</Step>
+</Steps>
+
+La postura di sicurezza: i documenti non contrassegnati hanno come valore predefinito `INTERNAL`; il rilevamento di un segnale eleva a
+`RESTRICTED`; il comportamento generalizzato "tutto ciò che è sconosciuto → RESTRICTED" è un interruttore rigoroso
+opt-in, disattivato per impostazione predefinita.
+
+## Glossario
+
+`glossary.py` normalizza i sinonimi delle dimensioni in forma libera in codici controllati. Non esiste alcuna
+classe — si tratta di funzioni a livello di modulo più dizionari derivati dal profilo caricato.
+Un input non riconosciuto restituisce `None`; non tira mai a indovinare.
+
+| funzione                                                                       | mappa                                                          |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `normalize_metric(raw) -> str \| None`                                         | sinonimo di metrica → `metric_code`                                |
+| `normalize_entity(raw) -> str \| None`                                         | sinonimo di entità → `entity_code`                                |
+| `resolve_external_entity(text) -> str \| None`                                 | menzione di concorrente → nome visualizzato (corrispondenza più lunga)             |
+| `geography_for_entity(entity_code) -> str \| None`                             | area geografica predefinita per un'entità                               |
+| `unit_for_metric(metric_code) -> str \| None`                                  | unità predefinita per una metrica                                     |
+| `normalize_period(raw) -> tuple[str, str] \| None`                             | periodo assoluto → `(period_type, period)`                     |
+| `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | periodo relativo (今年/去年/上季度…) → `(period_type, period)` |
+
+La normalizzazione dei periodi produce gli stessi valori `period_type` utilizzati dal
+[fact store](/it/docs/guides/storage#dim_key--la-chiave-di-upsert): `FY` (`FY2024` / `2024`),
+`HY` (`2024H1`) e `QUARTER` (`2025Q1`).
+
+```python
+from ragspine.common.glossary import normalize_metric, normalize_period
+
+normalize_metric("营收")        # 'REVENUE'
+normalize_period("FY 2024")    # ('FY', '2024')
+normalize_metric("not a metric")  # None — never guesses
+```
+
+## Osservabilità
+
+`observability.py` consiste in due piccole primitive:
+
+- `new_request_id() -> str` — un codice breve esadecimale `uuid4` di 12 caratteri.
+- `emit_trace(logger=None, **fields) -> None` — registra un record INFO con il messaggio fisso
+  `"trace"`, allegando `**fields` al record di log tramite `extra=`. Usa esclusivamente la libreria standard `logging`
+  (nessun `basicConfig`); l'host o il test si occupa di collegare l'handler. Il nome del logger è
+  `TRACE_LOGGER_NAME = "ragspine.trace"`.
+
+<Callout type="warn">
+  **Trace rispettosi della privacy.** I log sono trattati come Restricted. `emit_trace` è pensato per trasportare solo
+  metadati non sensibili — request_id, route, codici controllati (metrica / entità / periodo / canale),
+  conteggi di stato, punteggi, flag booleani, durate, utilizzo di token — e **mai** il testo grezzo della risposta,
+  il valore di un fatto o il testo di un chunk.
+</Callout>
+
+## Core — costanti globali
+
+`core.py` è l'unica fonte di verità per i percorsi, derivati da `__file__` (nessuna dipendenza dalla cwd o da
+`rootutils`, zero effetti collaterali al momento dell'import):
+
+| costante                  | valore                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `REPO_ROOT`               | radice del repository, da `Path(__file__).parents[3]`                                    |
+| `DATA_DIR`                | `REPO_ROOT / "data"`                                                           |
+| `DEFAULT_FACT_DB`         | `data/fact_metric.db` — tabella dei fatti **e** tabella dei chunk narrativi (stesso sqlite) |
+| `DEFAULT_MAPPING_DB`      | `data/color_mapping.db` — registro di mappatura dei colori                               |
+| `DEFAULT_REVIEW_QUEUE_DB` | `data/review_queue.db` — coda di revisione SME                                      |
+
+## Invarianti garantiti da questo dominio
+
+- **Guidato dalla configurazione** — identità / metriche / concorrenti provengono da `CompanyProfile`; non
+  codificare mai in modo fisso un'azienda.
+- **Trace rispettosi della privacy** — `observability` registra solo codici / conteggi / tempi, mai
+  la risposta, il valore di un fatto o il testo di un chunk.
+- **Normalizzazione deterministica, senza mai tirare a indovinare** — il glossario e il classificatore di sensibilità sono
+  funzioni pure; un input non riconosciuto restituisce `None` / il livello predefinito.
+
+## Correlati
+
+<Cards>
+  <Card title="Guida all'archiviazione" href="/it/docs/guides/storage" />
+  <Card title="Guida all'ingestione — sensibilità in fase di ingestione" href="/it/docs/guides/ingestion" />
+  <Card title="Concetto: isolamento RESTRICTED" href="/it/docs/concepts/restricted-isolation" />
+  <Card title="Concetto: provenienza delle fonti e tracciabilità" href="/it/docs/concepts/provenance" />
+</Cards>

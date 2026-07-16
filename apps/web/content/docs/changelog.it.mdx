@@ -1,0 +1,295 @@
+---
+title: Changelog
+description: Modifiche rilevanti e visibili all'utente di RAGSpine per ogni release — e lo stato attuale della famiglia Spine al suo fianco.
+---
+
+Questa pagina traccia le modifiche **visibili all'utente** per ogni release: forme delle API, superfici di
+configurazione, packaging e dipendenze. Per le motivazioni dietro una modifica, seguite l'
+[ADR](/it/docs/decisions) collegato. Per i dettagli a livello di simbolo, eseguite `make docs` sul sorgente taggato.
+
+<Callout type="info">
+  La documentazione segue l'albero `main` corrente, i cui metadati di pacchetto sono `0.11.0`. Questo non
+  significa che PyPI abbia pubblicato la 0.11.0. Controllate `ragspine version` e il vostro lockfile per il
+  comportamento di una distribuzione installata.
+</Callout>
+
+## 0.11.0 (snapshot corrente del sorgente)
+
+**Scaffolding del flusso di lavoro in linguaggio naturale e un contratto sicuro di anteprima dei siti web.** Questo lavoro è presente
+su `main`; lo stato di pubblicazione non viene deliberatamente dedotto dai metadati del sorgente.
+
+### Aggiunto
+
+- La scorciatoia installata `ragspine "description"` e il comando esplicito `ragspine workflow create`,
+  con selezione di template esatti, opt-out dal riuso, corrispondenza lessicale/ONNX/automatica, output JSON/YAML e
+  scritture su file sicure e multipiattaforma.
+- Un catalogo integrato di 1.000 elementi: 7 flussi di lavoro curati manualmente e 993 descrittori generati che coprono
+  esattamente 39 settori, 27 casi d'uso e cinque archetipi. Le pagine dei marketplace di Dify/n8n possono essere
+  riferimenti di ricerca fattuali, ma i corpi dei flussi di lavoro a monte, i prompt e le credenziali non vengono
+  né copiati né scaricati a runtime.
+- Ingestione di flussi di lavoro JSON, YAML e TOML normalizzata a una mappatura compatibile con JSON, con protezioni contro
+  chiavi duplicate, dimensione, profondità, nodi strutturali, stringhe, alias YAML, symlink e file speciali.
+- Schema di anteprima dei flussi di lavoro v1: nodi/archi/geometria deterministici e redatti per il rendering senza
+  prompt, variabili, configurazione dei provider, credenziali o configurazione eseguibile.
+- Endpoint HTTP di sola lettura per catalogo/dettaglio/scaffold, caching delle pagine/ETag e fallback del matcher.
+
+### Comportamento di sicurezza
+
+- Lo scaffolding e l'anteprima non eseguono mai un flusso di lavoro. Le superfici di esecuzione Dify/n8n esistenti restano dietro
+  `RAGSPINE_DIFY_RUN_ENABLED=false` per impostazione predefinita.
+- Il servizio limita i corpi delle richieste dei flussi di lavoro selezionati prima del buffering e rimuove
+  gli input/il contesto di validazione riecheggiati dalle risposte 422.
+
+## 0.10.0
+
+**Preset di prodotto per il recupero, semantica dello storico ed espansione small-to-big persistita.**
+
+### Aggiunto
+
+- Filtri sui metadati con `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte` e `between`, più una
+  cucitura opzionale di estrazione automatica. I filtri restringono soltanto e preservano l'ordine.
+- Instradamento multi-libreria e `MultiIndexRetriever`: recupero per singola libreria, fusione RRF,
+  provenienza `library_id` e un fallback su tutte le librerie quando l'instradamento fallisce.
+- Modalità di recupero economica (`economy` / `bm25` / `lexical`) che non costruisce alcun backend di embedding né
+  vector store.
+- Chunking parent-child/small-to-big più persistenza/migrazione a livello di store di `parent_id`, `heading`, `window_text` e
+  `parent_locator`. Il chunk figlio resta la citazione; il `prompt_text` espanso è
+  usato solo per la generazione, e i figli restricted non possono trapelare attraverso le loro finestre.
+- `answer_question(..., history=...)` e storico delle domande HTTP. I turni precedenti sono soltanto contesto di generazione,
+  mai input di intento/sicurezza/recupero né evidenza. Vedete [ADR 0017](/it/docs/decisions/adr-0017) e
+  [ADR 0018](/it/docs/decisions/adr-0018).
+
+## 0.9.0
+
+**Connettori per le fonti, provenienza del grafo delle relazioni, chunking di dominio e streaming.** Questa release
+apre altre tre cuciture opt-in, un endpoint di risposta in streaming, l'ingestione `.txt` e due
+helper di ergonomia — tutti disattivati per impostazione predefinita e **byte-identici** quando non selezionati.
+
+### Aggiunto
+
+- **Cucitura connettore-fonte per KB.** Un Protocol `SourceConnector`
+  (`iter_documents() -> Iterable[RawDoc]`, `make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`)
+  rende collegabile la fonte di ingestione: `filesystem` (il default a zero dipendenze), `in_memory`,
+  `http` e `notion`. I connettori di terze parti si registrano attraverso il gruppo di
+  entry-point `ragspine.source_connectors`. Vedete [Ingestione](/it/docs/guides/ingestion#connettori-sorgente).
+- **Slot `RelationExtractor` opt-in con marcatori di provenienza.** Un Protocol `RelationExtractor`
+  accanto a `build_relation_graph` (`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`). Il
+  default `None` lascia il grafo base byte-identico; l'estrattore deterministico per co-occorrenza
+  aggiunge archi `co_occurs_with` con lignaggio pulito; l'estrattore LLM opt-in (dietro `[llm]`) marca
+  ogni arco `model-derived` + `unverified`, filtra entrambi gli estremi attraverso il `SecurityGate`,
+  e non lascia mai che testo RESTRICTED raggiunga il modello. Vedete [ADR 0015](/it/docs/decisions/adr-0015).
+- **Preset di chunk di dominio — `laws` / `qa` / `book`.** Tre preset `RAGSPINE_CHUNKER` consapevoli del layout
+  che regolano soltanto il rilevamento delle intestazioni per famiglia di documenti (clausola / capitolo / abbinamento
+  domanda-risposta), ereditando il budget di base, `parent_id` e i locator. Vedete
+  [Recupero](/it/docs/guides/retrieval#indicizzazione-e-chunking).
+- **Endpoint di domanda in streaming — `POST /v1/ask/stream` (SSE).** La stessa risposta di `/v1/ask`,
+  trasmessa token per token. L'intera catena di guardie (corto circuito FAQ, recupero a doppio canale,
+  riscrittura di prevenzione delle risposte inventate, provenienza) viene completata **prima** che il primo byte venga trasmesso,
+  così una risposta inventata non può mai essere trasmessa a metà e poi ritrattata. Vedete
+  [API HTTP](/it/docs/reference/http-api#route-del-motore).
+- **Ingestione narrativa `.txt`.** I file di testo semplice entrano nel percorso narrativo
+  (`extract_txt_narrative`): UTF-8, suddivisione dei paragrafi per riga vuota, un segmento per blocco con un
+  locator `para={N}` — a zero dipendenze e deterministico. Vedete
+  [Ingestione](/it/docs/guides/ingestion#ingestione-narrativa).
+- **Helper di ergonomia.** `AgentResult.answer_plain` (la risposta con il suffisso inline `（来源：…）`
+  rimosso, per le UI che renderizzano le citazioni da `sources`), il builder keyword-only
+  `Fact.metric(...)` (costruzione indipendente dall'ordine sulla 10-tupla congelata) e
+  `SqliteFactStore.has_source_doc(source_doc_id)` (una sonda di esistenza per il refresh incrementale).
+  Vedete [API Python](/it/docs/reference/python-api).
+
+### Dipendenze
+
+- Un nuovo extra **opzionale, con licenza permissiva, importato in modo lazy**: `[connectors]` (`httpx`,
+  necessario solo per i connettori `http` / `notion`). Nessuna nuova dipendenza runtime non opzionale; il
+  percorso predefinito offline è invariato.
+
+## 0.8.1
+
+**Irrobustimento delle cuciture di estensione.** Tre cuciture di governance dal backlog di ampiezza vengono formalizzate
+in modo che i backend di terze parti possano collegarsi _attraverso_ i pacchetti di conformance degli invarianti, mai
+aggirandoli. Lavoro puramente strutturale — ogni percorso predefinito resta **byte-identico**, e il cricchetto della
+prevenzione delle risposte inventate rimane a zero.
+
+### Aggiunto
+
+- **Cucitura `TraceSink` + conformance del privacy-trace.** Il trace sink attento alla privacy è una
+  cucitura registrabile (`make_trace_sink` / `RAGSPINE_TRACE_SINK`), così l'osservabilità può diramarsi verso
+  OpenTelemetry / file _attraverso_ un pacchetto di conformance che rifiuta o ripulisce qualsiasi payload contenente
+  una risposta / valore di fatto / testo di chunk. Un vero `OtelTraceSink` viene fornito dietro l'extra opzionale `[otel]`;
+  un sink che fa trapelare il lignaggio **fallisce** il pacchetto.
+- **Protocol `FactStore`.** Lo store strutturato è ora un Protocol `@runtime_checkable` con
+  `SqliteFactStore` basato su sqlite della stdlib come default (`make_fact_store` / `RAGSPINE_FACT_STORE`),
+  aprendo adattatori DuckDB / Postgres come seguito. Il suo pacchetto di conformance vincola i due
+  invarianti lato storage — **found-determinism** (un mancato riscontro restituisce vuoto, mai un valore
+  inventato) e **provenance survival** (`source_doc_id` + locator persistono attraverso upsert/query) —
+  con stub di dimostrazione inversa che devono fallire.
+- **Pacchetto di conformance della provenienza `Extractor`.** Ogni estrattore registrato (xlsx · pptx · pdf ·
+  docx · pptx-rich) viene verificato su fixture reali affinché porti `source_doc_id` non nullo + locator
+  di cella; uno stub che perde il lignaggio fallisce su entrambe le dimensioni.
+
+### Dipendenze
+
+- Un nuovo extra **opzionale, con licenza permissiva, importato in modo lazy**: `[otel]` (OpenTelemetry,
+  Apache-2.0). Nessuna nuova dipendenza runtime non opzionale.
+
+## 0.8.0
+
+Il **secondo lotto di parità con i concorrenti** (workstream W8–W12), confrontato con gli
+stack mainstream (LlamaIndex · LangChain / LangGraph · Haystack · RAGFlow · Weaviate ·
+Vespa · Jina · Cohere). Come per la 0.7.0, ogni aggiunta è **opt-in e disattivata per impostazione predefinita**: senza
+alcuna selezione il ciclo deterministico offline è **byte-identico**, e ogni nuovo backend
+eredita l'isolamento a due uscite RESTRICTED e i pacchetti di conformance della provenienza.
+
+### Aggiunto
+
+- **Catena di postprocessori post-recupero.** Una cucitura `NodePostprocessor`
+  (`make_postprocessor` / `RAGSPINE_POSTPROCESSOR`, ad es. `"mmr,lost_in_middle"`) che viene eseguita
+  dopo il reranking e prima dell'assemblaggio del prompt — de-duplicazione per diversità **MMR**, riordinamento
+  **lost-in-the-middle** e **compressione estrattiva del contesto** deterministica. Tutto a zero modelli; il
+  compressore LLMLingua-2 / LLM è un seguito della cucitura. La compressione scrive una chiave
+  `prompt_text` separata, lasciando `text` e ogni campo di riferimento byte-identici.
+- **Trasformazione LLM delle query.** **HyDE**, **RAG-Fusion** (riusa RRF), prompting **step-back**
+  e instradamento **Adaptive-RAG** sulla cucitura esistente `QueryRewriter` / `IntentParser`
+  (`make_query_transform` / `RAGSPINE_QUERY_TRANSFORM`, `RAGSPINE_ADAPTIVE`). Ogni
+  sotto-query generata riesegue il gate di sicurezza deterministico; il documento ipotetico di HyDE
+  è una sonda di recupero, mai un fatto citabile.
+- **RAPTOR + strategie di chunking.** Un albero multi-granularità **RAPTOR** (clustering deterministico
+  a soglia; riepiloghi di cluster `is_synthesis` che portano provenienza e non sono mai
+  fatti citabili) più chunking **sentence-window** e **semantico** sulla cucitura `Chunker`
+  (`RAGSPINE_CHUNKER`, `make_raptor_*` / `RAGSPINE_RAPTOR*`).
+- **Reranker ColBERT & SPLADE.** Late-interaction a livello di token (MaxSim) e scoring learned-sparse
+  sulla cucitura esistente `ListwiseJudge` tramite `make_reranker`
+  (`RAGSPINE_RERANKER=colbert|splade`, `[colbert]` / `[splade]`). Forniti come **reranker**;
+  gli indici pesanti di recupero multi-vettore / sparse sono un seguito.
+- **Recupero di documenti visuali ColPali.** Late interaction page-as-image su una cucitura `VisualEmbedder`
+  (`make_visual_embedder` / `RAGSPINE_VISUAL_EMBEDDER`, `[colpali]`), per report densi di grafici e
+  figure in cui OCR→testo perde il layout. Opt-in e **GPU**; l'orchestrazione deterministica
+  MaxSim e l'isolamento RESTRICTED-alla-porta sono completi, il vero end-to-end su GPU
+  è un seguito.
+
+### Dipendenze
+
+- Solo nuovi extra **opzionali, con licenza permissiva, importati in modo lazy**: `[colbert]`, `[splade]`,
+  `[colpali]` (tutti via `fastembed`, Apache-2.0). Nessuna nuova dipendenza runtime non opzionale; il
+  percorso predefinito offline è invariato.
+
+## 0.7.0
+
+Il **lotto di profondità qualitativa** (workstream W1–W7): il ciclo di recupero predefinito diventa
+genuinamente semantico, guadagna un cervello di reranking offline, attinge allo stack documentale della famiglia Spine,
+aggiunge la misurazione della groundedness e fa crescere un knowledge graph deterministico. Le aggiunte opt-in
+sono disattivate per impostazione predefinita; il percorso snello puro-BM25 resta byte-identico.
+
+### Modificato
+
+- **Dense attivo per impostazione predefinita quando l'extra è presente.** `ServiceConfig.embedding` ora ha come default
+  `"auto"`: con `[embed-onnx]` installato il ciclo fornito è genuinamente ibrido
+  (BM25 + semantico ONNX → RRF) senza configurazione; senza extra si risolve in `None` e il
+  percorso snello puro-BM25 è byte-identico. `RAGSPINE_EMBEDDING` guadagna `onnx` / `auto`.
+
+### Aggiunto
+
+- **Default di embedding semantico reale (W1).** `OnnxEmbeddingBackend` (via `fastembed`,
+  `paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensioni, multilingue, offline, deterministico)
+  dietro `[embed-onnx]`, registrato come `onnx` / `auto` in `make_embedding_backend`.
+- **Reranker cross-encoder locale (W2).** `CrossEncoderReranker` (`fastembed`
+  `ms-marco-MiniLM`, offline, deterministico) sulla cucitura `ListwiseJudge` tramite una nuova
+  factory `make_reranker` (`RAGSPINE_RERANKER`, `[rerank]`) — il cervello di reranking offline; il
+  giudice listwise LLM resta l'opzione a costo più elevato.
+- **Stack documentale di famiglia (W3).** Il `OcrBackend` predefinito è ora l'OCR offline della famiglia
+  (pdfspine → ocrspine) e il percorso dei PDF scansionati è **effettivamente cablato nell'ingestione** (prima era
+  solo accodamento); un nuovo Extractor `.docx` (`docspine`, `[doc]`) e un Extractor `.pptx` opt-in
+  (`pptspine`, `[ppt]`); i riempimenti delle celle e le tabelle annidate di docx / pptx ora confluiscono nella
+  IR `StyledGrid`.
+- **Contextual Retrieval + chunking a layout (W4).** Un'intestazione di contesto deterministica
+  (`title · entity · period · heading`) iniettata solo nel testo di indice (`RAGSPINE_CONTEXTUAL`),
+  più chunking consapevole del layout e parent-child / small-to-big sulla cucitura `Chunker`
+  (`RAGSPINE_CHUNKER`).
+- **Valutazione faithfulness / groundedness (W5).** Due nuovi gate a cricchetto — **faithfulness**
+  a livello di affermazione e **answer-accuracy** su testo libero — integrati nello stesso cricchetto di baseline,
+  con un default di entailment deterministico offline. Vedete [Valutazione](/it/docs/guides/evaluation).
+- **Profondità agentica, opt-in (W6).** Decomposizione LLM delle query (`RAGSPINE_QUERY_DECOMPOSE`),
+  recupero correttivo / ciclo CRAG grade→act (`RAGSPINE_CORRECTIVE`) e uno scheletro delimitato di
+  memoria di conversazione multi-turno — ciascuno riafferma il gate di sicurezza e l'isolamento per
+  sotto-query / turno.
+- **GraphRAG (W7).** Un nuovo dominio `graph/`: un **grafo di relazioni strutturato** deterministico
+  sulle dimensioni controllate (aggregazione delle controllate, confronto tra pari, tracciamento delle derivazioni —
+  interamente citato), un Protocol `GraphStore` con un default in-process più un adattatore `networkx`
+  (`RAGSPINE_GRAPH_STORE`, `[graph]`), e uno **scheletro** di estrazione / community
+  narrative-GraphRAG (opt-in, dietro `[graph]` + `[llm]`). Vedete [Canali](/it/docs/architecture/channels).
+
+### Dipendenze
+
+- Solo nuovi extra **opzionali, con licenza permissiva, importati in modo lazy**: `[embed-onnx]`,
+  `[rerank]`, `[doc]`, `[ppt]`, `[graph]`. Il percorso predefinito offline, senza SDK pesanti, è
+  preservato.
+
+## 0.3.0
+
+Il titolo di questa release è una **migrazione della cucitura dei provider LLM** verso il core condiviso di famiglia, più un
+rate limiter attivo opzionale. Vedete [ADR 0012](/it/docs/decisions/adr-0012) per la motivazione completa.
+
+### Modificato (breaking per i provider personalizzati)
+
+- **`LLMProvider` vive ora in [`corespine`](https://pypi.org/project/corespine/)** ed è
+  ri-esportato da `ragspine.agent.llm_provider`. L'interfaccia è passata da
+  `create_message(*, system, messages, tools) -> ProviderResponse` alla **forma
+  chat-completions di OpenAI**:
+
+  ```python
+  def chat(
+      self,
+      messages: list[dict[str, Any]],
+      *,
+      tools: list[dict[str, Any]] | None = None,
+  ) -> ChatCompletion: ...
+  ```
+
+  Il prompt di sistema è ora il primo messaggio `{"role": "system", ...}` anziché un argomento
+  separato, e `ProviderResponse` è sostituito da `corespine.ChatCompletion` (`choices` →
+  `ResponseMessage` con `content` + `tool_calls`, più `usage` / `model` / `id`). I provider
+  personalizzati devono migrare — vedete [Punti di estensione](/it/docs/reference/extension-points#llmprovider).
+
+### Aggiunto
+
+- **Rate limiting TPM attivo.** Impostate `RAGSPINE_TOKENS_PER_MINUTE` (int, default `0` = disattivato) e
+  il servizio avvolge il provider nel `RateLimitedProvider` di corespine — un limite soft a finestra
+  scorrevole che resta _sotto_ un tetto di token al minuto, complementare al backoff passivo
+  `max_retries` 429 dell'SDK. Vedete [Configurazione](/it/docs/reference/configuration).
+- **Extra `[all]`** — `pip install "rag-spine[all]"` include ogni capacità runtime
+  (`[pdf,ocr,llm,embed,vector,service]`; esclude `[dev]`). Vedete
+  [Installazione](/it/docs/getting-started/installation).
+
+### Dipendenze
+
+- Aggiunge una dipendenza runtime non opzionale: **`corespine>=0.1.0`** (il sottile core condiviso
+  di famiglia; ha `dependencies` vuote per conto proprio). Il percorso predefinito offline-first, senza SDK
+  pesanti, è preservato.
+
+## La famiglia Spine
+
+RAGSpine è un pacchetto di una piccola famiglia che condivide il sottile core `corespine`. Release attuali
+dei pacchetti fratelli:
+
+<Cards>
+  <Card
+    title="corespine 0.1.0"
+    description="Il sottile core condiviso: la cucitura LLMProvider + RateLimitedProvider, sei cuciture Protocol, un tipo di errore unificato e un gate mypy. Solo primitive neutre rispetto al dominio; dipendenze runtime vuote."
+  ></Card>
+  <Card
+    title="spineagent 0.0.3"
+    description="Il framework generale di collaborazione multi-agente (agente / tool / orchestrazione + cuciture MCP / A2A), offline-first e costruito su corespine. Irrobustito con un doppio gate di tipi: mypy --strict + beartype."
+  ></Card>
+  <Card
+    title="pdfspine 0.3.0"
+    description="Una reimplementazione Apache-2.0, in puro Rust, di PyMuPDF (fitz) con binding PyO3 — l'OCR PP-OCRv5 è fornito compilato nella wheel, e ora genera PDF da Markdown e immagini. RAGSpine raggiunge l'OCR di famiglia attraverso di esso (l'extra [pdf])."
+  ></Card>
+  <Card
+    title="docspine 0.2.0"
+    description="DOCX Apache-2.0, in puro Rust, con un modello di tabelle di prima classe (gridSpan / vMerge / annidate). Ora esporta .docx → PDF fedeli (paginazione in streaming, geometria per sezione, fedeltà delle tabelle). Supporta l'Extractor .docx di RAGSpine tramite l'extra [doc]."
+  ></Card>
+  <Card
+    title="pptspine 0.2.0"
+    description="PowerPoint / OOXML Apache-2.0, in puro Rust, con gestione più ricca dei merge. Ora esporta .pptx → PDF fedeli (una pagina per slide, ereditarietà di placeholder / temi). Supporta l'Extractor .pptx opt-in di RAGSpine tramite l'extra [ppt]."
+  ></Card>
+</Cards>

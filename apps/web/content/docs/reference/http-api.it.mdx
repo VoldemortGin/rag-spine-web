@@ -1,0 +1,142 @@
+---
+title: API HTTP
+description: Famiglie di route FastAPI esatte, limiti delle richieste, autenticazione, caching ed esecuzione dei flussi di lavoro disattivata per impostazione predefinita.
+---
+
+Avvia l'app opzionale `[service]` da un checkout dei sorgenti:
+
+```bash
+RAGSPINE_DB_PATH=data/fact_metric.db \
+  .venv/bin/python scripts/run_server.py --port 8000
+```
+
+## Route del motore
+
+| Metodo | Percorso                            | Richiesta / comportamento                                                |
+| ------ | ----------------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/healthz`                          | liveness                                                                 |
+| `GET`  | `/readyz`                           | prontezza del fact-store e della coda opzionale; `503` quando degradato             |
+| `POST` | `/v1/ask`                           | `question`, `reference_date` opzionale, `(role, text)` `history` opzionale |
+| `POST` | `/v1/ask/stream`                    | la stessa risposta protetta completata su SSE                                   |
+| `POST` | `/v1/ingest/structured/jobs`        | job `.xlsx`, `.xlsm`, `.pptx`, `.pdf`                                    |
+| `POST` | `/v1/ingest/narrative/jobs`         | job `.pptx`, `.pdf`                                                      |
+| `GET`  | `/v1/jobs/{job_id}`                 | stato/risultato/errore della coda                                                |
+| `GET`  | `/v1/topology?scope=agent\|service` | topologia statica del motore; uno scope non valido restituisce `400`                      |
+
+Esempio:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"China FY2024 revenue","history":[["user","Use the annual report"]]}'
+```
+
+`/v1/ask/stream` calcola prima la risposta protetta completa, poi invia `start`, zero o più
+frame SSE `delta` e `done`. Un fallimento della protezione non può quindi essere trasmesso a metà e poi ritrattato.
+
+## Catalogo dei flussi di lavoro
+
+### `GET /v1/workflow-templates`
+
+I campi di query sono `offset` (predefinito 0) e `limit` (1–100, predefinito 100). La risposta contiene
+`total`, `offset`, `limit`, `next_offset` nullable e `templates` con soli metadati. Omette intenzionalmente
+lo YAML del flusso di lavoro e i dati di anteprima.
+
+La route invia un `ETag` debole specifico per pagina e
+`Cache-Control: public, max-age=300, stale-while-revalidate=3600`. Un `If-None-Match` corrispondente può
+ricevere `304`.
+
+### `GET /v1/workflow-templates/{template_id}`
+
+Restituisce i metadati del catalogo più il `workflow` canonico, il `yaml` Dify deterministico e la
+versione 1 dello schema `preview` a solo scopo di visualizzazione. Un identificatore sconosciuto restituisce `404` senza esporre i percorsi.
+
+### `POST /v1/workflow-scaffold`
+
+```json
+{ "description": "invoice extraction and approval", "reuse": true }
+```
+
+`description` è di 1–4.096 caratteri. Il campo opzionale `template_id` deve essere un identificatore di catalogo
+in minuscolo con trattini. I campi aggiuntivi sono vietati. La risposta contiene `workflow`, `yaml`, `preview`,
+`origin`, `template_id`, `confidence`, `matcher`, `warnings`, `compatibility`, `requirements` e
+metadati fattuali opzionali `source`. Non esegue il flusso di lavoro.
+
+## Compilatore Dify ed esecuzione interna
+
+| Metodo | Percorso            | Comportamento                                                              |
+| ------ | ------------------- | ------------------------------------------------------------------------- |
+| `POST` | `/v1/dify/analyze`  | solo suggerimenti statici                                                   |
+| `POST` | `/v1/dify/compile`  | restituisce il sorgente Python per il target `ragspine` o `spineagent`; nessuna esecuzione |
+| `POST` | `/v1/dify/run`      | compila, applica il gate ed esegue solo quando abilitato                              |
+| `POST` | `/v1/dify/run/jobs` | compila/applica il gate in modo sincrono, poi accoda quando abilitato                     |
+
+Analisi, compilazione ed esecuzione accettano esattamente una forma di documento:
+
+```json
+{ "workflow": { "app": { "mode": "workflow" }, "workflow": { "graph": {} } } }
+```
+
+oppure il formato legacy:
+
+```json
+{ "yaml": "app:\n  mode: workflow\nworkflow:\n  graph: {}\n" }
+```
+
+I campi sconosciuti e la fornitura di entrambe/nessuna delle forme vengono rifiutati. `RAGSPINE_DIFY_RUN_ENABLED` è
+false per impostazione predefinita, producendo `403` per l'esecuzione. I provider sono costruiti esclusivamente dalla configurazione del server.
+
+## Conversione n8n ed esecuzione interna
+
+| Metodo | Percorso          | Comportamento                                                |
+| ------ | ----------------- | ------------------------------------------------------------ |
+| `POST` | `/v1/n8n/convert` | conversione pura `n8n_to_dify` o `dify_to_n8n` con avvisi |
+| `POST` | `/v1/n8n/run`     | converte e poi riutilizza il percorso di esecuzione Dify disattivato per impostazione predefinita             |
+
+La conversione accetta una mappatura (o una stringa JSON/YAML nel formato di conversione) e non la esegue mai.
+
+## API pubblica Workflow compatibile con Dify
+
+Tutte e quattro le route richiedono `Authorization: Bearer <app-key>`. Le chiavi delle app e i percorsi dei flussi di lavoro lato server
+sono registrati in `RAGSPINE_DIFY_PUBLIC_APPS`; un registro assente restituisce `401`.
+
+| Metodo | Percorso                              |
+| ------ | ------------------------------------- |
+| `POST` | `/v1/workflows/run`                   |
+| `GET`  | `/v1/workflows/run/{workflow_run_id}` |
+| `GET`  | `/v1/info`                            |
+| `GET`  | `/v1/parameters`                      |
+
+Una richiesta di esecuzione richiede `user`, accetta `inputs` e seleziona `response_mode` come `blocking` o
+`streaming`. La chiave seleziona il flusso di lavoro lato server; i client non caricano un flusso di lavoro né un
+provider. L'esecuzione richiede comunque `RAGSPINE_DIFY_RUN_ENABLED=true`.
+
+## API pubblica compatibile con n8n
+
+Ogni route `/api/v1/*` richiede `X-N8N-API-KEY` corrispondente a `RAGSPINE_N8N_API_KEY`. Se la chiave del server
+non è impostata, la superficie è disabilitata con `401`.
+
+| Metodo                 | Percorso                                     |
+| ---------------------- | -------------------------------------------- |
+| `GET`, `POST`          | `/api/v1/workflows`                          |
+| `GET`, `PUT`, `DELETE` | `/api/v1/workflows/{workflow_id}`            |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/activate`   |
+| `POST`                 | `/api/v1/workflows/{workflow_id}/deactivate` |
+| `GET`                  | `/api/v1/executions`                         |
+| `GET`, `DELETE`        | `/api/v1/executions/{execution_id}`          |
+| `GET`, `POST`          | `/webhook/{path}`                            |
+
+La paginazione delle collezioni usa `limit` (predefinito 100, accettato/limitato a 1–250) e cursori. I webhook
+sono l'eccezione all'autenticazione tramite chiave API: accettano intenzionalmente GET/POST non autenticati,
+corrispondono solo ai flussi di lavoro attivi e restano dietro il flag di esecuzione disattivato per impostazione predefinita.
+
+## Limiti, errori e sicurezza del deployment
+
+Lo scaffolding e le route POST Dify selezionate rifiutano corpi superiori a 2 MiB prima del buffering; un
+documento di flusso di lavoro decodificato è limitato a 1 MiB e ha limiti aggiuntivi su profondità/nodi/stringhe/alias YAML.
+Le risposte di validazione rimuovono l'input/contesto riecheggiato. I fallimenti interni restituiscono oggetti di errore
+opachi e nessun traceback.
+
+Non esiste alcuna autenticazione integrata per le route del motore, del catalogo, del compilatore, del convertitore, della topologia o di esecuzione
+interna. I deployment pubblici devono aggiungere isolamento di rete o un reverse proxy. La route webhook
+necessita di autenticazione/limitazione del rate in ingresso se la segretezza del suo URL è insufficiente.

@@ -1,0 +1,63 @@
+---
+title: Decisioni (ADR)
+description: Gli architecture decision record alla base di RAGSpine — immutabili, in sola aggiunta e sostituiti anziché modificati.
+---
+
+Un **Architecture Decision Record (ADR)** cattura una singola decisione significativa: il
+contesto che l'ha imposta, la decisione stessa, le alternative scartate e
+le conseguenze che ne derivano. RAGSpine conserva i propri ADR come registri storici immutabili.
+
+## Come funzionano gli ADR qui
+
+- **Una decisione per file.** Ogni record è una scelta singola e autonoma
+  (`docs/adr/NNNN-kebab-title.md` nel repository).
+- **In sola aggiunta e immutabili.** Un ADR non viene mai modificato dopo essere stato accettato. Per
+  annullare una decisione, si aggiunge un _nuovo_ ADR che sostituisce quello precedente — la storia
+  rimane intatta e verificabile.
+- **Sostituire, non modificare.** Ecco perché un record può descrivere un percorso più vecchio (per
+  esempio, le posizioni dei file di layout precedenti a `src/`) senza essere "sbagliato": documenta la
+  decisione così com'era al momento.
+- **Esenti dal tracciamento delle derive.** Poiché sono storici, gli ADR non contengono frontmatter `covers`
+  e non vengono controllati da `scripts/check_doc_drift.py`.
+
+<Callout title="Il filo conduttore">
+  Il principio ricorrente in queste decisioni è **separare le garanzie dalla flessibilità**:
+  gli invarianti (prevenzione delle risposte inventate, provenienza, isolamento delle fonti, licenze delle dipendenze, il gate di
+  sicurezza) sono rigidi, deterministici e non sostituibili, mentre tutto il resto (dominio, lingua, LLM,
+  embedding, reranker, strategia di parsing) è flessibile — guidato dalla configurazione o da `Protocol`.
+</Callout>
+
+## I record
+
+[ADR 0002](/it/docs/decisions/adr-0002) è il record ombrello sulla direzione del prodotto;
+indicizza gli otto ADR per singola decisione (0003–0010) definiti nella stessa intervista di progettazione.
+
+<Callout type="warn" title="I numeri degli ADR sono locali al repository">
+  Gli ADR 0012–0015 del sito web conservano una sequenza di pubblicazione precedente della famiglia/del sito. L'attuale
+  repository del motore RAGSpine ha anche i propri file ADR, alcuni con gli stessi numeri; per esempio,
+  l'ADR 0012 del sito web registra la giunzione LLM di corespine, mentre il file del motore
+  `docs/adr/0012-onboarding-complexity-budget.md` è una decisione diversa. Non dedurre l'identità
+  dal solo numero. I nuovi ADR 0016–0018 del sito web riportati di seguito sono trascrizioni in inglese dei
+  record del motore con i numeri corrispondenti.
+</Callout>
+
+| #                                | Titolo                                                                                   | Riepilogo                                                                                                                                                                                                                                                     | Stato   |
+| -------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| [0001](/it/docs/decisions/adr-0001) | Doppio canale deterministico anziché un singolo percorso LLM                                       | Due canali deterministici (numerico strutturato + RAG narrativo); l'LLM è confinato alla sintesi, mai all'invenzione di fatti.                                                                                                                                | accepted |
+| [0002](/it/docs/decisions/adr-0002) | Direzione del prodotto: una libreria RAG generica, con licenze pulite e senza vincoli di framework     | La stella polare ombrello; separa gli invarianti rigidi dalla flessibilità guidata dalla configurazione/da `Protocol` e indicizza gli ADR 0003–0010.                                                                                                                             | accepted |
+| [0003](/it/docs/decisions/adr-0003) | Pubblico: una libreria OSS generica su cui altri possano costruire                          | Il pubblico primario sono gli sviluppatori che costruiscono il proprio RAG sopra RAGSpine; la finanza diventa un dominio di esempio, non l'identità.                                                                                                                         | accepted |
+| [0004](/it/docs/decisions/adr-0004) | Piena generalità: `DomainProfile` e fatti a dimensione arbitraria                          | Generalizzare completamente — `CompanyProfile` diventa `DomainProfile`; il canale strutturato diventa uno store di fatti tipizzati con dimensioni arbitrarie definite dall'utente.                                                                                                      | accepted |
+| [0005](/it/docs/decisions/adr-0005) | Core snello; mettere in quarantena le capacità dormienti come experimental/extra                         | Distribuire solo ciò che gira nel percorso offline predefinito; spostare OCR, vettori reali e il verificatore in moduli/extra sperimentali chiaramente etichettati.                                                                                                                  | accepted |
+| [0006](/it/docs/decisions/adr-0006) | Asticella di qualità: invarianti come property test, più un benchmark di recupero reale            | Definire la qualità come garanzie (invarianti dimostrati da property test), più un benchmark di recupero reale con etichette; delegare l'accuratezza di dominio ai dati dell'utente.                                                                                                     | accepted |
+| [0007](/it/docs/decisions/adr-0007) | Multilingue: architettura per cinque lingue, distribuzione di due; il resto come locale pack                    | Far passare una giunzione `locale` attraverso ogni livello; distribuire e testare cinese + inglese nel core; giapponese / italiano / tedesco arrivano come locale pack della community.                                                                                                            | accepted |
+| [0008](/it/docs/decisions/adr-0008) | Prompt: un `PromptRegistry` pacchettizzato sotto `ragspine/prompts/<locale>/`                 | Esternalizzare i prompt in file di template pacchettizzati e indicizzati per locale dietro un `Protocol` `PromptRegistry`, popolati da `DomainProfile` a runtime.                                                                                                                | accepted |
+| [0009](/it/docs/decisions/adr-0009) | "Indipendente dai framework" ridefinito: nessun lock-in di framework + solo licenze permissive              | Ridefinire indipendente dai framework come nessun lock-in di orchestrazione più solo licenze permissive (≤ Apache-2.0); i backend reali sono extra opzionali per motivi di peso, non di purezza.                                                                                                    | accepted |
+| [0010](/it/docs/decisions/adr-0010) | Parsing dell'intento: gate di sicurezza deterministico + `IntentParser` sostituibile                  | Disaccoppiare il gate di sicurezza deterministico, sempre attivo e mai sostituibile, da un `Protocol` `IntentParser` sostituibile.                                                                                                                                             | accepted |
+| [0011](/it/docs/decisions/adr-0011) | Adottare il python-project-standard; migrare al layout `src/`, mantenere il resto              | Adottare lo standard interno come filosofia guida; allineare l'unico invariante strutturale delimitato (layout `src/ragspine/`) e accettare quattro divergenze documentate.                                                                                               | accepted |
+| [0012](/it/docs/decisions/adr-0012) | Adottare la giunzione LLM di corespine — `chat` / `ChatCompletion` al posto di `create_message`          | Spostare il Protocol `LLMProvider` nel core condiviso della famiglia (`corespine`), adottare la forma delle chat completion di OpenAI e aggiungere un throttle TPM attivo opzionale. Distribuito nella 0.3.0.                                                                                | accepted |
+| [0013](/it/docs/decisions/adr-0013) | YAML di workflow Dify → compilatore Python puro + advisor di ottimizzazione statica                 | Compilare un `.yml` Dify in Python imperativo indipendente dai framework attraverso una IR de-Dify-izzata (`parse → IR → codegen`), più otto regole di ottimizzazione puramente statiche; PyYAML dietro un extra `[dify]`. Distribuito nella 0.4.0.                                              | accepted |
+| [0014](/it/docs/decisions/adr-0014) | Workflow Dify come servizio (analyze / compile / run) con esecuzione sicura a tre livelli    | Tre endpoint di servizio con fiducia crescente: analyze / compile sempre attivi; run disattivato per impostazione predefinita dietro un gate statico di import L0, una sandbox ristretta L1 e (Linux) un isolamento in sottoprocesso L2; il provider è sempre deciso dal server. Distribuito nella 0.5.0.       | proposed |
+| [0015](/it/docs/decisions/adr-0015) | Estrazione di relazioni — uno slot opt-in con marcatori di provenienza model-derived / unverified | Aggiungere uno slot Protocol `RelationExtractor` accanto a `build_relation_graph`; il default rimane identico byte per byte, gli archi estratti dall'LLM vengono marcati `model-derived` + `unverified`, filtrati attraverso `SecurityGate` e mai considerati affidabili in modo silenzioso. Distribuito nella 0.9.0. | accepted |
+| [0016](/it/docs/decisions/adr-0016) | Configurazione per la produttizzazione del recupero                                                         | Aggiungere filtri di metadati per il restringimento, instradamento RRF multi-libreria con provenienza, un preset parent-child e una modalità economy che non costruisce alcun componente di embedding/vettoriale.                                                                                       | accepted |
+| [0017](/it/docs/decisions/adr-0017) | La cronologia della conversazione è contesto solo per la generazione                                         | Aggiungere una cronologia di prima classe mantenendola fuori dal parsing dell'intento, dalla sicurezza, dalle query di recupero e dalle evidenze.                                                                                                                                                  | accepted |
+| [0018](/it/docs/decisions/adr-0018) | Espansione parent-child a livello di store                                                      | Persistere i campi di gerarchia/finestra, collegare i chunker attraverso l'ingestione ed espandere solo dopo l'isolamento mentre le citazioni restano sul risultato figlio.                                                                                                                  | accepted |

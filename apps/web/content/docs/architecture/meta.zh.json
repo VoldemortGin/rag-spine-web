@@ -1,0 +1,5 @@
+{
+  "title": "架构",
+  "icon": "Network",
+  "pages": ["overview", "request-flow", "channels", "package-layout"]
+}
