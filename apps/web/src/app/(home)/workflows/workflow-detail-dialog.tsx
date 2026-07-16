@@ -11,6 +11,7 @@ import {
   workflowDownloadHref,
   type WorkflowTemplate,
 } from '../../../lib/workflow-catalog-core';
+import { WorkflowPreviewFlow } from './workflow-preview-flow';
 
 export interface WorkflowDetailDialogProps {
   onClose: () => void;
@@ -42,9 +43,9 @@ export function WorkflowDetailDialog({ onClose, open, template }: WorkflowDetail
       aria-labelledby={titleId}
       onClose={onClose}
       onMouseDown={closeFromBackdrop}
-      className="m-auto max-h-[min(88dvh,52rem)] w-[min(92vw,46rem)] overflow-hidden rounded-2xl border border-fd-border bg-fd-background p-0 text-fd-foreground shadow-2xl backdrop:bg-black/65 backdrop:backdrop-blur-sm"
+      className="m-auto max-h-[92dvh] w-[min(96vw,72rem)] overflow-hidden rounded-2xl border border-fd-border bg-fd-background p-0 text-fd-foreground shadow-2xl backdrop:bg-black/65 backdrop:backdrop-blur-sm"
     >
-      <div className="flex max-h-[min(88dvh,52rem)] flex-col">
+      <div className="flex max-h-[92dvh] flex-col">
         <header className="flex items-start justify-between gap-4 border-b border-fd-border px-5 py-4 sm:px-6">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -85,6 +86,8 @@ export function WorkflowDetailDialog({ onClose, open, template }: WorkflowDetail
               ),
             )}
           </ul>
+
+          <WorkflowPreviewFlow key={template.id} name={template.name} preview={template.preview} />
 
           <div className="mt-6 grid gap-5 border-t border-fd-border pt-5 sm:grid-cols-2">
             <section aria-labelledby={`${titleId}-requirements`}>

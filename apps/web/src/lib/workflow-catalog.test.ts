@@ -201,6 +201,49 @@ describe('workflow catalog snapshot', () => {
     expect(sourceReferences).toHaveProperty('size', 1000);
   });
 
+  it('ships bounded graph-only previews for every catalog workflow', () => {
+    for (const template of WORKFLOW_CATALOG) {
+      const { preview } = template;
+      expect(preview.preview_schema_version).toBe(1);
+      expect(preview.nodes.length).toBeGreaterThan(0);
+      expect(preview.nodes.length).toBeLessThanOrEqual(256);
+      expect(preview.edges.length).toBeLessThanOrEqual(512);
+
+      const nodeIds = new Set(preview.nodes.map((node) => node.id));
+      expect(nodeIds.size).toBe(preview.nodes.length);
+      for (const node of preview.nodes) {
+        expect(node.title.trim().length).toBeGreaterThan(0);
+        expect(node.type.trim().length).toBeGreaterThan(0);
+        expect([node.x, node.y, node.width, node.height].every(Number.isFinite)).toBe(true);
+        expect(node.width).toBeGreaterThan(0);
+        expect(node.height).toBeGreaterThan(0);
+        if (node.parent_id !== undefined) expect(nodeIds.has(node.parent_id)).toBe(true);
+      }
+
+      const edgeIds = new Set(preview.edges.map((edge) => edge.id));
+      expect(edgeIds.size).toBe(preview.edges.length);
+      for (const edge of preview.edges) {
+        expect(nodeIds.has(edge.source)).toBe(true);
+        expect(nodeIds.has(edge.target)).toBe(true);
+      }
+
+      const serialized = JSON.stringify(preview);
+      expect(serialized).not.toContain('prompt_template');
+      expect(serialized).not.toContain('environment_variables');
+      expect(serialized).not.toContain('completion_params');
+      expect(serialized).not.toContain('marketplace_plugin_unique_identifier');
+    }
+
+    const branch = templateById('conditional-response-routing').preview;
+    expect(branch.edges.map((edge) => edge.label).filter(Boolean)).toEqual(['IF', 'ELSE']);
+
+    const iteration = templateById('batch-content-processing').preview;
+    expect(iteration.nodes.filter((node) => node.parent_id === 'iteration_1')).toHaveLength(2);
+    expect(iteration.nodes.find((node) => node.type === 'iteration-start')?.title).toBe(
+      'Iteration start',
+    );
+  });
+
   it('binds every dated source URL to its declared provider', () => {
     const providerHosts = {
       dify: 'marketplace.dify.ai',

@@ -25,6 +25,30 @@ export interface WorkflowSource {
   observed_at: string;
 }
 
+export interface WorkflowPreviewNode {
+  id: string;
+  title: string;
+  type: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  parent_id?: string;
+}
+
+export interface WorkflowPreviewEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+}
+
+export interface WorkflowPreview {
+  preview_schema_version: number;
+  nodes: readonly WorkflowPreviewNode[];
+  edges: readonly WorkflowPreviewEdge[];
+}
+
 export interface WorkflowTemplate {
   id: string;
   name: string;
@@ -38,6 +62,7 @@ export interface WorkflowTemplate {
   compatibility: WorkflowCompatibility;
   requirements: readonly WorkflowRequirement[];
   source: WorkflowSource | null;
+  preview: WorkflowPreview;
   yaml: string;
   sha256: string;
 }
