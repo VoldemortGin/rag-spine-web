@@ -3,6 +3,7 @@ node_modules
 out
 .source
 .turbo
+.wrangler
 coverage
 *.tsbuildinfo
 .DS_Store

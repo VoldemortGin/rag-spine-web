@@ -7,6 +7,10 @@
   Content-Type: image/png
 /apple-icon
   Content-Type: image/png
+/api/search/*
+  Content-Type: application/json; charset=utf-8
+/api/search-parts/*
+  Content-Type: application/json; charset=utf-8
 /workflows/*
   Content-Type: application/yaml; charset=utf-8
   Content-Disposition: attachment

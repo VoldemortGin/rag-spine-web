@@ -11,15 +11,15 @@ import {
   type SharedProps,
 } from 'fumadocs-ui/components/dialog/search';
 import { useDocsSearch } from 'fumadocs-core/search/client';
-import { flexsearchStaticClient } from 'fumadocs-core/search/client/flexsearch-static';
 import { useI18n } from 'fumadocs-ui/contexts/i18n';
+import { chunkedFlexsearchStaticClient } from '@/lib/chunked-flexsearch-client';
 import { defaultLocale, isLocale } from '@/lib/i18n';
 
 export default function DefaultSearchDialog(props: SharedProps) {
   const { locale } = useI18n();
   const searchLocale = locale !== undefined && isLocale(locale) ? locale : defaultLocale;
   const { search, setSearch, query } = useDocsSearch({
-    client: flexsearchStaticClient({
+    client: chunkedFlexsearchStaticClient({
       from: `/api/search/${searchLocale}`,
       locale: searchLocale,
     }),
