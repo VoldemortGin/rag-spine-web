@@ -7,8 +7,8 @@ description: Adopt the house standard as governing philosophy; align the one bou
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Relates to [0009](/docs/decisions/adr-0009) (framework/dependency policy)
-and [0005](/docs/decisions/adr-0005) (lean core).
+Relates to [0009](/en/docs/decisions/adr-0009) (framework/dependency policy)
+and [0005](/en/docs/decisions/adr-0005) (lean core).
 
 ## Context
 
@@ -52,7 +52,7 @@ high-value structural invariant: migrate to the `src/ragspine/` layout.** Concre
 1. `rootutils` + `.project-root` for root resolution (one site, `common/core.py`,
    import-time zero-side-effect) instead of editable-install + `importlib.resources`.
 2. `common/` plays the cross-cutting-infra role the standard assigns to `core/`.
-3. SDK isolation via `Protocol` + lazy import (per [0009](/docs/decisions/adr-0009) / [0005](/docs/decisions/adr-0005)), not a `ports/` +
+3. SDK isolation via `Protocol` + lazy import (per [0009](/en/docs/decisions/adr-0009) / [0005](/en/docs/decisions/adr-0005)), not a `ports/` +
    `adapters/` directory split.
 4. pydantic at the boundary only where already used, not blanket.
 

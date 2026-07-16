@@ -7,11 +7,11 @@ description: 通过一个去 Dify 化的 IR（parse → IR → codegen）把 Dif
 
 > 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
 
-关联 [0009](/zh/docs/decisions/adr-0009)（无框架锁定 + 仅限宽松许可证）、[0011](/zh/docs/decisions/adr-0011)（python-project-standard），以及 spine 家族边界 ADR（家族仓库，`docs/adr/0001`——家族缝 / LLM 协议）。已随 **rag-spine 0.4.0** 发布。
+关联 [0009](/docs/decisions/adr-0009)（无框架锁定 + 仅限宽松许可证）、[0011](/docs/decisions/adr-0011)（python-project-standard），以及 spine 家族边界 ADR（家族仓库，`docs/adr/0001`——家族缝 / LLM 协议）。已随 **rag-spine 0.4.0** 发布。
 
 ## 背景
 
-Dify 是流行的低代码 LLM 应用编排平台；其工作流可导出为 `.yml`（DSL）。许多用户在 Dify 里搭好了能用的 workflow / advanced-chat，但想**摆脱平台锁定**：得到一段不绑定框架、可读、可版本控制、可离线运行的纯 Python。RAGSpine 的身份恰恰是"不绑定框架的后端"（[ADR 0009](/zh/docs/decisions/adr-0009)：无框架锁定 + 仅限宽松许可证的依赖），因此把 Dify 工作流**编译**为命令式纯 Python——并顺带给出**静态优化建议**——与产品方向天然契合。
+Dify 是流行的低代码 LLM 应用编排平台；其工作流可导出为 `.yml`（DSL）。许多用户在 Dify 里搭好了能用的 workflow / advanced-chat，但想**摆脱平台锁定**：得到一段不绑定框架、可读、可版本控制、可离线运行的纯 Python。RAGSpine 的身份恰恰是"不绑定框架的后端"（[ADR 0009](/docs/decisions/adr-0009)：无框架锁定 + 仅限宽松许可证的依赖），因此把 Dify 工作流**编译**为命令式纯 Python——并顺带给出**静态优化建议**——与产品方向天然契合。
 
 硬约束：家族完全同步；核心保持零 SDK；LLM 调用经由 `corespine.LLMProvider.chat` 这条缝；离线的 `MockProvider` 是默认；仅限宽松许可证的门禁不动摇；`mypy --strict`；pydantic 只出现在边界。
 

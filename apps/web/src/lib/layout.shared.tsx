@@ -61,13 +61,9 @@ function getFamilyMenu(locale: Locale): LinkItemType {
   };
 }
 
-export function baseOptions(
-  locale: Locale = defaultLocale,
-  { languageSwitcher = false }: { languageSwitcher?: boolean } = {},
-): BaseLayoutProps {
+export function baseOptions(locale: Locale = defaultLocale): BaseLayoutProps {
   const copy = navigationCopy[locale];
   return {
-    i18n: languageSwitcher,
     nav: {
       // JSX supported.
       title: (

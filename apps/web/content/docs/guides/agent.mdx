@@ -11,8 +11,8 @@ sums up the flow it owns:
 > _(intent parse → clarification gateway → security gate → three-path routing → tool-use loop → synthesized answer)_
 
 It has exactly one public entry point — `answer_question` — and it is where the
-**anti-fabrication** guard lives. See [Anti-fabrication](/docs/concepts/anti-fabrication)
-for the concept and [Dual-channel](/docs/concepts/dual-channel) for the routing model.
+**anti-fabrication** guard lives. See [Anti-fabrication](/en/docs/concepts/anti-fabrication)
+for the concept and [Dual-channel](/en/docs/concepts/dual-channel) for the routing model.
 
 ## Layout
 
@@ -152,7 +152,7 @@ is just the first `{"role": "system", ...}` entry rather than a separate argumen
 <Callout type="info">
   **Migrated in 0.3.0.** The previous `create_message(*, system, messages, tools) ->
   ProviderResponse` seam is gone; implement `chat(messages, *, tools=None) -> ChatCompletion`
-  instead. See [ADR 0012](/docs/decisions/adr-0012) for the rationale and the corespine boundary.
+  instead. See [ADR 0012](/en/docs/decisions/adr-0012) for the rationale and the corespine boundary.
 </Callout>
 
 <Cards>
@@ -175,7 +175,7 @@ propagate.
 <Callout type="info">
   Set `RAGSPINE_TOKENS_PER_MINUTE` (> 0) and the service wraps the built provider in
   corespine's `RateLimitedProvider` for **active** client-side TPM throttling — complementary
-  to the SDK's own passive `max_retries` 429 backoff. See [Configuration](/docs/reference/configuration).
+  to the SDK's own passive `max_retries` 429 backoff. See [Configuration](/en/docs/reference/configuration).
 </Callout>
 
 ## agent — the orchestrator and the tool-use loop
@@ -201,7 +201,7 @@ system message and before the current question, but never enters deterministic i
 security screening, the retrieval query, or the evidence/source list. Only `assistant` is treated
 as the assistant role; unknown roles normalize to user. Consequently, previous conversation text
 cannot authorize a competitor query or become a citation. See
-[ADR 0017](/docs/decisions/adr-0017).
+[ADR 0017](/en/docs/decisions/adr-0017).
 
 Its flow: assign a request id → build a privacy-aware trace context → parse the intent
 (default `RuleIntentParser`) → `clarify_scope`. It then early-returns in strict order:
@@ -269,7 +269,7 @@ results exist but none are `found` — i.e. the guard rewrote to a refusal.
 
 <Callout type="warn">
   Anti-fabrication is enforced in control flow, not in a prompt. The three paths are intentionally
-  **not** unified — see [Anti-fabrication](/docs/concepts/anti-fabrication).
+  **not** unified — see [Anti-fabrication](/en/docs/concepts/anti-fabrication).
 </Callout>
 
 ## Example
@@ -290,22 +290,22 @@ print(result.sources)  # [{'doc': ..., 'locator': ...}]
 <Cards>
   <Card
     title="Anti-fabrication"
-    href="/docs/concepts/anti-fabrication"
+    href="/en/docs/concepts/anti-fabrication"
     description="The control-flow guard and why it is per-path."
   />
   <Card
     title="Dual-channel"
-    href="/docs/concepts/dual-channel"
+    href="/en/docs/concepts/dual-channel"
     description="How routing splits and merges structured + narrative."
   />
   <Card
     title="Retrieval"
-    href="/docs/guides/retrieval"
+    href="/en/docs/guides/retrieval"
     description="The NarrativeRetriever this orchestrator consumes."
   />
   <Card
     title="Extension points"
-    href="/docs/reference/extension-points"
+    href="/en/docs/reference/extension-points"
     description="LLMProvider, IntentParser, NarrativeRetriever, and the other seams."
   />
 </Cards>

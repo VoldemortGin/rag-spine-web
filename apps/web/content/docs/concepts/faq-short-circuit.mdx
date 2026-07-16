@@ -9,7 +9,7 @@ fact store, and the retriever entirely. It is a latency and cost optimization �
 short-circuit would skip every downstream safety check.
 
 <Callout type="warn">
-  Because the FAQ layer sits in front of [anti-fabrication](/docs/concepts/anti-fabrication), its
+  Because the FAQ layer sits in front of [anti-fabrication](/en/docs/concepts/anti-fabrication), its
   exclusions are deliberately conservative: structured-numeric, competitor, real-time, expired,
   disabled, and `RESTRICTED` items **never** short-circuit.
 </Callout>
@@ -64,7 +64,7 @@ _before_ the cache index is consulted:
   </Accordion>
   <Accordion title="RESTRICTED sensitivity">
     Any item whose `sensitivity` is `RESTRICTED` (case-insensitive, whitespace-trimmed) is never
-    short-circuited — consistent with [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+    short-circuited — consistent with [RESTRICTED isolation](/en/docs/concepts/restricted-isolation).
   </Accordion>
 </Accordions>
 

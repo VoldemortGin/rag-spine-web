@@ -9,10 +9,10 @@ description: Metadata filtering, multi-index routing, parent-child preset, and e
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [ADR 0002 product direction](/docs/decisions/adr-0002). Constrained by
-[ADR 0005](/docs/decisions/adr-0005) (new capability isolated from the byte-identical default path)
-and [ADR 0010](/docs/decisions/adr-0010) (deterministic security/isolation independent of model
-output). It mirrors the seam meta-pattern of [ADR 0015](/docs/decisions/adr-0015).
+Part of the [ADR 0002 product direction](/en/docs/decisions/adr-0002). Constrained by
+[ADR 0005](/en/docs/decisions/adr-0005) (new capability isolated from the byte-identical default path)
+and [ADR 0010](/en/docs/decisions/adr-0010) (deterministic security/isolation independent of model
+output). It mirrors the seam meta-pattern of [ADR 0015](/en/docs/decisions/adr-0015).
 
 ## Context
 
@@ -95,7 +95,7 @@ inherit and deterministically prove all three retrieval invariants for every mod
   Each library's existing exit owns isolation; fusion never reads chunks.
 - Repoint parent-child at retrieval-time store expansion immediately: at this decision's time the
   chunker was not wired into narrative ingestion and hierarchy/window data was not persisted. The
-  preset first landed parent context plus a real locator. [ADR 0018](/docs/decisions/adr-0018)
+  preset first landed parent context plus a real locator. [ADR 0018](/en/docs/decisions/adr-0018)
   subsequently completes that deferred store-level expansion.
 - Use a boolean `economy` flag: a named mode and factory fit the family seam pattern and expose the
   choice as first-class configuration.

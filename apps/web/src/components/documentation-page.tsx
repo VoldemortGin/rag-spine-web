@@ -1,5 +1,11 @@
 import { getMDXComponents } from '@/components/mdx';
-import { htmlLanguages, isLocale, locales, openGraphLocales } from '@/lib/i18n';
+import {
+  canonicalDocsLocale,
+  htmlLanguages,
+  isLocale,
+  locales,
+  openGraphLocales,
+} from '@/lib/i18n';
 import { getPageImage, getPageMarkdownUrl, source } from '@/lib/source';
 import { appName, docsGitConfig } from '@/lib/shared';
 import {
@@ -47,10 +53,11 @@ export function getDocumentationMetadata(page: DocumentationSourcePage): Metadat
     const translated = source.getPage(page.slugs, locale);
     if (translated) languageAlternates[htmlLanguages[locale]] = translated.url;
   }
-  languageAlternates['x-default'] = source.getPage(page.slugs, 'en')?.url ?? page.url;
+  languageAlternates['x-default'] =
+    source.getPage(page.slugs, canonicalDocsLocale)?.url ?? page.url;
 
   const locale = page.locale !== undefined && isLocale(page.locale) ? page.locale : 'en';
-  const image = getPageImage(page).url;
+  const image = new URL(getPageImage(page).url, 'https://rag-spine.org').toString();
   return {
     title: page.data.title,
     description: page.data.description,

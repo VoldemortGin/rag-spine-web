@@ -7,7 +7,7 @@ description: Generalize fully — CompanyProfile becomes DomainProfile and the s
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction. Gated by [0003](/docs/decisions/adr-0003).
+Part of the [0002](/en/docs/decisions/adr-0002) product direction. Gated by [0003](/en/docs/decisions/adr-0003).
 
 ## Context
 
@@ -16,7 +16,7 @@ the structured channel is finance to the bone: a fixed `metric/entity/period/cha
 4-tuple, `fact_metric` tables, REVENUE/PROFIT/ROE, and a metric vocabulary still
 hardcoded in `common/glossary.py` (entities/geography/sensitivity are already
 config-driven; metrics are not). Having chosen a general-purpose library
-([0003](/docs/decisions/adr-0003)), "general" must be true of _both_ channels.
+([0003](/en/docs/decisions/adr-0003)), "general" must be true of _both_ channels.
 
 ## Decision
 
@@ -42,7 +42,7 @@ generality by demonstration.
 - Largest engineering bet in the set: schema change (4-tuple → arbitrary dimensions),
   dynamic tool-schema generation, and config-driven parsing all follow.
 - Subsumes the standalone "config-driven completeness" question.
-- Forces the intent parser to stop hardcoding finance dimensions → [0010](/docs/decisions/adr-0010).
+- Forces the intent parser to stop hardcoding finance dimensions → [0010](/en/docs/decisions/adr-0010).
 - **Risk:** the rigor came partly _from_ the finance constraints; generalization must
   not weaken any invariant. This was the user's more-ambitious override of the
   recommended incremental path — implementation must guard the invariants explicitly.

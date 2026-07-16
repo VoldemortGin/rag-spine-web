@@ -1,4 +1,4 @@
-import { isTranslatedLocale, translatedLocales } from '@/lib/i18n';
+import { isLocale, locales } from '@/lib/i18n';
 import { getPageImage, source } from '@/lib/source';
 import { appName } from '@/lib/shared';
 import { generate as DefaultImage } from 'fumadocs-ui/og';
@@ -9,6 +9,7 @@ export const revalidate = false;
 export const dynamicParams = false;
 
 const editionLabels = {
+  en: 'English documentation',
   zh: 'Chinese documentation',
   ja: 'Japanese documentation',
   it: 'Documentazione italiana',
@@ -19,7 +20,7 @@ export async function GET(
   { params }: RouteContext<'/[lang]/og/docs/[...slug]'>,
 ) {
   const { lang, slug } = await params;
-  if (!isTranslatedLocale(lang)) notFound();
+  if (!isLocale(lang)) notFound();
   const page = source.getPage(slug.slice(0, -1), lang);
   if (!page) notFound();
 
@@ -32,7 +33,7 @@ export async function GET(
 }
 
 export function generateStaticParams() {
-  return translatedLocales.flatMap((lang) =>
+  return locales.flatMap((lang) =>
     source.getPages(lang).map((page) => ({
       lang,
       slug: getPageImage(page).segments,

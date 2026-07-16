@@ -11,6 +11,9 @@ const workspaceRoot = fileURLToPath(new URL('../..', import.meta.url));
 const config = {
   output: 'export',
   reactStrictMode: true,
+  experimental: {
+    globalNotFound: true,
+  },
   turbopack: {
     root: workspaceRoot,
   },

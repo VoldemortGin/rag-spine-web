@@ -137,7 +137,7 @@ store.close()
 The table is `fact_metric`. `query()` issues an exact-match `SELECT` on
 `(metric_code, entity, period_type, period, channel)`; because that combination is unique,
 the result is always **0 rows (not found) or 1 row (found)**. That determinism is what the
-[anti-fabrication invariant](/docs/concepts/anti-fabrication) relies on — no `found` fact
+[anti-fabrication invariant](/en/docs/concepts/anti-fabrication) relies on — no `found` fact
 means the orchestrator rewrites the answer to "not found."
 
 ### `dim_key` — the upsert key
@@ -165,7 +165,7 @@ On conflict, `upsert_facts` overwrites the overwritable columns —
 (`tags, source_file_hash, extractor_version, mapping_version, confidence, review_status,
 valid_as_of, ingested_at, corrected_by, corrected_audit_seq`) — and stamps `ingested_at` itself. Re-ingesting the same data
 therefore never grows the store; this is the backbone of
-[idempotent ingestion](/docs/guides/ingestion#the-batch-manifest-ledger).
+[idempotent ingestion](/en/docs/guides/ingestion#the-batch-manifest-ledger).
 
 ### Auto-migrating schema
 
@@ -196,7 +196,7 @@ ingest; old versions stay for lineage. An empty list withdraws the doc from the 
 
 <Callout type="info">
   Retrieval pre-filters on chunk metadata (`active`, sensitivity, period, …) *before* scoring. The
-  `sensitivity` column is what powers [RESTRICTED isolation](/docs/concepts/restricted-isolation)
+  `sensitivity` column is what powers [RESTRICTED isolation](/en/docs/concepts/restricted-isolation)
   downstream.
 </Callout>
 
@@ -209,7 +209,7 @@ under the zero-warning gate. `close()` is idempotent.
 
 ## Default database paths
 
-Defaults come from [`common/core.py`](/docs/guides/common#core--global-constants):
+Defaults come from [`common/core.py`](/en/docs/guides/common#core--global-constants):
 `DEFAULT_FACT_DB = data/fact_metric.db` (holds both `fact_metric` and `narrative_chunk`),
 `DEFAULT_MAPPING_DB = data/color_mapping.db`, and
 `DEFAULT_REVIEW_QUEUE_DB = data/review_queue.db`.
@@ -227,8 +227,8 @@ Defaults come from [`common/core.py`](/docs/guides/common#core--global-constants
 ## Related
 
 <Cards>
-  <Card title="Ingestion guide" href="/docs/guides/ingestion" />
-  <Card title="Extraction guide — the Fact source" href="/docs/guides/extraction" />
-  <Card title="Concept: Anti-fabrication" href="/docs/concepts/anti-fabrication" />
-  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+  <Card title="Ingestion guide" href="/en/docs/guides/ingestion" />
+  <Card title="Extraction guide — the Fact source" href="/en/docs/guides/extraction" />
+  <Card title="Concept: Anti-fabrication" href="/en/docs/concepts/anti-fabrication" />
+  <Card title="Concept: Provenance & lineage" href="/en/docs/concepts/provenance" />
 </Cards>

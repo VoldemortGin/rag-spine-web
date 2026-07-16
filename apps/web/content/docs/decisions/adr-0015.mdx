@@ -7,9 +7,9 @@ description: Add a RelationExtractor Protocol slot beside build_relation_graph; 
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction. Constrained by
-[0005](/docs/decisions/adr-0005) (experimental capability isolated from the default path)
-and [0010](/docs/decisions/adr-0010) (the deterministic security gate).
+Part of the [0002](/en/docs/decisions/adr-0002) product direction. Constrained by
+[0005](/en/docs/decisions/adr-0005) (experimental capability isolated from the default path)
+and [0010](/en/docs/decisions/adr-0010) (the deterministic security gate).
 Shipped in **rag-spine 0.9.0**.
 
 ## Context
@@ -21,7 +21,7 @@ LLM, which is non-deterministic and can fabricate. We want that capability **wit
 a model-asserted edge masquerade as a controlled, verified fact, and without touching the
 byte-identical default path.
 
-The key insight is the same shape as [ADR 0010](/docs/decisions/adr-0010): a model-extracted
+The key insight is the same shape as [ADR 0010](/en/docs/decisions/adr-0010): a model-extracted
 relation is _useful but untrusted_. It must be **labelled** as such, and the two hard
 guarantees — RESTRICTED isolation and competitor refusal — must hold on this new input path
 too, deterministically, regardless of what the model returns.

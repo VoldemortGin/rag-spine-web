@@ -87,8 +87,8 @@ print(profile.home_entity_code)           # 'ACME_GROUP' by default
 ## 敏感度
 
 `sensitivity.py` 是确定性的数据分级层，由
-[叙事摄取](/zh/docs/guides/ingestion#叙事摄取)路径应用，也是下游
-[RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)所依赖的基础。级别是
+[叙事摄取](/docs/guides/ingestion#叙事摄取)路径应用，也是下游
+[RESTRICTED 隔离](/docs/concepts/restricted-isolation)所依赖的基础。级别是
 普通字符串——没有枚举。唯一的命名常量是 `RESTRICTED = "RESTRICTED"`；
 未标记的默认级别是 `"INTERNAL"`。
 
@@ -139,7 +139,7 @@ print(profile.home_entity_code)           # 'ACME_GROUP' by default
 | `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | 相对期间（今年/去年/上季度…）→ `(period_type, period)`        |
 
 期间归一化产出的 `period_type` 取值与
-[事实存储](/zh/docs/guides/storage#dim_key--upsert-键)所使用的一致：`FY`（`FY2024` / `2024`）、
+[事实存储](/docs/guides/storage#dim_key--upsert-键)所使用的一致：`FY`（`FY2024` / `2024`）、
 `HY`（`2024H1`）和 `QUARTER`（`2025Q1`）。
 
 ```python
@@ -192,8 +192,8 @@ normalize_metric("not a metric")  # None — never guesses
 ## 相关阅读
 
 <Cards>
-  <Card title="存储指南" href="/zh/docs/guides/storage" />
-  <Card title="摄取指南——摄取时的敏感度" href="/zh/docs/guides/ingestion" />
-  <Card title="概念：RESTRICTED 隔离" href="/zh/docs/concepts/restricted-isolation" />
-  <Card title="概念：溯源与链路" href="/zh/docs/concepts/provenance" />
+  <Card title="存储指南" href="/docs/guides/storage" />
+  <Card title="摄取指南——摄取时的敏感度" href="/docs/guides/ingestion" />
+  <Card title="概念：RESTRICTED 隔离" href="/docs/concepts/restricted-isolation" />
+  <Card title="概念：溯源与链路" href="/docs/concepts/provenance" />
 </Cards>

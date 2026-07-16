@@ -4,7 +4,7 @@ description: IR/text → stores. Structured fact ingestion with a batch manifest
 ---
 
 The **ingestion** domain takes extraction output (StyledGrid IR, narrative text) and writes
-it into the [stores](/docs/guides/storage). It has three lanes: **structured** (numeric
+it into the [stores](/en/docs/guides/storage). It has three lanes: **structured** (numeric
 facts), **narrative** (document chunks), and **review** (the human-in-the-loop queue that
 catches everything the deterministic path is unsure about). Every lane is idempotent —
 re-running an ingest must not double-write.
@@ -40,7 +40,7 @@ re-running an ingest must not double-write.
   xlsx-only.
 - `ingest_file(path, store, registry, queue, *, dry_run=False, manifest=None, batch_id=None, valid_as_of=None, grid_extractor=None)` —
   the unified multi-format dispatcher: it routes by suffix to the right extractor (xlsx /
-  xlsm / pptx, or PDF via the [router](/docs/guides/extraction#pdf-routing--per-page-triage))
+  xlsm / pptx, or PDF via the [router](/en/docs/guides/extraction#pdf-routing--per-page-triage))
   and reuses the shared ingest logic.
 
 Both return an **`IngestReport`** (a counts object, not raw numbers):
@@ -63,7 +63,7 @@ Both return an **`IngestReport`** (a counts object, not raw numbers):
 />
 
 Inside, each grid is color-tagged via the active mapping (`apply_mapping`), turned into
-[`Fact`](/docs/guides/storage#the-fact-dataclass) objects, and written with
+[`Fact`](/en/docs/guides/storage#the-fact-dataclass) objects, and written with
 `store.upsert_facts(...)`. Facts are stamped with their lineage —
 `source_doc_id`, `source_locator`, `source_file_hash`, `extractor_version`,
 `mapping_version`, and `review_status=REVIEW_AUTO_APPROVED`.
@@ -113,7 +113,7 @@ color mappings).
   **Where idempotency actually lives.** The contract calls the manifest "the guard," and it is the
   audit ledger of every run (path / hash / counts / failures). But the literal no-double-write
   guarantee comes from the fact store's **unique-key upsert** (`store.upsert_facts`, keyed on
-  [`dim_key`](/docs/guides/storage#dim_key--the-upsert-key)): re-running a batch re-extracts and
+  [`dim_key`](/en/docs/guides/storage#dim_key--the-upsert-key)): re-running a batch re-extracts and
   re-upserts, and the unique key keeps the store from growing. `batch_id` is **not** content-derived
   — it is caller-supplied or a random uuid.
 </Callout>
@@ -150,7 +150,7 @@ folder, a file, or a list, and returns a `NarrativeIngestReport` (a list of per-
 sentence-window, layout, domain, or semantic behavior. The resulting hierarchy/window fields are
 persisted in the chunk store rather than reconstructed only in memory. Chunks are
 written with `store.replace_doc_chunks(...)` into the
-[ChunkStore](/docs/guides/storage#the-chunk-store).
+[ChunkStore](/en/docs/guides/storage#the-chunk-store).
 
 Per-file status is one of `ingested` / `skipped` / `failed` / `no_text`. Idempotency uses a
 `narrative_doc` table (`doc_id → file_hash`) in the same sqlite DB: if the recorded hash
@@ -164,7 +164,7 @@ taken from metadata or inferred from the filename via `period_from_filename(name
 
 <Callout type="info">
   Sensitivity is applied here: an explicit `meta["sensitivity"]` wins, otherwise
-  `classify_sensitivity(...)` from [common](/docs/guides/common#sensitivity) runs. This is what
+  `classify_sensitivity(...)` from [common](/en/docs/guides/common#sensitivity) runs. This is what
   later lets retrieval enforce RESTRICTED isolation.
 </Callout>
 
@@ -201,7 +201,7 @@ API:
 
 Every transition appends an `AuditRecord` (`enqueue` / `approve` / `reject`) — the trail is
 append-only and never mutated, so review history is fully reconstructable. See
-[Review queue in the glossary](/docs/concepts/glossary#review-queue).
+[Review queue in the glossary](/en/docs/concepts/glossary#review-queue).
 
 ## Source connectors
 
@@ -215,7 +215,7 @@ in-process (tests / fixtures). `HttpConnector` and `NotionConnector` reach remot
 bases and lazy-import `httpx` behind the `[connectors]` extra. Pick one with
 `make_source_connector(spec, **kwargs)` or `RAGSPINE_SOURCE_CONNECTOR`; third-party connectors
 register through the `ragspine.source_connectors` entry-point group (built-in names win on a
-clash). See [Extension points → SourceConnector](/docs/reference/extension-points#sourceconnector).
+clash). See [Extension points → SourceConnector](/en/docs/reference/extension-points#sourceconnector).
 
 ```python
 from ragspine.ingestion.source.connector import make_source_connector
@@ -243,8 +243,8 @@ for raw in connector.iter_documents():
 ## Related
 
 <Cards>
-  <Card title="Extraction guide" href="/docs/guides/extraction" />
-  <Card title="Storage guide" href="/docs/guides/storage" />
-  <Card title="Common guide — sensitivity & glossary" href="/docs/guides/common" />
-  <Card title="Review queue glossary entry" href="/docs/concepts/glossary#review-queue" />
+  <Card title="Extraction guide" href="/en/docs/guides/extraction" />
+  <Card title="Storage guide" href="/en/docs/guides/storage" />
+  <Card title="Common guide — sensitivity & glossary" href="/en/docs/guides/common" />
+  <Card title="Review queue glossary entry" href="/en/docs/concepts/glossary#review-queue" />
 </Cards>

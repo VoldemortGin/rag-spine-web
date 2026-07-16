@@ -7,7 +7,7 @@ description: 只交付在默认离线路径上真正运行的部分；把 OCR、
 
 > 不可变记录。免于漂移追踪（无 `covers`）。取代，而不是编辑。
 
-隶属于 [0002](/zh/docs/decisions/adr-0002) 产品方向。以 [0003](/zh/docs/decisions/adr-0003) 为前置。
+隶属于 [0002](/docs/decisions/adr-0002) 产品方向。以 [0003](/docs/decisions/adr-0003) 为前置。
 
 ## 背景
 
@@ -24,6 +24,6 @@ description: 只交付在默认离线路径上真正运行的部分；把 OCR、
 
 ## 后果
 
-- 默认的 `pip install` 体验诚实且可端到端运行，代价是默认非语义（与 [0009](/zh/docs/decisions/adr-0009) 的精简默认一致）。
+- 默认的 `pip install` 体验诚实且可端到端运行，代价是默认非语义（与 [0009](/docs/decisions/adr-0009) 的精简默认一致）。
 - README 的"诚实差距"必须清晰标出每一个实验模块。
-- 定义了提升标准：一个模块只有在拥有真实的 CI 测试路径、且（对检索而言）支撑起 [0006](/zh/docs/decisions/adr-0006) 中的基准时，才进入核心。
+- 定义了提升标准：一个模块只有在拥有真实的 CI 测试路径、且（对检索而言）支撑起 [0006](/docs/decisions/adr-0006) 中的基准时，才进入核心。

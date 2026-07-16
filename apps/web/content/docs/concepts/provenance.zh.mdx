@@ -69,8 +69,8 @@ print(result.sources)  # [{'doc': 'ACME_FY2024_Review.pptx', 'locator': 'slide=2
 - **存储** —— 绝不写入没有血缘列的事实/chunk；它们被有意设计为 NOT NULL。（`storage/CLAUDE.md`："never drop lineage"。）
 - **已找到事实的渲染** —— `_structured_answer` / `_multi_subtask_answer` 必须让 `source` 字典始终附着在每条渲染出的行上。
 - **叙事合成** —— `_run_narrative` 中的引用兜底之所以存在，正是为了让"忘记"引用的模型无法把来源溯源从答案上剥掉。
-- **服务边缘** —— `/v1/ask` 的映射必须原样传递 `sources`；FAQ 短路命中时也携带自己的 `source`（参见 [FAQ 短路](/zh/docs/concepts/faq-short-circuit)）。
+- **服务边缘** —— `/v1/ask` 的映射必须原样传递 `sources`；FAQ 短路命中时也携带自己的 `source`（参见 [FAQ 短路](/docs/concepts/faq-short-circuit)）。
 
 <Callout type="warn">
-  隐私感知的 trace 记录血缘**标识符**（chunk_id、受控代码），但绝不记录事实值或 chunk 文本——来源溯源关乎*在哪里*，而不是把敏感的*内容*再暴露一次。参见 [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)。
+  隐私感知的 trace 记录血缘**标识符**（chunk_id、受控代码），但绝不记录事实值或 chunk 文本——来源溯源关乎*在哪里*，而不是把敏感的*内容*再暴露一次。参见 [RESTRICTED 隔离](/docs/concepts/restricted-isolation)。
 </Callout>

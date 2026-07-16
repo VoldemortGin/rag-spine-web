@@ -7,7 +7,7 @@ The `retrieval` domain (`src/ragspine/retrieval/`) is RAGSpine's **narrative RAG
 the half that answers _"why / what happened"_ questions by retrieving document chunks,
 fusing lexical and (optional) vector signals, reranking, and handing cited snippets to the
 agent. It is the counterpart to the deterministic structured channel; see
-[Dual-channel](/docs/concepts/dual-channel) for how the agent routes between the two.
+[Dual-channel](/en/docs/concepts/dual-channel) for how the agent routes between the two.
 
 Two properties are non-negotiable here and enforced in code:
 
@@ -17,7 +17,7 @@ Two properties are non-negotiable here and enforced in code:
   backend wired it is pure Okapi BM25 + RRF — fully offline, deterministic, zero SDKs.
 - **RESTRICTED isolation at two exits.** Sensitivity-`RESTRICTED` content is stripped at
   **both** the `rerank/` and `link/` exits before it can reach a prompt. See
-  [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+  [RESTRICTED isolation](/en/docs/concepts/restricted-isolation).
 
 ## Layout
 
@@ -99,7 +99,7 @@ offline and deterministic.
 Constants: `DEFAULT_CHUNK_CHARS = 480`, `DEFAULT_OVERLAP_CHARS = 80`. Oversized single
 paragraphs are split by sentence enders (`。！？；.!?;`), then hard-cut, with **no overlap**
 between the sub-chunks — so a chunk's `text` always stays a contiguous substring of the
-source, which keeps citations honest (see [Provenance](/docs/concepts/provenance)).
+source, which keeps citations honest (see [Provenance](/en/docs/concepts/provenance)).
 `chunk_document` raises `ValueError` if `max_chars <= 0`, `overlap_chars < 0`, or
 `overlap_chars >= max_chars`.
 
@@ -160,7 +160,7 @@ candidates, and breaks ties deterministically by `(-fused_score, chunk_id)`.
 
 <Callout type="info">
   `HybridRetriever` also exposes `.topology() -> PipelineGraph`, a thin delegate into the
-  [pipeline](/docs/guides/pipeline) topology exporter — so you can render the actual wiring
+  [pipeline](/en/docs/guides/pipeline) topology exporter — so you can render the actual wiring
   of a configured retriever as Mermaid / DOT / JSON.
 </Callout>
 
@@ -246,7 +246,7 @@ falling back to identity) — make the rerank deterministic and testable without
 ## link — adapter into the agent (strips RESTRICTED at exit)
 
 `link/narrative_link.py` is the seam between this domain (the retrieval "B-line") and the
-[agent](/docs/guides/agent) (the "A-line"). It adapts a `NarrativeIndex` to the agent's
+[agent](/en/docs/guides/agent) (the "A-line"). It adapts a `NarrativeIndex` to the agent's
 `NarrativeRetriever` contract (which is defined on the agent side, in `agent/agent.py`).
 
 - `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — its
@@ -296,7 +296,7 @@ finally:
 
 <Callout type="warn">
   Both RESTRICTED exits (`rerank/` and `link/`) must stay. They are the code-enforced half of the
-  [RESTRICTED isolation](/docs/concepts/restricted-isolation) invariant; removing either one would
+  [RESTRICTED isolation](/en/docs/concepts/restricted-isolation) invariant; removing either one would
   let restricted content reach a prompt.
 </Callout>
 
@@ -312,8 +312,8 @@ by the stage they act on.
 
 <Callout type="info">
   The default stays deterministic and offline; selecting a layer is a deliberate opt-in. Numbers
-  always stay in the [structured channel](/docs/architecture/channels) — every layer below only
-  shapes *narrative* retrieval. The per-release list is in the [Changelog](/docs/changelog).
+  always stay in the [structured channel](/en/docs/architecture/channels) — every layer below only
+  shapes *narrative* retrieval. The per-release list is in the [Changelog](/en/docs/changelog).
 </Callout>
 
 ### Indexing & chunking
@@ -399,14 +399,14 @@ competitor sub-query is refused, so home numbers never leak.
   (fully cited), plus a `GraphStore` Protocol (`RAGSPINE_GRAPH_STORE`, in-process default +
   `[graph]` `networkx` adapter) and an **opt-in** narrative-GraphRAG extraction / community
   skeleton (behind `[graph]` + `[llm]`). It is a standalone multi-hop surface, not a router
-  branch — see [Channels](/docs/architecture/channels).
+  branch — see [Channels](/en/docs/architecture/channels).
 - **Relation-extractor slot** (`RAGSPINE_RELATION_EXTRACTOR`, `make_relation_extractor`) — an
   opt-in slot beside `build_relation_graph` for relations that live only in narrative text.
   The default (`None`) leaves the base graph byte-identical; the deterministic co-occurrence
   extractor adds clean-lineage `co_occurs_with` edges; the LLM extractor (behind `[llm]`)
   stamps every edge `model-derived` + `unverified`, screens both endpoints through the
   `SecurityGate`, and never lets RESTRICTED text reach the model. See
-  [ADR 0015](/docs/decisions/adr-0015).
+  [ADR 0015](/en/docs/decisions/adr-0015).
 
 ### Multimodal
 
@@ -437,22 +437,22 @@ retriever, store = build_narrative_retriever(
 <Cards>
   <Card
     title="Dual-channel"
-    href="/docs/concepts/dual-channel"
+    href="/en/docs/concepts/dual-channel"
     description="How the agent routes between the structured and narrative channels."
   />
   <Card
     title="RESTRICTED isolation"
-    href="/docs/concepts/restricted-isolation"
+    href="/en/docs/concepts/restricted-isolation"
     description="The two-exit filtering invariant this domain enforces."
   />
   <Card
     title="Agent"
-    href="/docs/guides/agent"
+    href="/en/docs/guides/agent"
     description="The orchestrator that consumes a NarrativeRetriever and synthesizes cited answers."
   />
   <Card
     title="Extension points"
-    href="/docs/reference/extension-points"
+    href="/en/docs/reference/extension-points"
     description="EmbeddingBackend, ListwiseJudge, NarrativeRetriever, and the other Protocols."
   />
 </Cards>

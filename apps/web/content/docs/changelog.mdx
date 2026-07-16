@@ -5,7 +5,7 @@ description: Notable, user-facing changes to RAGSpine by release — and where t
 
 This page tracks **user-facing** changes per release: API shapes, configuration surfaces,
 packaging, and dependencies. For the reasoning behind a change, follow the linked
-[ADR](/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
+[ADR](/en/docs/decisions). For symbol-level detail, run `make docs` against the tagged source.
 
 <Callout type="info">
   The documentation follows the current `main` tree, whose package metadata is `0.11.0`. That is not
@@ -56,8 +56,8 @@ on `main`; publication status is deliberately not inferred from source metadata.
   `parent_locator` persistence/migration. The child remains the citation; expanded `prompt_text` is
   generation-only, and restricted children cannot leak through their windows.
 - `answer_question(..., history=...)` and HTTP ask history. Prior turns are generation context only,
-  never intent/security/retrieval input or evidence. See [ADR 0017](/docs/decisions/adr-0017) and
-  [ADR 0018](/docs/decisions/adr-0018).
+  never intent/security/retrieval input or evidence. See [ADR 0017](/en/docs/decisions/adr-0017) and
+  [ADR 0018](/en/docs/decisions/adr-0018).
 
 ## 0.9.0
 
@@ -71,31 +71,31 @@ ergonomics helpers — all default-off and **byte-identical** when unselected.
   (`iter_documents() -> Iterable[RawDoc]`, `make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`)
   makes the ingestion source pluggable: `filesystem` (the zero-dependency default), `in_memory`,
   `http`, and `notion`. Third-party connectors register through the `ragspine.source_connectors`
-  entry-point group. See [Ingestion](/docs/guides/ingestion#source-connectors).
+  entry-point group. See [Ingestion](/en/docs/guides/ingestion#source-connectors).
 - **Opt-in `RelationExtractor` slot with provenance markers.** A `RelationExtractor` Protocol
   beside `build_relation_graph` (`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`). The
   default `None` leaves the base graph byte-identical; the deterministic co-occurrence extractor
   adds clean-lineage `co_occurs_with` edges; the opt-in LLM extractor (behind `[llm]`) stamps
   every edge `model-derived` + `unverified`, screens both endpoints through the `SecurityGate`,
-  and never lets RESTRICTED text reach the model. See [ADR 0015](/docs/decisions/adr-0015).
+  and never lets RESTRICTED text reach the model. See [ADR 0015](/en/docs/decisions/adr-0015).
 - **Domain chunk presets — `laws` / `qa` / `book`.** Three layout-aware `RAGSPINE_CHUNKER`
   presets that only tune heading detection per document family (clause / chapter / question-answer
   pairing), inheriting the base budget, `parent_id`, and locators. See
-  [Retrieval](/docs/guides/retrieval#indexing--chunking).
+  [Retrieval](/en/docs/guides/retrieval#indexing--chunking).
 - **Streaming ask endpoint — `POST /v1/ask/stream` (SSE).** The same answer as `/v1/ask`,
   streamed token-by-token. The full guard chain (FAQ short-circuit, dual-channel retrieval,
   anti-fabrication rewrite, provenance) runs to completion **before** the first byte is streamed,
   so a fabrication can never be half-streamed and then retracted. See
-  [HTTP API](/docs/reference/http-api#engine-routes).
+  [HTTP API](/en/docs/reference/http-api#engine-routes).
 - **`.txt` narrative ingestion.** Plain-text files join the narrative path
   (`extract_txt_narrative`): UTF-8, blank-line paragraph splitting, one segment per block with a
   `para={N}` locator — zero-dependency and deterministic. See
-  [Ingestion](/docs/guides/ingestion#narrative-ingestion).
+  [Ingestion](/en/docs/guides/ingestion#narrative-ingestion).
 - **Ergonomics helpers.** `AgentResult.answer_plain` (the answer with the inline `（来源：…）`
   suffix stripped, for UIs that render citations from `sources`), the keyword-only
   `Fact.metric(...)` builder (order-independent construction over the frozen 10-tuple), and
   `SqliteFactStore.has_source_doc(source_doc_id)` (an existence probe for incremental refresh).
-  See [Python API](/docs/reference/python-api).
+  See [Python API](/en/docs/reference/python-api).
 
 ### Dependencies
 
@@ -207,7 +207,7 @@ are default-off; the lean pure-BM25 path stays byte-identical.
   (`RAGSPINE_CHUNKER`).
 - **Faithfulness / groundedness eval (W5).** Two new ratcheted gates — claim-level
   **faithfulness** and free-text **answer-accuracy** — folded into the same baseline ratchet,
-  with an offline deterministic entailment default. See [Evaluation](/docs/guides/evaluation).
+  with an offline deterministic entailment default. See [Evaluation](/en/docs/guides/evaluation).
 - **Agentic depth, opt-in (W6).** LLM query decomposition (`RAGSPINE_QUERY_DECOMPOSE`),
   corrective retrieval / CRAG grade→act loop (`RAGSPINE_CORRECTIVE`), and a bounded multi-turn
   conversation-memory skeleton — each re-asserts the security gate and isolation per
@@ -216,7 +216,7 @@ are default-off; the lean pure-BM25 path stays byte-identical.
   over the controlled dimensions (subsidiary roll-up, peer comparison, derivation tracing —
   fully cited), a `GraphStore` Protocol with an in-process default plus a `networkx` adapter
   (`RAGSPINE_GRAPH_STORE`, `[graph]`), and a narrative-GraphRAG extraction / community
-  **skeleton** (opt-in, behind `[graph]` + `[llm]`). See [Channels](/docs/architecture/channels).
+  **skeleton** (opt-in, behind `[graph]` + `[llm]`). See [Channels](/en/docs/architecture/channels).
 
 ### Dependencies
 
@@ -227,7 +227,7 @@ are default-off; the lean pure-BM25 path stays byte-identical.
 ## 0.3.0
 
 The headline is an **LLM provider seam migration** onto the shared family core, plus an
-optional active rate limiter. See [ADR 0012](/docs/decisions/adr-0012) for the full rationale.
+optional active rate limiter. See [ADR 0012](/en/docs/decisions/adr-0012) for the full rationale.
 
 ### Changed (breaking for custom providers)
 
@@ -248,17 +248,17 @@ optional active rate limiter. See [ADR 0012](/docs/decisions/adr-0012) for the f
   The system prompt is now the first `{"role": "system", ...}` message rather than a separate
   argument, and `ProviderResponse` is replaced by `corespine.ChatCompletion` (`choices` →
   `ResponseMessage` with `content` + `tool_calls`, plus `usage` / `model` / `id`). Custom
-  providers must migrate — see [Extension points](/docs/reference/extension-points#llmprovider).
+  providers must migrate — see [Extension points](/en/docs/reference/extension-points#llmprovider).
 
 ### Added
 
 - **Active TPM rate limiting.** Set `RAGSPINE_TOKENS_PER_MINUTE` (int, default `0` = off) and
   the service wraps the provider in corespine's `RateLimitedProvider` — a sliding-window soft
   limit that stays _under_ a tokens-per-minute ceiling, complementary to the SDK's passive
-  `max_retries` 429 backoff. See [Configuration](/docs/reference/configuration).
+  `max_retries` 429 backoff. See [Configuration](/en/docs/reference/configuration).
 - **`[all]` extra** — `pip install "rag-spine[all]"` pulls in every runtime capability
   (`[pdf,ocr,llm,embed,vector,service]`; excludes `[dev]`). See
-  [Installation](/docs/getting-started/installation).
+  [Installation](/en/docs/getting-started/installation).
 
 ### Dependencies
 

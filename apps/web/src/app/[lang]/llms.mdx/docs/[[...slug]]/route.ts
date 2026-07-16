@@ -1,4 +1,4 @@
-import { isTranslatedLocale, translatedLocales } from '@/lib/i18n';
+import { isLocale, locales } from '@/lib/i18n';
 import { getLLMText, getPageMarkdownUrl, source } from '@/lib/source';
 import { notFound } from 'next/navigation';
 
@@ -10,7 +10,7 @@ export async function GET(
   { params }: RouteContext<'/[lang]/llms.mdx/docs/[[...slug]]'>,
 ) {
   const { lang, slug } = await params;
-  if (!isTranslatedLocale(lang)) notFound();
+  if (!isLocale(lang)) notFound();
   const page = source.getPage(slug?.slice(0, -1), lang);
   if (!page) notFound();
 
@@ -20,7 +20,7 @@ export async function GET(
 }
 
 export function generateStaticParams() {
-  return translatedLocales.flatMap((lang) =>
+  return locales.flatMap((lang) =>
     source.getPages(lang).map((page) => ({
       lang,
       slug: getPageMarkdownUrl(page).segments,

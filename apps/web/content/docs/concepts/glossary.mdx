@@ -10,7 +10,7 @@ codebase; see the linked concept pages for depth.
 
 The orchestrator step that rewrites an answer to "not found" when the structured channel
 returns no `found` fact. Enforced in control flow (`agent/agent.py`), not in a prompt.
-See [Anti-fabrication](/docs/concepts/anti-fabrication).
+See [Anti-fabrication](/en/docs/concepts/anti-fabrication).
 
 ### Chunk store
 
@@ -39,7 +39,7 @@ The agent runs the structured path, then appends a narrative attribution section
 ### Dual channel
 
 The structured numeric path + the narrative RAG path, run deterministically and — for
-composite questions — compared and merged. See [Dual channel](/docs/concepts/dual-channel).
+composite questions — compared and merged. See [Dual channel](/en/docs/concepts/dual-channel).
 
 ### `dim_key`
 
@@ -57,7 +57,7 @@ metric × entity × period × channel, with full lineage (`source_doc_id`,
 
 An SME-vetted question→answer cache (`service/faq/`) that bypasses the LLM, sitting in
 front of the anti-fabrication guard, behind conservative exclusions. See
-[FAQ short-circuit](/docs/concepts/faq-short-circuit).
+[FAQ short-circuit](/en/docs/concepts/faq-short-circuit).
 
 ### `found` / `not_found` / `unrecognized_param`
 
@@ -134,7 +134,7 @@ dropped together.
 ### Provenance
 
 The `source_doc_id` (or `doc_id`) + `source_locator` carried by every fact, chunk, and
-answer. Carried end-to-end, never dropped. See [Provenance](/docs/concepts/provenance).
+answer. Carried end-to-end, never dropped. See [Provenance](/en/docs/concepts/provenance).
 
 ### `Protocol` seam
 
@@ -162,7 +162,7 @@ The rank-fusion method combining BM25 and vector rankings in hybrid retrieval
 
 The invariant that `RESTRICTED`-tier content is stripped at two exits (`retrieval/link`
 and `retrieval/rerank`) before it can reach a prompt. See
-[RESTRICTED isolation](/docs/concepts/restricted-isolation).
+[RESTRICTED isolation](/en/docs/concepts/restricted-isolation).
 
 ### Review queue
 

@@ -104,7 +104,7 @@ needs neither key nor network.
 <Callout type="info">
   **0.3.0 migration.** This replaced the old `create_message(*, system, messages, tools) ->
   ProviderResponse`. The seam now lives in the shared family core `corespine` so ragspine and
-  its sibling packages share one provider contract — see [ADR 0012](/docs/decisions/adr-0012).
+  its sibling packages share one provider contract — see [ADR 0012](/en/docs/decisions/adr-0012).
 </Callout>
 
 ### `EmbeddingBackend`
@@ -232,7 +232,7 @@ Select one with the `make_source_connector(spec=None, **kwargs)` factory or the
 
 `src/ragspine/graph/extractor.py` — the opt-in narrative-relation slot consumed by
 `build_relation_graph(..., relation_extractor=None)`. With the default `None`, the base graph
-is byte-identical (no extra edges). See [ADR 0015](/docs/decisions/adr-0015).
+is byte-identical (no extra edges). See [ADR 0015](/en/docs/decisions/adr-0015).
 
 <TypeTable
   type={{

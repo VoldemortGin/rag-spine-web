@@ -17,7 +17,7 @@ clarification gate live in `agent/intent.py`.
 <Callout type="info">
   The two channels never blur into one "ask the model" path. The structured channel is the only
   thing allowed to produce a numeric fact, and it does so without trusting model prose — see
-  [Anti-fabrication](/docs/concepts/anti-fabrication).
+  [Anti-fabrication](/en/docs/concepts/anti-fabrication).
 </Callout>
 
 ## How the agent routes
@@ -67,7 +67,7 @@ asymmetry:
 - Missing **entity / period** → _answer with surfaced assumptions_ (default to the home
   group / latest complete fiscal year, expose the assumption, offer one-click narrowing).
 - **Out-of-scope / competitor entity** → refuse before any channel runs (see
-  [RESTRICTED isolation](/docs/concepts/restricted-isolation) and the deterministic
+  [RESTRICTED isolation](/en/docs/concepts/restricted-isolation) and the deterministic
   security gate).
 
 ## The structured channel: a `found` / `not_found` / `unrecognized` tri-state

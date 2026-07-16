@@ -1,4 +1,4 @@
-import { htmlLanguages, locales } from '@/lib/i18n';
+import { canonicalDocsLocale, htmlLanguages, locales } from '@/lib/i18n';
 import { source } from '@/lib/source';
 import type { MetadataRoute } from 'next';
 
@@ -22,7 +22,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
       const translated = source.getPage(page.slugs, locale);
       if (translated) languages[htmlLanguages[locale]] = absolute(translated.url);
     }
-    languages['x-default'] = languages['en'] ?? absolute(page.url);
+    languages['x-default'] = languages[htmlLanguages[canonicalDocsLocale]] ?? absolute(page.url);
 
     result.push({
       url: absolute(page.url),

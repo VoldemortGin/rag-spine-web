@@ -87,8 +87,8 @@ never printing.
 ## Sensitivity
 
 `sensitivity.py` is the deterministic data-classification layer that the
-[narrative ingestion](/docs/guides/ingestion#narrative-ingestion) path applies and that
-[RESTRICTED isolation](/docs/concepts/restricted-isolation) downstream depends on. Levels are
+[narrative ingestion](/en/docs/guides/ingestion#narrative-ingestion) path applies and that
+[RESTRICTED isolation](/en/docs/concepts/restricted-isolation) downstream depends on. Levels are
 plain strings — there is no enum. The only named constant is `RESTRICTED = "RESTRICTED"`;
 the unmarked default is `"INTERNAL"`.
 
@@ -139,7 +139,7 @@ Unrecognized input returns `None`; it never guesses.
 | `resolve_relative_period(raw, reference_date=None) -> tuple[str, str] \| None` | relative period (今年/去年/上季度…) → `(period_type, period)` |
 
 Period normalization produces the same `period_type` values used by the
-[fact store](/docs/guides/storage#dim_key--the-upsert-key): `FY` (`FY2024` / `2024`),
+[fact store](/en/docs/guides/storage#dim_key--the-upsert-key): `FY` (`FY2024` / `2024`),
 `HY` (`2024H1`), and `QUARTER` (`2025Q1`).
 
 ```python
@@ -192,8 +192,8 @@ normalize_metric("not a metric")  # None — never guesses
 ## Related
 
 <Cards>
-  <Card title="Storage guide" href="/docs/guides/storage" />
-  <Card title="Ingestion guide — sensitivity on ingest" href="/docs/guides/ingestion" />
-  <Card title="Concept: RESTRICTED isolation" href="/docs/concepts/restricted-isolation" />
-  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+  <Card title="Storage guide" href="/en/docs/guides/storage" />
+  <Card title="Ingestion guide — sensitivity on ingest" href="/en/docs/guides/ingestion" />
+  <Card title="Concept: RESTRICTED isolation" href="/en/docs/concepts/restricted-isolation" />
+  <Card title="Concept: Provenance & lineage" href="/en/docs/concepts/provenance" />
 </Cards>

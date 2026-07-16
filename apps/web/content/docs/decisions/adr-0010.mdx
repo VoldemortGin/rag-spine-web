@@ -7,7 +7,7 @@ description: Decouple the always-on, never-pluggable deterministic security gate
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction. Forced by [0004](/docs/decisions/adr-0004) and [0007](/docs/decisions/adr-0007).
+Part of the [0002](/en/docs/decisions/adr-0002) product direction. Forced by [0004](/en/docs/decisions/adr-0004) and [0007](/en/docs/decisions/adr-0007).
 
 ## Context
 
@@ -15,9 +15,9 @@ The intent parser is rule-based, zero-LLM, and finance/Chinese-tuned (synonym ma
 hardcoded `_SUPPORTED_METRICS`, inline `_CHANNEL_SYNONYMS`). It is also the
 **security-critical front door**: out-of-scope / competitor refusal is deterministic and
 happens _before_ any LLM or retrieval call, and external-entity masking lives here. Two
-prior decisions break a pure rule parser: full generality ([0004](/docs/decisions/adr-0004))
+prior decisions break a pure rule parser: full generality ([0004](/en/docs/decisions/adr-0004))
 means arbitrary user-defined dimensions a finance-tuned parser can't read, and
-multilingual ([0007](/docs/decisions/adr-0007)) makes
+multilingual ([0007](/en/docs/decisions/adr-0007)) makes
 per-language synonym tables a maintenance explosion.
 
 The key insight: **the security decision and the intent decision are separable.**
@@ -34,7 +34,7 @@ only yields a clarification or not-found, never a leak.
   parser's output and is declared via `DomainProfile`. It never consults an LLM.
 - **Intent extraction** becomes an **`IntentParser` Protocol** with a default zero-LLM,
   config-driven rule implementation (the offline default per
-  [0009](/docs/decisions/adr-0009)) and an optional LLM-classifier
+  [0009](/en/docs/decisions/adr-0009)) and an optional LLM-classifier
   backend (an extra) for robust multilingual / arbitrary-domain parsing.
 
 Principle: **deterministic where it matters (security), flexible where it's safe (intent).**

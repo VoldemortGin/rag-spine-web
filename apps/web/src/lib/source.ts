@@ -10,6 +10,10 @@ export const source = loader({
   baseUrl: docsRoute,
   source: docs.toFumadocsSource(),
   i18n,
+  url(slugs, locale) {
+    const resolvedLocale = locale !== undefined && isLocale(locale) ? locale : defaultLocale;
+    return localizedRoute([docsRoute, ...slugs].join('/'), resolvedLocale);
+  },
   plugins: [],
   // Resolve the lucide icon names used in the docs `meta.json` files into
   // rendered components for the sidebar.

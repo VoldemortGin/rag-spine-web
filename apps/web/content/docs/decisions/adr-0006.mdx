@@ -7,7 +7,7 @@ description: Define quality as guarantees proven by property tests, plus one rea
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction.
+Part of the [0002](/en/docs/decisions/adr-0002) product direction.
 
 ## Context
 
@@ -47,5 +47,5 @@ Domain accuracy benchmarking is explicitly punted to the user's data.
 
 - "done / 1.0" means _invariants proven_, not _accuracy on synthetic data_.
 - The retrieval benchmark gates promotion of the real vector backend out of
-  experimental ([0005](/docs/decisions/adr-0005)).
+  experimental ([0005](/en/docs/decisions/adr-0005)).
 - Keeps the fast, offline, deterministic CI loop intact as a regression tripwire.

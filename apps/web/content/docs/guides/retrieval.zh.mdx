@@ -7,7 +7,7 @@ description: 叙事 RAG 通道——段落粒度分块、感知 CJK 的 Okapi BM
 负责回答_"为什么 / 发生了什么"_类问题的那一半：检索文档 chunk、
 融合词法与（可选的）向量信号、重排，并把带引用的片段交给
 agent。它是确定性结构化通道的对应方；agent 如何在两者间路由，
-参见[双通道](/zh/docs/concepts/dual-channel)。
+参见[双通道](/docs/concepts/dual-channel)。
 
 有两条性质在这里没有商量余地，并由代码强制执行：
 
@@ -17,7 +17,7 @@ agent。它是确定性结构化通道的对应方；agent 如何在两者间路
   后端时则是纯 Okapi BM25 + RRF——完全离线、确定性、零 SDK。
 - **两个出口处的 RESTRICTED 隔离。** 敏感度为 `RESTRICTED` 的内容在
   `rerank/` 和 `link/` **两个**出口处都会在触及提示词之前被剥离。参见
-  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)。
+  [RESTRICTED 隔离](/docs/concepts/restricted-isolation)。
 
 ## 目录结构
 
@@ -99,7 +99,7 @@ agent。它是确定性结构化通道的对应方；agent 如何在两者间路
 常量：`DEFAULT_CHUNK_CHARS = 480`、`DEFAULT_OVERLAP_CHARS = 80`。超长的单个
 段落先按句子结束符（`。！？；.!?;`）切分，再硬切，子 chunk 之间**没有
 重叠**——因此一个 chunk 的 `text` 始终是源文本的连续子串，这
-保证了引用的诚实性（参见[溯源](/zh/docs/concepts/provenance)）。
+保证了引用的诚实性（参见[溯源](/docs/concepts/provenance)）。
 当 `max_chars <= 0`、`overlap_chars < 0` 或
 `overlap_chars >= max_chars` 时，`chunk_document` 抛出 `ValueError`。
 
@@ -160,7 +160,7 @@ SDK。
 
 <Callout type="info">
   `HybridRetriever` 还暴露 `.topology() -> PipelineGraph`，一个到
-  [pipeline](/zh/docs/guides/pipeline) 拓扑导出器的薄委托——因此你可以把已配置
+  [pipeline](/docs/guides/pipeline) 拓扑导出器的薄委托——因此你可以把已配置
   检索器的实际组装关系渲染为 Mermaid / DOT / JSON。
 </Callout>
 
@@ -246,7 +246,7 @@ class ListwiseJudge(Protocol):
 ## link — 通往 agent 的适配器（在出口剥离 RESTRICTED）
 
 `link/narrative_link.py` 是本领域（检索"B 线"）与
-[agent](/zh/docs/guides/agent)（"A 线"）之间的缝。它把 `NarrativeIndex` 适配到 agent 的
+[agent](/docs/guides/agent)（"A 线"）之间的缝。它把 `NarrativeIndex` 适配到 agent 的
 `NarrativeRetriever` 契约（该契约定义在 agent 一侧的 `agent/agent.py`）。
 
 - `NarrativeIndexRetriever(index, *, retry_without_filters=True)` — 其
@@ -296,7 +296,7 @@ finally:
 
 <Callout type="warn">
   两个 RESTRICTED 出口（`rerank/` 与 `link/`）必须都保留。它们是
-  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)不变量由代码强制执行的那一半；移除任何一个都会
+  [RESTRICTED 隔离](/docs/concepts/restricted-isolation)不变量由代码强制执行的那一半；移除任何一个都会
   让受限内容触及提示词。
 </Callout>
 
@@ -312,8 +312,8 @@ finally:
 
 <Callout type="info">
   默认保持确定性与离线；选择某一层是一次刻意的启用。数字
-  始终留在[结构化通道](/zh/docs/architecture/channels)——下面的每一层都只
-  塑造*叙事*检索。按版本的清单见[更新日志](/zh/docs/changelog)。
+  始终留在[结构化通道](/docs/architecture/channels)——下面的每一层都只
+  塑造*叙事*检索。按版本的清单见[更新日志](/docs/changelog)。
 </Callout>
 
 ### 索引与分块
@@ -399,14 +399,14 @@ finally:
   （完整引用），外加一个 `GraphStore` Protocol（`RAGSPINE_GRAPH_STORE`，进程内默认 +
   `[graph]` `networkx` 适配器）和一个**可选启用**的叙事 GraphRAG 抽取 / 社区
   骨架（位于 `[graph]` + `[llm]` 之后）。它是独立的多跳表面，不是路由器
-  分支——参见[通道](/zh/docs/architecture/channels)。
+  分支——参见[通道](/docs/architecture/channels)。
 - **关系抽取器插槽**（`RAGSPINE_RELATION_EXTRACTOR`，`make_relation_extractor`）——
   `build_relation_graph` 旁边的可选插槽，用于只存在于叙事文本中的关系。
   默认（`None`）让基础图逐字节不变；确定性的共现
   抽取器添加链路干净的 `co_occurs_with` 边；LLM 抽取器（位于 `[llm]` 之后）
   给每条边盖上 `model-derived` + `unverified` 戳、把两端都经过
   `SecurityGate` 筛查，并且绝不让 RESTRICTED 文本触及模型。参见
-  [ADR 0015](/zh/docs/decisions/adr-0015)。
+  [ADR 0015](/docs/decisions/adr-0015)。
 
 ### 多模态
 
@@ -437,22 +437,22 @@ retriever, store = build_narrative_retriever(
 <Cards>
   <Card
     title="双通道"
-    href="/zh/docs/concepts/dual-channel"
+    href="/docs/concepts/dual-channel"
     description="agent 如何在结构化与叙事通道之间路由。"
   />
   <Card
     title="RESTRICTED 隔离"
-    href="/zh/docs/concepts/restricted-isolation"
+    href="/docs/concepts/restricted-isolation"
     description="本领域强制执行的双出口过滤不变量。"
   />
   <Card
     title="Agent"
-    href="/zh/docs/guides/agent"
+    href="/docs/guides/agent"
     description="消费 NarrativeRetriever 并合成带引用回答的编排器。"
   />
   <Card
     title="扩展点"
-    href="/zh/docs/reference/extension-points"
+    href="/docs/reference/extension-points"
     description="EmbeddingBackend、ListwiseJudge、NarrativeRetriever 及其他 Protocol。"
   />
 </Cards>

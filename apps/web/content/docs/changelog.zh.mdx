@@ -5,7 +5,7 @@ description: 按版本记录 RAGSpine 面向用户的重要变更——以及 Sp
 
 本页按版本追踪**面向用户**的变更：API 形态、配置面、
 打包与依赖。想了解某个变更背后的推理，请跟随链接的
-[ADR](/zh/docs/decisions)。符号级细节请对 tag 对应的源码运行 `make docs`。
+[ADR](/docs/decisions)。符号级细节请对 tag 对应的源码运行 `make docs`。
 
 <Callout type="info">
   文档跟随当前 `main` 树，其包元数据为 `0.11.0`。这并不
@@ -56,8 +56,8 @@ description: 按版本记录 RAGSpine 面向用户的重要变更——以及 Sp
   `parent_locator` 持久化/迁移。子块始终是引用对象；扩展的 `prompt_text` 仅
   用于生成，且受限子块无法通过其窗口泄漏。
 - `answer_question(..., history=...)` 与 HTTP ask 的历史支持。先前轮次仅作为生成上下文，
-  绝不作为意图/安全/检索输入或证据。参见 [ADR 0017](/zh/docs/decisions/adr-0017) 和
-  [ADR 0018](/zh/docs/decisions/adr-0018)。
+  绝不作为意图/安全/检索输入或证据。参见 [ADR 0017](/docs/decisions/adr-0017) 和
+  [ADR 0018](/docs/decisions/adr-0018)。
 
 ## 0.9.0
 
@@ -71,31 +71,31 @@ description: 按版本记录 RAGSpine 面向用户的重要变更——以及 Sp
   （`iter_documents() -> Iterable[RawDoc]`，`make_source_connector` / `RAGSPINE_SOURCE_CONNECTOR`）
   让摄取来源可插拔：`filesystem`（零依赖默认）、`in_memory`、
   `http` 和 `notion`。第三方连接器通过 `ragspine.source_connectors`
-  entry-point 组注册。参见[摄取](/zh/docs/guides/ingestion#数据源连接器)。
+  entry-point 组注册。参见[摄取](/docs/guides/ingestion#数据源连接器)。
 - **可选的 `RelationExtractor` 槽位，带溯源标记。** 在
   `build_relation_graph` 旁的 `RelationExtractor` Protocol（`make_relation_extractor` / `RAGSPINE_RELATION_EXTRACTOR`）。
   默认 `None` 让基础图逐字节一致；确定性共现抽取器
   添加谱系干净的 `co_occurs_with` 边；可选的 LLM 抽取器（位于 `[llm]` 之后）给
   每条边打上 `model-derived` + `unverified` 标记，把两个端点都过一遍 `SecurityGate`，
-  且绝不让 RESTRICTED 文本触达模型。参见 [ADR 0015](/zh/docs/decisions/adr-0015)。
+  且绝不让 RESTRICTED 文本触达模型。参见 [ADR 0015](/docs/decisions/adr-0015)。
 - **领域分块预设——`laws` / `qa` / `book`。** 三个感知版式的 `RAGSPINE_CHUNKER`
   预设，只按文档族调整标题检测（条款/章节/问答
   配对），继承基础预算、`parent_id` 和定位符。参见
-  [检索](/zh/docs/guides/retrieval#索引与分块)。
+  [检索](/docs/guides/retrieval#索引与分块)。
 - **流式提问端点——`POST /v1/ask/stream`（SSE）。** 与 `/v1/ask` 相同的回答，
   逐 token 流式输出。完整守卫链（FAQ 短路、双通道检索、
   防编造机制改写、溯源）在第一个字节流出**之前**完整跑完，
   因此编造内容绝不可能流出一半再被撤回。参见
-  [HTTP API](/zh/docs/reference/http-api#引擎路由)。
+  [HTTP API](/docs/reference/http-api#引擎路由)。
 - **`.txt` 叙事摄取。** 纯文本文件加入叙事路径
   （`extract_txt_narrative`）：UTF-8、空行分段、每块一个片段并带
   `para={N}` 定位符——零依赖且确定性。参见
-  [摄取](/zh/docs/guides/ingestion#叙事摄取)。
+  [摄取](/docs/guides/ingestion#叙事摄取)。
 - **易用性辅助。** `AgentResult.answer_plain`（剥去行内 `（来源：…）`
   后缀的回答，供从 `sources` 渲染引用的 UI 使用）、仅限关键字的
   `Fact.metric(...)` 构造器（在冻结的 10 元组之上做与顺序无关的构造），以及
   `SqliteFactStore.has_source_doc(source_doc_id)`（用于增量刷新的存在性探针）。
-  参见 [Python API](/zh/docs/reference/python-api)。
+  参见 [Python API](/docs/reference/python-api)。
 
 ### 依赖
 
@@ -207,7 +207,7 @@ Vespa · Jina · Cohere）做基准。与 0.7.0 一样，每项新增都**可选
   （`RAGSPINE_CHUNKER`）。
 - **忠实度/接地性评估（W5）。** 两个新的棘轮门——断言级
   **忠实度**和自由文本**回答准确率**——并入同一基线棘轮，
-  默认使用离线确定性蕴含判断。参见[评估](/zh/docs/guides/evaluation)。
+  默认使用离线确定性蕴含判断。参见[评估](/docs/guides/evaluation)。
 - **Agent 化深度，可选（W6）。** LLM 查询分解（`RAGSPINE_QUERY_DECOMPOSE`）、
   纠正式检索 / CRAG 评级→行动循环（`RAGSPINE_CORRECTIVE`），以及有界的多轮
   会话记忆骨架——每一项都对每个子查询/轮次重新断言安全门与隔离。
@@ -215,7 +215,7 @@ Vespa · Jina · Cohere）做基准。与 0.7.0 一样，每项新增都**可选
   （子公司汇总、同行比较、推导追溯——
   全程带引用）、一个 `GraphStore` Protocol（进程内默认实现加 `networkx` 适配器，
   `RAGSPINE_GRAPH_STORE`，`[graph]`），以及叙事 GraphRAG 抽取/社区
-  **骨架**（可选，位于 `[graph]` + `[llm]` 之后）。参见[通道](/zh/docs/architecture/channels)。
+  **骨架**（可选，位于 `[graph]` + `[llm]` 之后）。参见[通道](/docs/architecture/channels)。
 
 ### 依赖
 
@@ -226,7 +226,7 @@ Vespa · Jina · Cohere）做基准。与 0.7.0 一样，每项新增都**可选
 ## 0.3.0
 
 头条是 **LLM provider 接缝迁移**到共享的家族核心，外加一个
-可选的主动限流器。完整理由参见 [ADR 0012](/zh/docs/decisions/adr-0012)。
+可选的主动限流器。完整理由参见 [ADR 0012](/docs/decisions/adr-0012)。
 
 ### 变更（对自定义 provider 是破坏性的）
 
@@ -247,17 +247,17 @@ Vespa · Jina · Cohere）做基准。与 0.7.0 一样，每项新增都**可选
   系统提示现在是第一条 `{"role": "system", ...}` 消息，而不是独立的
   参数，`ProviderResponse` 被 `corespine.ChatCompletion` 取代（`choices` →
   带 `content` + `tool_calls` 的 `ResponseMessage`，外加 `usage` / `model` / `id`）。自定义
-  provider 必须迁移——参见[扩展点](/zh/docs/reference/extension-points#llmprovider)。
+  provider 必须迁移——参见[扩展点](/docs/reference/extension-points#llmprovider)。
 
 ### 新增
 
 - **主动 TPM 限流。** 设置 `RAGSPINE_TOKENS_PER_MINUTE`（int，默认 `0` = 关闭），
   服务会用 corespine 的 `RateLimitedProvider` 包裹 provider——一个滑动窗口软
   限制，保持在每分钟 token 上限_之下_，与 SDK 的被动
-  `max_retries` 429 退避互补。参见[配置](/zh/docs/reference/configuration)。
+  `max_retries` 429 退避互补。参见[配置](/docs/reference/configuration)。
 - **`[all]` extra**——`pip install "rag-spine[all]"` 拉取所有运行时能力
   （`[pdf,ocr,llm,embed,vector,service]`；不含 `[dev]`）。参见
-  [安装](/zh/docs/getting-started/installation)。
+  [安装](/docs/getting-started/installation)。
 
 ### 依赖
 

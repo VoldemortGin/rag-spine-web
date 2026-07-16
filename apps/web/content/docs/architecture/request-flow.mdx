@@ -4,7 +4,7 @@ description: The detailed control flow — question to intent parse, the clarifi
 ---
 
 This page is the authoritative expansion of the one-liner flow on the
-[overview](/docs/architecture/overview). Every step below is traceable to the orchestrator
+[overview](/en/docs/architecture/overview). Every step below is traceable to the orchestrator
 `answer_question(...)` in `agent/agent.py`, the rule parser and gateway in `agent/intent.py`,
 and the service-edge cache in `service/faq/faq_cache.py`.
 
@@ -148,7 +148,7 @@ through to the full agent:
 <Callout type="info">
   The FAQ cache sits **in front of** the anti-fabrication guard. Its exclusions exist
   precisely so it can never short-circuit a question that needs the guard — see
-  [FAQ short-circuit](/docs/concepts/faq-short-circuit).
+  [FAQ short-circuit](/en/docs/concepts/faq-short-circuit).
 </Callout>
 </Step>
 
@@ -165,7 +165,7 @@ On a FAQ miss (or in the pure-Python path), the agent dispatches on `intent.rout
 - **`composite`** → run the structured path, then also `_run_narrative(...)`, appending the
   attribution under a `归因分析：` heading and concatenating sources.
 
-See [Channels](/docs/architecture/channels) for what each route runs internally.
+See [Channels](/en/docs/architecture/channels) for what each route runs internally.
 
 </Step>
 
@@ -184,7 +184,7 @@ inspects the tool results, not the model prose:
 The narrative path is the deliberate exception: it trusts the model's prose but **forces
 source citation**, appending any source document the answer failed to name. When the provider
 fails, both paths degrade honestly (an "AI service temporarily unavailable" message), never a
-number. See [Anti-fabrication](/docs/concepts/anti-fabrication) for the full invariant.
+number. See [Anti-fabrication](/en/docs/concepts/anti-fabrication) for the full invariant.
 
 </Step>
 

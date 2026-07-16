@@ -6,6 +6,7 @@ import { FamilyGrid } from '@/components/landing/family';
 import { FeatureGrid } from '@/components/landing/features';
 import { InstallPill } from '@/components/landing/install-pill';
 import { AntiFabricationPanel } from '@/components/landing/terminal';
+import { defaultLocale, localizedRoute } from '@/lib/i18n';
 import { gitConfig } from '@/lib/shared';
 import type { Metadata } from 'next';
 
@@ -68,7 +69,7 @@ export default function HomePage() {
 
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <Link
-                  href="/docs/getting-started/installation"
+                  href={localizedRoute('/docs/getting-started/installation', defaultLocale)}
                   className="group inline-flex items-center gap-2 rounded-full bg-fd-primary px-5 py-2.5 text-sm font-semibold text-fd-primary-foreground transition-transform hover:-translate-y-0.5"
                 >
                   Get started
@@ -180,11 +181,15 @@ function Footer() {
         </div>
 
         <div className="grid grid-cols-2 gap-x-12 gap-y-2 text-sm sm:grid-cols-3">
-          <FooterLink href="/docs">Docs</FooterLink>
+          <FooterLink href={localizedRoute('/docs', defaultLocale)}>Docs</FooterLink>
           <FooterLink href="/workflows">Workflows</FooterLink>
-          <FooterLink href="/docs/getting-started">Getting Started</FooterLink>
-          <FooterLink href="/docs/concepts">Concepts</FooterLink>
-          <FooterLink href="/docs/architecture">Architecture</FooterLink>
+          <FooterLink href={localizedRoute('/docs/getting-started', defaultLocale)}>
+            Getting Started
+          </FooterLink>
+          <FooterLink href={localizedRoute('/docs/concepts', defaultLocale)}>Concepts</FooterLink>
+          <FooterLink href={localizedRoute('/docs/architecture', defaultLocale)}>
+            Architecture
+          </FooterLink>
           <FooterLink href={githubUrl} external>
             GitHub
           </FooterLink>

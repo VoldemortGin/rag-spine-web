@@ -114,7 +114,7 @@ Key methods: `get(cell_ref)`, `iter_cells()`, `add_warning(message)`, and
 Two extraction targets exist by design:
 
 - **Fact extractors** (`xlsx_extractor`, `pptx_extractor`) produce
-  [`Fact`](/docs/guides/storage#the-fact-dataclass) objects directly for known schemas
+  [`Fact`](/en/docs/guides/storage#the-fact-dataclass) objects directly for known schemas
   (e.g. a 5-year summary table) — zero hallucination, zero LLM.
 - **Styled extractors** (`*_styled_extractor`, `pdf_*`) produce `StyledGrid` IR for the
   general ingestion path, preserving color and style.
@@ -270,7 +270,7 @@ Heavy dependencies are injected through `@runtime_checkable` `Protocol`s so a pa
 swapped without touching the ingest call site, and the path is testable offline with a fake.
 
 <Cards>
-  <Card title="GridExtractor" href="/docs/concepts/provenance">
+  <Card title="GridExtractor" href="/en/docs/concepts/provenance">
     `pdf_digital_extractor`. Has `version: str` + `extract_grids(path)`. Default impl
     `DoclingGridExtractor` with `version = "pdf_digital@1"` — the value stamped into each
     fact's `extractor_version`. Bump it when the digital parser's output changes.
@@ -299,8 +299,8 @@ swapped without touching the ingest call site, and the path is testable offline 
 ## Related
 
 <Cards>
-  <Card title="Ingestion guide" href="/docs/guides/ingestion" />
-  <Card title="Storage guide — the Fact dataclass" href="/docs/guides/storage" />
-  <Card title="StyledGrid IR" href="/docs/guides/extraction#the-styledgrid-ir" />
-  <Card title="Concept: Provenance & lineage" href="/docs/concepts/provenance" />
+  <Card title="Ingestion guide" href="/en/docs/guides/ingestion" />
+  <Card title="Storage guide — the Fact dataclass" href="/en/docs/guides/storage" />
+  <Card title="StyledGrid IR" href="/en/docs/guides/extraction#the-styledgrid-ir" />
+  <Card title="Concept: Provenance & lineage" href="/en/docs/concepts/provenance" />
 </Cards>

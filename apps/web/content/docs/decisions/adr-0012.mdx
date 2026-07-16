@@ -7,15 +7,15 @@ description: Move the LLMProvider Protocol to the shared family core (corespine)
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Relates to [0009](/docs/decisions/adr-0009) (framework/dependency policy)
-and [0011](/docs/decisions/adr-0011) (adopting the python-project-standard).
+Relates to [0009](/en/docs/decisions/adr-0009) (framework/dependency policy)
+and [0011](/en/docs/decisions/adr-0011) (adopting the python-project-standard).
 Shipped in **rag-spine 0.3.0**.
 
 ## Context
 
 RAGSpine has always isolated every external SDK behind a typed `Protocol`, with a
-zero-SDK offline core and a default `MockProvider` (ADRs [0005](/docs/decisions/adr-0005) /
-[0009](/docs/decisions/adr-0009)). The `LLMProvider` seam was defined **inside** ragspine
+zero-SDK offline core and a default `MockProvider` (ADRs [0005](/en/docs/decisions/adr-0005) /
+[0009](/en/docs/decisions/adr-0009)). The `LLMProvider` seam was defined **inside** ragspine
 (`agent/llm_provider.py`) with a ragspine-specific method:
 
 ```python
@@ -83,7 +83,7 @@ under the ceiling proactively, the other recovers from a breach.
 - **Breaking for custom providers.** Anyone who implemented `create_message(*, system,
   messages, tools) -> ProviderResponse` must migrate to `chat(messages, *, tools=None) ->
   ChatCompletion` (import the dataclasses from `corespine`, or via the re-export in
-  `ragspine.agent.llm_provider`). The [Extension points](/docs/reference/extension-points#llmprovider)
+  `ragspine.agent.llm_provider`). The [Extension points](/en/docs/reference/extension-points#llmprovider)
   guide carries a worked OpenAI example in the new shape.
 - ragspine gains exactly one new non-optional dependency (`corespine>=0.1.0`, which itself has
   empty `dependencies`). The offline-first, zero-heavy-SDK default path is preserved.

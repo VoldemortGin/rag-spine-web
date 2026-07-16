@@ -7,8 +7,8 @@ description: Compile a Dify workflow .yml into framework-free imperative Python 
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Relates to [0009](/docs/decisions/adr-0009) (no framework lock-in + permissive-license-only),
-[0011](/docs/decisions/adr-0011) (the python-project-standard), and the spine-family
+Relates to [0009](/en/docs/decisions/adr-0009) (no framework lock-in + permissive-license-only),
+[0011](/en/docs/decisions/adr-0011) (the python-project-standard), and the spine-family
 boundaries ADR (family repo, `docs/adr/0001` — family seams / LLM protocol).
 Shipped in **rag-spine 0.4.0**.
 
@@ -18,7 +18,7 @@ Dify is a popular low-code LLM application orchestration platform; its workflows
 `.yml` (DSL). Plenty of users have a working workflow / advanced-chat built in Dify but want
 **out of the platform lock-in**: a framework-free, readable, version-controllable,
 offline-runnable piece of pure Python. RAGSpine's identity is exactly the "framework-free
-backend" ([ADR 0009](/docs/decisions/adr-0009): no framework lock-in + permissive-license-only
+backend" ([ADR 0009](/en/docs/decisions/adr-0009): no framework lock-in + permissive-license-only
 dependencies), so **compiling** a Dify workflow into imperative pure Python — and handing out
 **static optimization suggestions** along the way — is a natural fit for the product direction.
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalDocsLocale,
+  defaultLocale,
+  i18n,
   isLocale,
   isTranslatedLocale,
   localizePath,
@@ -56,13 +59,25 @@ const fumadocsUiKeys = [
 
 describe('documentation locale paths', () => {
   it.each([
-    ['/docs/guides/workflows', 'en', '/docs/guides/workflows'],
-    ['/docs/guides/workflows', 'zh', '/zh/docs/guides/workflows'],
-    ['/zh/docs/guides/workflows', 'en', '/docs/guides/workflows'],
+    ['/docs/guides/workflows', 'en', '/en/docs/guides/workflows'],
+    ['/docs/guides/workflows', 'zh', '/docs/guides/workflows'],
+    ['/zh/docs/guides/workflows', 'en', '/en/docs/guides/workflows'],
+    ['/zh/docs/guides/workflows', 'zh', '/docs/guides/workflows'],
     ['/zh/docs/guides/workflows', 'ja', '/ja/docs/guides/workflows'],
-    ['/it/docs', 'zh', '/zh/docs'],
+    ['/en/docs/guides/workflows', 'it', '/it/docs/guides/workflows'],
+    ['/it/docs', 'zh', '/docs'],
+    ['/', 'en', '/en/docs'],
+    ['/', 'zh', '/docs'],
+    ['/workflows', 'ja', '/ja/docs'],
+    ['/workflows', 'it', '/it/docs'],
   ] as const)('maps %s to %s', (path, locale, expected) => {
     expect(localizePath(path, locale)).toBe(expected);
+  });
+
+  it('keeps content parsing in English while Chinese owns the unprefixed docs URL', () => {
+    expect(defaultLocale).toBe('en');
+    expect(i18n.defaultLanguage).toBe('en');
+    expect(canonicalDocsLocale).toBe('zh');
   });
 
   it('rejects unsupported dynamic route values', () => {

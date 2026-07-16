@@ -7,7 +7,7 @@ description: Thread a locale seam through every layer; ship and test Chinese + E
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction. Gated by [0003](/docs/decisions/adr-0003).
+Part of the [0002](/en/docs/decisions/adr-0002) product direction. Gated by [0003](/en/docs/decisions/adr-0003).
 
 ## Context
 
@@ -39,8 +39,8 @@ to be real rather than CJK-only. Japanese / Italian / German ship as community
 ## Consequences
 
 - Locale packs are a concrete test of the `Protocol` extension story for outsiders,
-  reinforcing the OSS-library identity ([0003](/docs/decisions/adr-0003)).
-- Locale-keyed prompt templates are realized by [0008](/docs/decisions/adr-0008).
-- Per-language intent vocabulary interacts with the parser decision in [0010](/docs/decisions/adr-0010).
+  reinforcing the OSS-library identity ([0003](/en/docs/decisions/adr-0003)).
+- Locale-keyed prompt templates are realized by [0008](/en/docs/decisions/adr-0008).
+- Per-language intent vocabulary interacts with the parser decision in [0010](/en/docs/decisions/adr-0010).
 - New artifacts: `LocaleProfile`, a tokenizer registry, a message catalog, a "how to
   add a locale" guide.

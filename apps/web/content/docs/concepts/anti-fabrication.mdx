@@ -81,7 +81,7 @@ The guard is applied differently on each path, on purpose:
 
 ## How a request signals that the guard fired
 
-The privacy-aware trace (see [Provenance](/docs/concepts/provenance) and
+The privacy-aware trace (see [Provenance](/en/docs/concepts/provenance) and
 `common/observability`) records a boolean `fabrication_guard_triggered` — true when there
 were tool results but **none** were `found` (i.e. the request fell through to the
 `not_found` / `unrecognized` refusal). It records the flag, never the answer text or the

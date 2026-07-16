@@ -9,6 +9,11 @@ export type TranslatedLocale = (typeof translatedLocales)[number];
 
 export const defaultLocale: Locale = 'en';
 
+// Source files without a locale suffix are English, but the public unprefixed
+// documentation URL is Chinese. Keep these concepts separate: changing
+// `defaultLocale` would make Fumadocs parse the English files as Chinese.
+export const canonicalDocsLocale: Locale = 'zh';
+
 export const i18n = defineI18n({
   languages: [...locales],
   defaultLanguage: defaultLocale,
@@ -192,16 +197,38 @@ export function isTranslatedLocale(value: string): value is TranslatedLocale {
   return (translatedLocales as readonly string[]).includes(value);
 }
 
-/** Add or replace the locale prefix while keeping English URLs backward-compatible. */
-export function localizePath(pathname: string, locale: Locale): string {
+const routeLocalePrefixes: Record<Locale, string | undefined> = {
+  en: 'en',
+  zh: undefined,
+  ja: 'ja',
+  it: 'it',
+};
+
+function withoutLocalePrefix(pathname: string): string[] {
   const segments = pathname.split('/').filter(Boolean);
   if (segments.length > 0 && isLocale(segments[0] ?? '')) segments.shift();
-  if (locale !== defaultLocale) segments.unshift(locale);
+  return segments;
+}
+
+/** Build the canonical public URL for a route in one documentation locale. */
+export function localizedRoute(route: string, locale: Locale): string {
+  const segments = withoutLocalePrefix(route);
+  const prefix = routeLocalePrefixes[locale];
+  if (prefix !== undefined) segments.unshift(prefix);
   return `/${segments.join('/')}`;
 }
 
-export function localizedRoute(route: string, locale: Locale): string {
-  return localizePath(route, locale);
+/**
+ * Resolve a language-switch action.
+ *
+ * Documentation pages keep their slug. The home and workflow gallery are
+ * language-neutral, so switching there opens the selected documentation root
+ * instead of inventing an untranslated route such as `/ja/workflows`.
+ */
+export function localizePath(pathname: string, locale: Locale): string {
+  const segments = withoutLocalePrefix(pathname);
+  const route = segments[0] === 'docs' ? `/${segments.join('/')}` : '/docs';
+  return localizedRoute(route, locale);
 }
 
 export function localeLabel(locale: Locale): string {

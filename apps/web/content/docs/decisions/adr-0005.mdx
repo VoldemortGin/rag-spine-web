@@ -7,7 +7,7 @@ description: Ship only what runs in the default offline path; move OCR, real sem
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction. Gated by [0003](/docs/decisions/adr-0003).
+Part of the [0002](/en/docs/decisions/adr-0002) product direction. Gated by [0003](/en/docs/decisions/adr-0003).
 
 ## Context
 
@@ -41,7 +41,7 @@ experimental module is promoted into the core only once it has a real, CI-tested
 ## Consequences
 
 - The default `pip install` experience is honest and runnable end-to-end, at the cost
-  of being non-semantic by default (consistent with the lean-default of [0009](/docs/decisions/adr-0009)).
+  of being non-semantic by default (consistent with the lean-default of [0009](/en/docs/decisions/adr-0009)).
 - README "honest gaps" must clearly mark every experimental module.
 - Defines the promotion criterion: a module enters core when it has a real CI-tested
-  path and (for retrieval) backs the benchmark in [0006](/docs/decisions/adr-0006).
+  path and (for retrieval) backs the benchmark in [0006](/en/docs/decisions/adr-0006).

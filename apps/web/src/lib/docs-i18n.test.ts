@@ -102,7 +102,7 @@ function pageRoute(path: string): string {
   let slug = relative(docsRoot, path).replaceAll('\\', '/').slice(0, -suffix.length);
   if (slug === 'index') slug = '';
   else if (slug.endsWith('/index')) slug = slug.slice(0, -'/index'.length);
-  const prefix = locale === 'en' ? '/docs' : `/${locale}/docs`;
+  const prefix = locale === 'zh' ? '/docs' : `/${locale}/docs`;
   return slug.length === 0 ? prefix : `${prefix}/${slug}`;
 }
 
@@ -161,8 +161,11 @@ describe('localized documentation content', () => {
         expect(headingLevels(content)).toEqual(headingLevels(english));
         expect(content).not.toBe(english);
         expect(content.length).toBeGreaterThan(english.length * 0.3);
-        expect(content).not.toMatch(/(?:href=["']|\]\()\/docs(?:\/|["')])/);
+        if (locale === 'zh') expect(content).not.toContain('/zh/docs');
+        else expect(content).not.toMatch(/(?:href=["']|\]\()\/docs(?:\/|["')])/);
       }
+
+      expect(english).not.toMatch(/(?:href=["']|\]\()\/docs(?:\/|["')])/);
     }
   });
 

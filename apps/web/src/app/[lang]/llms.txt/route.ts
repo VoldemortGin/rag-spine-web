@@ -1,4 +1,4 @@
-import { isTranslatedLocale, translatedLocales } from '@/lib/i18n';
+import { isLocale, locales } from '@/lib/i18n';
 import { source } from '@/lib/source';
 import { llms } from 'fumadocs-core/source';
 import { notFound } from 'next/navigation';
@@ -8,10 +8,10 @@ export const dynamicParams = false;
 
 export async function GET(_request: Request, { params }: RouteContext<'/[lang]/llms.txt'>) {
   const { lang } = await params;
-  if (!isTranslatedLocale(lang)) notFound();
+  if (!isLocale(lang)) notFound();
   return new Response(llms(source).index(lang));
 }
 
 export function generateStaticParams() {
-  return translatedLocales.map((lang) => ({ lang }));
+  return locales.map((lang) => ({ lang }));
 }

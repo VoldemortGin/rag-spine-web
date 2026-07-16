@@ -7,17 +7,17 @@ description: Externalize prompts into packaged, locale-keyed template files behi
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Part of the [0002](/docs/decisions/adr-0002) product direction.
+Part of the [0002](/en/docs/decisions/adr-0002) product direction.
 
 ## Context
 
 Prompts should move out of inline code. A prompt is three-dimensional: a **template**
-(with placeholders) × a **locale** ([0007](/docs/decisions/adr-0007))
-× **`DomainProfile` values** ([0004](/docs/decisions/adr-0004)), and the
+(with placeholders) × a **locale** ([0007](/en/docs/decisions/adr-0007))
+× **`DomainProfile` values** ([0004](/en/docs/decisions/adr-0004)), and the
 "no hardcoded company/domain" invariant means templates must be filled at runtime, never
 literal. The originally proposed location — a repo-root `prompts/` folder — does **not
 ship in the wheel** (`packages=['ragspine']`), so `pip install` users (the audience in
-[0003](/docs/decisions/adr-0003)) would not get it.
+[0003](/en/docs/decisions/adr-0003)) would not get it.
 
 ## Decision
 
@@ -39,6 +39,6 @@ domain module.
 ## Consequences
 
 - Prompts ship with the wheel and are overridable like any other backend.
-- A locale pack ([0007](/docs/decisions/adr-0007)) is partly
+- A locale pack ([0007](/en/docs/decisions/adr-0007)) is partly
   "drop a new `<locale>/` prompt tree."
 - Translators edit flat templates without touching code; diffs stay reviewable.

@@ -7,15 +7,15 @@ description: Extend the existing ragspine service with three Dify endpoints of i
 
 > Immutable record. Exempt from drift tracking (no `covers`). Supersede, don't edit.
 
-Builds on [0013](/docs/decisions/adr-0013) (the Dify YAML → pure-Python compiler + static
-optimization advisor). Relates to [0009](/docs/decisions/adr-0009) (no framework lock-in +
-permissive-license-only), [0010](/docs/decisions/adr-0010) (security decoupling), and the
+Builds on [0013](/en/docs/decisions/adr-0013) (the Dify YAML → pure-Python compiler + static
+optimization advisor). Relates to [0009](/en/docs/decisions/adr-0009) (no framework lock-in +
+permissive-license-only), [0010](/en/docs/decisions/adr-0010) (security decoupling), and the
 spine-family boundaries ADR (family repo, `docs/adr/0001`).
 Shipped in **rag-spine 0.5.0**.
 
 ## Context
 
-[ADR 0013](/docs/decisions/adr-0013) compiles a Dify `.yml` into readable pure Python
+[ADR 0013](/en/docs/decisions/adr-0013) compiles a Dify `.yml` into readable pure Python
 (`compile_dify_yaml` / `analyze`). The next step is to put that capability **behind a
 service**, so consumers can reach it over HTTP: get optimization suggestions, get the
 readable code, and even **run** the compiled artifact directly. Running code someone else

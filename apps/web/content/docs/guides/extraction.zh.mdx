@@ -115,7 +115,7 @@ description: 文档 → 冻结的 StyledGrid IR。感知样式与颜色的 xlsx/
 
 - **事实抽取器**（`xlsx_extractor`、`pptx_extractor`）针对已知 schema
   （如五年汇总表）直接产出
-  [`Fact`](/zh/docs/guides/storage#fact-dataclass) 对象——零幻觉、零 LLM。
+  [`Fact`](/docs/guides/storage#fact-dataclass) 对象——零幻觉、零 LLM。
 - **样式抽取器**（`*_styled_extractor`、`pdf_*`）为通用摄取路径产出
   `StyledGrid` IR，保留颜色与样式。
 
@@ -270,7 +270,7 @@ Keynote / Impress 导出时设置 `ask_for_pptx=True`（以便调用方转而索
 不触碰摄取调用点的情况下换掉解析器，且该路径可用假实现离线测试。
 
 <Cards>
-  <Card title="GridExtractor" href="/zh/docs/concepts/provenance">
+  <Card title="GridExtractor" href="/docs/concepts/provenance">
     `pdf_digital_extractor`。具有 `version: str` + `extract_grids(path)`。默认实现
     `DoclingGridExtractor`，`version = "pdf_digital@1"` ——即写入每个
     事实 `extractor_version` 的值。数字版解析器的输出变化时请递增它。
@@ -299,8 +299,8 @@ Keynote / Impress 导出时设置 `ask_for_pptx=True`（以便调用方转而索
 ## 相关阅读
 
 <Cards>
-  <Card title="摄取指南" href="/zh/docs/guides/ingestion" />
-  <Card title="存储指南——Fact dataclass" href="/zh/docs/guides/storage" />
-  <Card title="StyledGrid IR" href="/zh/docs/guides/extraction#styledgrid-ir" />
-  <Card title="概念：溯源与链路" href="/zh/docs/concepts/provenance" />
+  <Card title="摄取指南" href="/docs/guides/ingestion" />
+  <Card title="存储指南——Fact dataclass" href="/docs/guides/storage" />
+  <Card title="StyledGrid IR" href="/docs/guides/extraction#styledgrid-ir" />
+  <Card title="概念：溯源与链路" href="/docs/concepts/provenance" />
 </Cards>

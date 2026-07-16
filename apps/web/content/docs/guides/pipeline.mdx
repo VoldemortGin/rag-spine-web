@@ -15,7 +15,7 @@ describes.
 
 <Callout type="info">
   This engine-topology model is distinct from [workflow preview
-  v1](/docs/guides/workflows#preview-protocol-v1). `PipelineGraph` describes assembled RAGSpine
+  v1](/en/docs/guides/workflows#preview-protocol-v1). `PipelineGraph` describes assembled RAGSpine
   components and exports Mermaid/DOT/JSON. A workflow preview describes one Dify-compatible workflow
   with redacted nodes, edges, and geometry. Both are read-only; neither is an execution format.
 </Callout>
@@ -93,7 +93,7 @@ its component is actually wired.
 </Cards>
 
 <Callout type="info">
-  `HybridRetriever.topology()` (in the [retrieval](/docs/guides/retrieval) domain) is a thin
+  `HybridRetriever.topology()` (in the [retrieval](/en/docs/guides/retrieval) domain) is a thin
   delegator into `retriever_topology` — so a configured retriever can render itself without the
   pipeline package importing the orchestrator.
 </Callout>
@@ -140,27 +140,27 @@ print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
 <Cards>
   <Card
     title="Agent"
-    href="/docs/guides/agent"
+    href="/en/docs/guides/agent"
     description="The request flow agent_topology renders."
   />
   <Card
     title="Retrieval"
-    href="/docs/guides/retrieval"
+    href="/en/docs/guides/retrieval"
     description="The HybridRetriever whose .topology() delegates here."
   />
   <Card
     title="Service"
-    href="/docs/guides/service"
+    href="/en/docs/guides/service"
     description="The FastAPI app service_topology introspects."
   />
   <Card
     title="CLI & scripts"
-    href="/docs/getting-started/cli-and-scripts"
+    href="/en/docs/getting-started/cli-and-scripts"
     description="topology.py and the other repo-root scripts."
   />
   <Card
     title="Workflow preview"
-    href="/docs/guides/workflows#preview-protocol-v1"
+    href="/en/docs/guides/workflows#preview-protocol-v1"
     description="The versioned, redacted graph projection rendered by the template website."
   />
 </Cards>

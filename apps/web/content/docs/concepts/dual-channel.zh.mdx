@@ -17,7 +17,7 @@ RAGSpine 用两种根本不同的机制回答两类根本不同的问题——
 <Callout type="info">
   两条通道绝不会模糊成一条"问模型"的路径。结构化通道是唯一
   被允许产出数值事实的东西，而且它不信任模型文字——参见
-  [防编造机制](/zh/docs/concepts/anti-fabrication)。
+  [防编造机制](/docs/concepts/anti-fabrication)。
 </Callout>
 
 ## Agent 如何路由
@@ -67,7 +67,7 @@ RAGSpine 用两种根本不同的机制回答两类根本不同的问题——
 - 缺失**实体/期间** → _带明示假设作答_（默认为本方
   集团/最近的完整财年，暴露该假设，并提供一键收窄）。
 - **超出作用域/竞争对手实体** → 在任何通道运行之前拒答（参见
-  [RESTRICTED 隔离](/zh/docs/concepts/restricted-isolation)与确定性
+  [RESTRICTED 隔离](/docs/concepts/restricted-isolation)与确定性
   安全门）。
 
 ## 结构化通道：`found` / `not_found` / `unrecognized` 三态

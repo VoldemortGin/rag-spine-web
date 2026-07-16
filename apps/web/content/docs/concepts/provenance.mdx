@@ -80,10 +80,10 @@ print(result.sources)  # [{'doc': 'ACME_FY2024_Review.pptx', 'locator': 'slide=2
   a model that "forgets" to cite cannot strip provenance off the answer.
 - **The service edge** — the `/v1/ask` mapping must carry `sources` through unchanged; a
   FAQ short-circuit hit carries its own `source` too (see
-  [FAQ short-circuit](/docs/concepts/faq-short-circuit)).
+  [FAQ short-circuit](/en/docs/concepts/faq-short-circuit)).
 
 <Callout type="warn">
   The privacy-aware trace records lineage **identifiers** (chunk_ids, controlled codes) but never
   the fact value or chunk text — provenance is about *where*, not about re-exposing the sensitive
-  *what*. See [RESTRICTED isolation](/docs/concepts/restricted-isolation).
+  *what*. See [RESTRICTED isolation](/en/docs/concepts/restricted-isolation).
 </Callout>

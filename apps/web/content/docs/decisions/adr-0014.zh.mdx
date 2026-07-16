@@ -7,15 +7,15 @@ description: 在现有 ragspine 服务上扩展三个信任级别递增的 Dify 
 
 > 不可变记录。豁免漂移追踪（无 `covers`）。只可替代（supersede），不可编辑。
 
-基于 [0013](/zh/docs/decisions/adr-0013)（Dify YAML → 纯 Python 编译器 + 静态
-优化顾问）。关联 [0009](/zh/docs/decisions/adr-0009)（不绑定框架 +
-仅限宽松许可证）、[0010](/zh/docs/decisions/adr-0010)（安全解耦），以及
+基于 [0013](/docs/decisions/adr-0013)（Dify YAML → 纯 Python 编译器 + 静态
+优化顾问）。关联 [0009](/docs/decisions/adr-0009)（不绑定框架 +
+仅限宽松许可证）、[0010](/docs/decisions/adr-0010)（安全解耦），以及
 spine 家族边界 ADR（家族仓库，`docs/adr/0001`）。
 已随 **rag-spine 0.5.0** 发布。
 
 ## 背景
 
-[ADR 0013](/zh/docs/decisions/adr-0013) 将 Dify `.yml` 编译为可读的纯 Python
+[ADR 0013](/docs/decisions/adr-0013) 将 Dify `.yml` 编译为可读的纯 Python
 代码（`compile_dify_yaml` / `analyze`）。下一步是把这项能力放到**服务背后**，
 让消费者可以通过 HTTP 访问：获取优化建议、获取可读代码，甚至直接**运行**
 编译产物。运行他人提交的代码是一个**信任边界**问题——设计必须在

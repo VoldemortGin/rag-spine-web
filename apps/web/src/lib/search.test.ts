@@ -7,10 +7,20 @@ import { i18n } from './i18n';
 
 const indexes: IndexWithLocale[] = [
   {
+    locale: 'en',
+    id: '/en/docs/workflows',
+    title: 'Workflow guide',
+    url: '/en/docs/workflows',
+    structuredData: {
+      headings: [],
+      contents: [{ content: 'Create and preview workflows', heading: undefined }],
+    },
+  },
+  {
     locale: 'zh',
-    id: '/zh/docs/workflows',
+    id: '/docs/workflows',
     title: '工作流程指南',
-    url: '/zh/docs/workflows',
+    url: '/docs/workflows',
     structuredData: {
       headings: [],
       contents: [{ content: '创建并预览工作流程', heading: undefined }],
@@ -29,8 +39,9 @@ const indexes: IndexWithLocale[] = [
 ];
 
 const searchCases = [
-  ['zh', '工作流程', '/zh/docs/workflows'],
-  ['zh', '流程', '/zh/docs/workflows'],
+  ['en', 'workflows', '/en/docs/workflows'],
+  ['zh', '工作流程', '/docs/workflows'],
+  ['zh', '流程', '/docs/workflows'],
   ['ja', 'ワークフロー', '/ja/docs/workflows'],
 ] as const;
 

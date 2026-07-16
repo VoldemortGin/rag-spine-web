@@ -7,11 +7,11 @@ description: 将 LLMProvider Protocol 移入家族共享核心（corespine），
 
 > 不可变记录。豁免漂移追踪（无 `covers`）。只可被取代，不可编辑。
 
-关联 [0009](/zh/docs/decisions/adr-0009)（框架/依赖策略）与 [0011](/zh/docs/decisions/adr-0011)（采纳 python-project-standard）。已随 **rag-spine 0.3.0** 发布。
+关联 [0009](/docs/decisions/adr-0009)（框架/依赖策略）与 [0011](/docs/decisions/adr-0011)（采纳 python-project-standard）。已随 **rag-spine 0.3.0** 发布。
 
 ## 背景
 
-RAGSpine 一直把每个外部 SDK 隔离在带类型的 `Protocol` 之后，拥有零 SDK 的离线核心和默认 `MockProvider`（ADR [0005](/zh/docs/decisions/adr-0005) / [0009](/zh/docs/decisions/adr-0009)）。`LLMProvider` 这条缝原先定义在 ragspine **内部**（`agent/llm_provider.py`），带有一个 ragspine 专属的方法：
+RAGSpine 一直把每个外部 SDK 隔离在带类型的 `Protocol` 之后，拥有零 SDK 的离线核心和默认 `MockProvider`（ADR [0005](/docs/decisions/adr-0005) / [0009](/docs/decisions/adr-0009)）。`LLMProvider` 这条缝原先定义在 ragspine **内部**（`agent/llm_provider.py`），带有一个 ragspine 专属的方法：
 
 ```python
 def create_message(*, system, messages, tools) -> ProviderResponse: ...
@@ -45,7 +45,7 @@ def create_message(*, system, messages, tools) -> ProviderResponse: ...
 
 - **对自定义 provider 是破坏性变更。** 任何实现了 `create_message(*, system,
   messages, tools) -> ProviderResponse` 的人都必须迁移到 `chat(messages, *, tools=None) ->
-  ChatCompletion`（从 `corespine` import 这些 dataclass，或经由 `ragspine.agent.llm_provider` 的再导出）。[扩展点](/zh/docs/reference/extension-points#llmprovider)指南提供了新形态下完整的 OpenAI 示例。
+  ChatCompletion`（从 `corespine` import 这些 dataclass，或经由 `ragspine.agent.llm_provider` 的再导出）。[扩展点](/docs/reference/extension-points#llmprovider)指南提供了新形态下完整的 OpenAI 示例。
 - ragspine 恰好新增一个非可选依赖（`corespine>=0.1.0`，其自身 `dependencies` 为空）。离线优先、零重型 SDK 的默认路径得以保留。
 - provider 契约现在由 Spine 家族共享，为一个包编写的 provider 对所有包都可用。
 - `RAGSPINE_TOKENS_PER_MINUTE` 是唯一新增的配置面；其余全部是内部变更。
