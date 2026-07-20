@@ -54,6 +54,29 @@ There is also a document-level convenience:
 text = doc.get_page_text(0, "text", sort=True)
 ```
 
+## Export a complete HTML document
+
+`Page.get_text("html")` returns the reconstruction for one page. To combine
+every page into a complete HTML5 document that can be opened directly in a
+browser, use the document-level API:
+
+```python
+html = doc.to_html()
+
+# Writes the same complete document as UTF-8; pathlib.Path also works.
+doc.save_html("document.html")
+```
+
+The `<title>` uses the PDF metadata title when present, then falls back to the
+input filename, and finally to `PDF document`. Title text is safely escaped.
+Page fragments are preserved in page order inside the document body.
+
+These APIs serve different scopes:
+
+- `Page.get_text("html")` returns one page's HTML fragment.
+- `Document.to_html()` returns a complete HTML5 document containing all pages.
+- `Table.to_html()` returns only one detected table as an HTML `<table>`.
+
 ## Searching
 
 `Page.search_for(needle, *, hit_max=0, quads=False, clip=None, flags=None, textpage=None)`
