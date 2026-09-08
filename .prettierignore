@@ -13,3 +13,7 @@ apps/*/content/**/*.mdx
 # values are checked by tests; formatting them would invalidate catalog integrity.
 apps/web/public/workflows/*.yml
 apps/web/src/data/workflow-catalog.json
+
+# Family-wide doc synced byte-for-byte from the family root (`make family-doc-sync`);
+# every repo must hold an identical copy, so the formatter must not touch it.
+docs/spine-family.md

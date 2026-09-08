@@ -1,5 +1,7 @@
 # CLAUDE.md — rag-spine-web
 
+> 家族关系与依赖：先读 [`docs/spine-family.md`](docs/spine-family.md)（每仓副本相同，真源在家族根目录）。
+
 Routing table for the **RAGSpine documentation website** (https://rag-spine.org).
 A pnpm + Turborepo monorepo following the frontend project standard.
 
@@ -59,3 +61,5 @@ Run it after every change; fix until green. `lint` runs `eslint --max-warnings 0
 - `apps/web/CLAUDE.md` — the web app's local contract; the sibling docs apps follow the
   same shape.
 - `docs/adr/` — numbered, immutable decision records.
+- `docs/spine-family.md` — the Spine family members / layering / dependency map
+  (identical copy in every family repo; source of truth in the family root).
