@@ -13,7 +13,7 @@ the supported subset via the opt-in shim (`pdfspine.install_fitz_shim()`, or
 `import pdfspine` package directly.
 
 <Callout type="warn" title="Pre-1.0 — verify before you trust it">
-pdfspine is **pre-1.0** (version `0.4.0`, published on PyPI —
+pdfspine is **pre-1.0** (version `0.8.0`, published on PyPI —
 `pip install pdfspine`). A large surface of the API is implemented and tested
 (see the [PyMuPDF coverage](#status) below), but real-corpus accuracy
 validation against PyMuPDF is **still in progress**. APIs may change before 1.0.
@@ -45,12 +45,21 @@ pdfspine exists to be the **permissively-licensed, drop-in-shaped** alternative:
 - **Clean-room.** An independent reimplementation: no code, tests, or fixtures
   are derived from MuPDF / PyMuPDF or any AGPL source.
 
+The versioned reference for this update is [pdfspine 0.8.0](https://pypi.org/project/pdfspine/0.8.0/),
+including its [compatibility matrix](https://github.com/VoldemortGin/pdfspine/blob/f1f6ab4208876b0ba867edd76cc4e5da7ad8add2/COMPAT.toml). Later `main` features are not part of this release baseline.
+
 ## Feature highlights
 
 - **Open** PDFs from a path or in-memory bytes, including encrypted documents
   (RC4 / AES-128 / AES-256), with `authenticate()` and permission flags.
 - **Text extraction** in every PyMuPDF variant: `text`, `words`, `blocks`,
   `dict`, `rawdict`, `json`, `html`, `xhtml`, `xml`.
+- **PDF → Markdown and layout text** via `to_markdown()`, `save_markdown()` and
+  `get_text("layout")`; see [text extraction](/docs/guide/text-extraction).
+- **Optional ONNX layout and tables**, with separately supplied weights; see
+  [layout and tables](/docs/guide/layout-and-tables).
+- **Optional-content layers** affect extraction and rendering; see
+  [optional content](/docs/guide/optional-content).
 - **Search** with `search_for`, returning `Rect` or `Quad` hit geometry.
 - **Table detection** (`find_tables`) with `to_markdown()` / `to_html()` export.
 - **Rendering** any page to a `Pixmap` via `get_pixmap` (text, vector fills,
@@ -69,10 +78,10 @@ The current baseline targets **PyMuPDF 1.24.x**. The machine-readable
 
 | Disposition | Count | Meaning |
 |---|---:|---|
-| Implemented | 682 | Present and does not raise on use |
-| Deferred | 21 | Known, planned for a later milestone |
+| Implemented | 694 | Present and does not raise on use |
+| Deferred | 9 | Known, planned for a later milestone |
 | Out-of-scope | 66 | Intentionally never in v1 |
-| **Total baseline** | **769** | **88.7% implemented** |
+| **Total baseline** | **769** | **90.2% implemented** |
 
 Anything not yet implemented raises a typed, catchable
 `PdfUnsupportedError` (never a bare `AttributeError`), so you always get a clear

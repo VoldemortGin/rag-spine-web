@@ -1,0 +1,54 @@
+---
+title: Layout and vision tables
+description: Optional ONNX layout detection and table structure in the published pdfspine 0.8.0 release.
+---
+
+pdfspine 0.8.0 offers an opt-in ONNX backend for table regions and whole-page layout.
+The default `find_tables()` still uses `strategy="lines"`. Choosing `strategy="vision"`
+without a backend still selects TATR; request `backend="onnx"` explicitly.
+
+## Runtime and model files
+
+```bash
+pip install "pdfspine[onnx]==0.8.0"
+```
+
+The extra installs ONNX Runtime, NumPy and Pillow, without PyTorch. Weights are
+**not bundled**. Supply PP-DocLayout and SLANet-plus files using
+`PDFSPINE_ONNX_MODELS` or explicit paths. Missing runtime/weights raise
+`pdfspine.PdfUnsupportedError` with setup guidance. These are not the OCR weights.
+See the [release model setup](https://github.com/VoldemortGin/pdfspine/blob/f1f6ab4208876b0ba867edd76cc4e5da7ad8add2/python/pdfspine/_onnx.py)
+for model choices and filenames; the examples below assume files already exist.
+
+```python
+options = {
+    "layout_model": "/models/layout.onnx",
+    "table_model": "/models/table.onnx",
+}
+finder = page.find_tables(strategy="vision", backend="onnx", vision_options=options)
+for table in finder:
+    assert table.source == "onnx"
+    print(table.to_html())  # preserves row/column spans
+
+regions = page.find_layout(**options)
+for region in regions:
+    print(region.bbox, region.label, region.score, region.raw_label)
+html = page.get_layout_html(**options)
+```
+
+`pdfspine.OnnxOptions` documents the supported settings; `pdfspine.LayoutBlock`
+is the returned region value type. The default detector is PP-DocLayoutV3;
+`layout_variant="pp_doclayout_l"` selects the optional faster L variant with its
+matching weights. `providers="auto"` chooses CUDA when available, otherwise CPU;
+it does not select CoreML.
+
+## Geometry and text have different sources
+
+Models choose regions and cell geometry. Cell and paragraph text always comes
+from the native PDF text layer; no OCR is performed. Image-only scans therefore
+need a separate OCR workflow. `get_layout_html()` emits semantic headings,
+paragraphs, tables and figure placeholders, with unclaimed text retained in a
+`pre` element. This differs from the reconstruction returned by `get_text("html")`.
+
+The 0.8.0 backend is opt-in and has no ground-truth corpus accuracy claim.
+Its detector order and labels are predictions; validate them on your own files.

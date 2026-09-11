@@ -1,0 +1,58 @@
+---
+title: Optional-content layers
+description: Read and write optional-content groups, configurations and visibility in pdfspine 0.8.0.
+---
+
+Optional-content groups (OCGs) control visibility in both rendering and native text
+extraction. This page describes the published 0.8.0 behavior.
+
+## Attach content to a group
+
+```python
+import pdfspine
+
+doc = pdfspine.open()
+page = doc.new_page()
+layer = doc.add_ocg("Notes")
+page.insert_text((40, 60), "Layered text", oc=layer)
+print(doc.get_ocgs())
+print(page.get_text())
+```
+
+The `oc=` argument also applies to image/page placement, shape text and vector
+writers. Text/vectors use marked content; image/form XObjects carry `/OC`.
+`get_oc(xref)` reads an image/form association. Use an existing OCG or OCMD xref;
+invalid values fail without writing the content.
+
+## Default, alternate and UI configurations
+
+`get_layer()` / `set_layer()` access the default configuration. `get_layers()` lists
+alternate configurations, excluding the default `/D` entry.
+
+```python
+doc.add_layer("Only notes", on=[layer])
+config = doc.get_layers()[0]["number"]
+doc.switch_layer(config)  # in-memory view for extraction/rendering
+for row in doc.layer_ui_configs():
+    print(row)
+```
+
+`set_layer_ui_config(number, action=0)` turns a selectable row on; action `1`
+toggles and `2` clears it. It also accepts row text. Label/locked rows are ignored;
+radio siblings are mutually exclusive. These overrides are in-memory only.
+
+`switch_layer(config, as_default=True)` instead rewrites `/D` from the selected
+configuration and removes `/Configs`; save the document to persist that change.
+Use this deliberately if you want to replace the default rather than just inspect a view.
+
+## Membership dictionaries
+
+`set_ocmd(xref=0, ocgs=[layer], policy="AnyOn")` creates an optional-content
+membership dictionary; supplying an existing `xref` fully replaces it.
+`get_ocmd(xref)` returns `xref`, `ocgs`, `policy` and `ve`.
+Policies are `AnyOn`, `AllOn`, `AnyOff`, `AllOff`; a supplied visibility expression
+`ve` takes precedence. Hidden marked content and hidden image/form XObjects emit
+no text or drawing operations in the selected view.
+
+See the [0.8.0 layer API source](https://github.com/VoldemortGin/pdfspine/blob/f1f6ab4208876b0ba867edd76cc4e5da7ad8add2/python/pdfspine/document.py)
+for full signatures. Later changes on `main` are outside this release description.

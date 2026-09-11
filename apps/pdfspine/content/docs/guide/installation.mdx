@@ -10,9 +10,8 @@ output on your own documents before relying on it in production.
 
 ## Requirements
 
-- **Python ≥ 3.11.** The 3.11 floor is required by the `Pixmap` zero-copy buffer
-  protocol (the stable-ABI buffer slots landed in CPython 3.11). The wheel is an
-  `abi3` wheel, so a single build covers 3.11 and newer.
+- **Python ≥ 3.12** for the published 0.8.0 package. Use a wheel matching your
+  interpreter and platform; the earlier 3.11 installation floor no longer applies.
 - **Rust** (pinned by `rust-toolchain.toml`) and **maturin ≥ 1.12** — only needed
   to build from source.
 - [uv](https://docs.astral.sh/uv/) is recommended for managing the virtualenv,
@@ -23,7 +22,7 @@ output on your own documents before relying on it in production.
 pdfspine is **on PyPI**:
 
 ```bash
-pip install pdfspine
+pip install "pdfspine==0.8.0"
 ```
 
 This provides the `pdfspine` (native) package from one wheel, plus the opt-in
@@ -33,17 +32,32 @@ alongside a real PyMuPDF; call `pdfspine.install_fitz_shim()` to register them.
 OCR works out of the box: the PP-OCRv5 weights ship in the shared
 `ocrspine-models` data package, pulled in automatically as a runtime dependency.
 
-## Build from source (alternative)
-
-Clone the repository and build the extension in place:
+## Optional ONNX layout and tables
 
 ```bash
+pip install "pdfspine[onnx]==0.8.0"
+```
+
+This installs the runtime dependencies, not layout/table weights. Supply the weights
+through `PDFSPINE_ONNX_MODELS` or explicit model paths; see
+[layout and tables](/docs/guide/layout-and-tables). These weights are separate from
+the shared OCR model package. Missing runtime or model files raise `PdfUnsupportedError`.
+
+## Build from source (alternative)
+
+Clone the repository and check out the released source before building:
+
+```bash
+git clone https://github.com/VoldemortGin/pdfspine.git
+cd pdfspine
+git checkout f1f6ab4208876b0ba867edd76cc4e5da7ad8add2
+
 # Create an isolated environment.
-uv venv .venv
+uv venv --python 3.12 .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
 # Build the Rust extension and install it into the environment.
-maturin develop --release
+uv tool run --from "maturin>=1.12,<2" maturin develop --release --locked --uv
 ```
 
 Then smoke-test the import:
@@ -55,8 +69,9 @@ python -c "import pdfspine; print(pdfspine.__version__)"
 To build a redistributable wheel instead of installing in place:
 
 ```bash
-maturin build --release            # wheel lands in target/wheels/
-pip install target/wheels/pdfspine-*.whl
+uv tool run --from "maturin>=1.12,<2" maturin build --release --locked
+# wheel lands in target/wheels/
+uv pip install target/wheels/pdfspine-*.whl
 ```
 
 ## Verify

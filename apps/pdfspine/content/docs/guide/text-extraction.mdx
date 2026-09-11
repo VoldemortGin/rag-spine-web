@@ -13,6 +13,7 @@ returns a different native object depending on `option`:
 
 | `option` | Returns | Description |
 |---|---|---|
+| `"layout"` | `str` | Visual lines with column spacing (pdfspine extension, 0.8.0). |
 | `"text"` | `str` | Plain text in reading order (the default). |
 | `"words"` | `list[tuple]` | One tuple per word, with its bounding box. |
 | `"blocks"` | `list[tuple]` | One tuple per text block, with its bounding box. |
@@ -53,6 +54,27 @@ There is also a document-level convenience:
 ```python
 text = doc.get_page_text(0, "text", sort=True)
 ```
+
+## Layout text and PDF → Markdown (0.8.0)
+
+These are pdfspine extensions, separate from the PyMuPDF compatibility surface:
+
+```python
+layout = page.get_text("layout")
+layout = page.get_text_layout(y_tolerance=3.0, char_width=None)
+markdown = page.to_markdown()
+markdown = doc.to_markdown(pages=[0])  # zero-based selection, in the given order
+# Writes UTF-8 Markdown for all pages:
+doc.save_markdown("document.md")
+```
+
+Layout output groups words around a line anchor and pads a character grid with
+spaces. `char_width=None` uses the median glyph width. It preserves visual spacing,
+not a semantic table model. Markdown uses font-size heading heuristics, lists,
+emphasis and detected GFM tables; optional `images=True` adds placeholders.
+It consumes native PDF text, not OCR. Inspect output for your documents.
+This is the reverse direction of [`markdown_to_pdf`](/docs/guide/document-generation).
+For model-assisted regions and semantic HTML, see [layout and tables](/docs/guide/layout-and-tables).
 
 ## Export a complete HTML document
 
@@ -135,7 +157,8 @@ for table in finder:                      # also: finder.tables, finder[i]
 ### Strategy
 
 `find_tables` accepts a `strategy` of `"lines"` (default), `"lines_strict"`, or
-`"text"`, plus tuning knobs:
+`"text"`, plus tuning knobs. The opt-in `"vision"` strategy is described in
+[layout and tables](/docs/guide/layout-and-tables):
 
 ```python
 finder = page.find_tables(

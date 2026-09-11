@@ -66,6 +66,8 @@ Every argument after the first is keyword-only.
 | `page_width` | float (pt) | 595.32 (A4) | Page width. |
 | `page_height` | float (pt) | 841.92 (A4) | Page height. |
 | `margins` | float or 4-tuple | 72 | All four sides, or `(top, right, bottom, left)`. |
+| `links` | bool | `True` | Write clickable URI/internal-link annotations (0.8.0). |
+| `toc` | bool | `True` | Write heading hierarchy to the PDF outline (0.8.0). |
 | `body_font_size` | float (pt) | 11 | Body size; headings scale from it. |
 
 Images (`![alt](src)`) load from local paths and `data:` URIs only — remote URLs
@@ -76,6 +78,19 @@ are rejected and **no network access ever happens**.
 (add pages, insert text, set metadata) before saving, or get the bytes directly
 with `doc.tobytes()`.
 </Callout>
+
+### Links and outline (0.8.0)
+
+```python
+doc = pdfspine.markdown_to_pdf("# Title\n\n[Website](https://example.com)")
+print(doc.get_toc())
+print(doc[0].get_links())
+```
+
+Both passes are enabled by default. Internal heading links resolve to matching
+heading anchors; unresolved anchors get no annotation. Heading level jumps are
+normalized for the outline. Use `links=False, toc=False` to disable both passes.
+This does not download remote images or follow links.
 
 ## Images → PDF
 
